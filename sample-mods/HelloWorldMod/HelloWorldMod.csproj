@@ -7,8 +7,12 @@
     <AssemblyName>HelloWorldMod</AssemblyName>
     <RootNamespace>HelloWorldMod</RootNamespace>
 
-    <!-- Adjust these two paths for your install. -->
-    <GameDir>C:\Program Files (x86)\Steam\steamapps\common\Pratfall</GameDir>
+    <!-- GameDir defaults to a standard Steam install on the system drive. Override
+         on the cmdline (-p:GameDir=...) or set the env var if your library lives
+         on another drive (e.g. D:\SteamLibrary\steamapps\common\Pratfall). Per
+         123DMWM in #mod-dev: $(MSBuildProgramFiles32) resolves to the right
+         x86 Program Files regardless of the user's locale or 32/64-bit MSBuild. -->
+    <GameDir Condition="'$(GameDir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Pratfall</GameDir>
     <UserModsDir>$(APPDATA)\Pratfall\mods</UserModsDir>
 
     <ModId>HelloWorldMod</ModId>

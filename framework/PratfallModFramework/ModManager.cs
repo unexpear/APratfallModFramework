@@ -16,6 +16,10 @@ public class ModManager
     private readonly Dictionary<string, string> _modDllPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _modSessionAvailable = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _modsWithMountedPck = new(StringComparer.OrdinalIgnoreCase);
+    // Most-recent manifest snapshot per peer, keyed by user id. Used by the compatibility
+    // checker to evaluate the UNION of local + remote mod sets.
+    private readonly Dictionary<string, ModPeerSnapshot> _peerSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private ModCompatibilityChecker.Report? _latestCompatibilityReport;
     private readonly Dictionary<string, ActiveVoteRequest> _activeVoteRequests = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _voteKeysByVoteId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<PendingVotePrompt> _voteQueue = new();
@@ -193,6 +197,7 @@ public class ModManager
         if (broadcast)
             _networkLayer.BroadcastManifest();
 
+        RefreshCompatibilityReport();
         return true;
     }
 
@@ -221,6 +226,7 @@ public class ModManager
         GD.Print($"[ModFramework] Disabled mod {id}");
         if (broadcast)
             _networkLayer.BroadcastManifest();
+        RefreshCompatibilityReport();
     }
 
     private void MountModPckIfAny(ModManifest manifest)
@@ -327,18 +333,7 @@ public class ModManager
         if (changed)
             _networkLayer.BroadcastManifest();
 
-        // After applying state, run a local compatibility check across the enabled set.
-        // We log warnings rather than refusing — the user toggled these on deliberately.
-        try
-        {
-            var enabledIds = _modEnabled.Where(kv => kv.Value).Select(kv => kv.Key).ToList();
-            var report = ModCompatibilityChecker.Check(_localMods, enabledIds, _loader.SnapshotLoadedAssemblies());
-            ModCompatibilityChecker.LogReport(report);
-        }
-        catch (Exception ex)
-        {
-            GD.PrintErr($"[ModFramework] Compatibility check failed: {ex.Message}");
-        }
+        RefreshCompatibilityReport();
     }
 
     private void UnloadAllMods()
@@ -366,12 +361,58 @@ public class ModManager
 
     private void OnPeerManifestReceived(ModPeerSnapshot peerSnapshot)
     {
+        // Track every peer's view, host or not, so the compatibility checker can reason
+        // over the full lobby's mod set on either side. Vote queueing still only happens
+        // on the host.
+        peerSnapshot.Normalize();
+        if (!string.IsNullOrWhiteSpace(peerSnapshot.UserId))
+            _peerSnapshots[peerSnapshot.UserId] = peerSnapshot;
+
+        RefreshCompatibilityReport();
+
         if (!_networkLayer.IsLocalHost)
             return;
 
         foreach (var request in BuildVoteRequestsForPeer(peerSnapshot))
             QueueVoteRequest(request, isHostLocalPrompt: true);
     }
+
+    // Recomputes the local-AND-remote compatibility picture over the union of local
+    // installed mods + every known peer's installed manifests, with the union of
+    // enabled-id sets. Caches the latest report so vote prompts and UI can read it.
+    // Cheap enough to run on every state change.
+    private void RefreshCompatibilityReport()
+    {
+        try
+        {
+            var unionInstalledById = new Dictionary<string, ModManifest>(StringComparer.OrdinalIgnoreCase);
+            foreach (var m in _localMods)
+                if (!string.IsNullOrWhiteSpace(m.Id)) unionInstalledById[m.Id] = m;
+            foreach (var peer in _peerSnapshots.Values)
+                foreach (var pm in peer.InstalledManifests)
+                    if (!string.IsNullOrWhiteSpace(pm.Id) && !unionInstalledById.ContainsKey(pm.Id))
+                        unionInstalledById[pm.Id] = pm;
+
+            var unionEnabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (id, on) in _modEnabled) if (on) unionEnabled.Add(id);
+            foreach (var peer in _peerSnapshots.Values)
+                foreach (var id in peer.EnabledModIds) unionEnabled.Add(id);
+
+            _latestCompatibilityReport = ModCompatibilityChecker.Check(
+                unionInstalledById.Values.ToList(),
+                unionEnabled,
+                _loader.SnapshotLoadedAssemblies());
+
+            if (_latestCompatibilityReport.HasIssues)
+                ModCompatibilityChecker.LogReport(_latestCompatibilityReport);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] RefreshCompatibilityReport failed: {ex.Message}");
+        }
+    }
+
+    public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
 
     private void OnVoteRequestReceived(string senderUserId, ModVoteRequest request)
     {
@@ -819,11 +860,35 @@ public class ModManager
 
         lines.Add($"Sync mode: {manifest.GetEffectiveNetworkMode().Replace('_', ' ')}.");
         AppendDependencyLines(lines, manifest, peerInstalledById);
+        AppendCompatibilityWarnings(lines, manifest.Id);
         lines.Add(RequiresAssembly(manifest)
             ? "Enable this host mod for the session?"
             : "Apply this host-backed session mod?");
 
         return string.Join("\n\n", lines);
+    }
+
+    // Surface any cached compatibility report entries that involve `forModId` directly
+    // into the vote prompt, so voters see "this conflicts with X" before they vote yes.
+    private void AppendCompatibilityWarnings(List<string> lines, string forModId)
+    {
+        var report = _latestCompatibilityReport;
+        if (report == null || !report.HasIssues) return;
+
+        var notes = new List<string>();
+        foreach (var c in report.Conflicts)
+            if (string.Equals(c.ModA, forModId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.ModB, forModId, StringComparison.OrdinalIgnoreCase))
+                notes.Add($"⚠ Conflict: {c.ModA} vs {c.ModB} — {c.Reason}");
+        foreach (var w in report.Warnings)
+            if (w.InvolvedMods.Any(id => string.Equals(id, forModId, StringComparison.OrdinalIgnoreCase)))
+                notes.Add($"⚠ {w.Detail} — {w.Reason}");
+        foreach (var d in report.MissingDependencies)
+            if (string.Equals(d.ModId, forModId, StringComparison.OrdinalIgnoreCase))
+                notes.Add($"⚠ Missing dependency: requires {d.MissingDependencyId}");
+
+        if (notes.Count > 0)
+            lines.Add(string.Join("\n", notes));
     }
 
     private string BuildPeerVoteBody(
@@ -849,6 +914,7 @@ public class ModManager
 
         lines.Add($"Sync mode: {manifest.GetEffectiveNetworkMode().Replace('_', ' ')}.");
         AppendDependencyLines(lines, manifest, localInstalledById);
+        AppendCompatibilityWarnings(lines, manifest.Id);
         lines.Add(RequiresAssembly(manifest)
             ? "Enable this mod for the session?"
             : "Apply this session mod?");

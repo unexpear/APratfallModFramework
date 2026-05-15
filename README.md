@@ -31,7 +31,7 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
   - installed + enabled mod snapshots
   - host-authoritative mod votes
   - session-state reconciliation
-- chunked P2P mod transfer with SHA-256 verification, order-independent reassembly, round-robin scheduling for fairness across concurrent transfers
+- chunked P2P mod transfer (DLL + optional PCK side-file) with SHA-256 verification, order-independent reassembly, round-robin scheduling for fairness across concurrent transfers; manifest.json is written from the cached peer snapshot so the receive-side rescan can find the mod
 - per-event peer authentication (claimed sender must be in the current lobby member list)
 - automatic compatibility checking across the union of local + every known peer's mod set, fired on every state change
 - conflict-resolution dialog when two locally-enabled mods declare each other incompatible — pick which one stays, loser is disabled and persisted
@@ -61,7 +61,7 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 - **No real multiplayer test yet.** All transfer / vote / member-join behavior is verified by solo loopback or debug peer, never by two real Steam clients. Audit cleared the wire format against `Pratfall.ByteBufferWriter`'s 32 KB cap (chunks sized to 14 KB raw → ~20 KB JSON envelope).
 - **`ModManager.EnableMod` returns false on second call within a session after `DisableMod`.** Confirmed game-side issue; Tim is shipping a fix that wraps the second call in try/catch. Workaround: restart Pratfall before re-enabling. The `tmp/stress-mods/` `StressHashGuardMod` and conflict-resolution flow surface this if exercised.
 - **Workshop integration is stubbed.** `WorkshopHook.NotifyItemInstalled(folder, publishedFileId)` is a public entry point waiting for Tim to wire Steam's `OnItemInstalled` callback to it. When invoked, the framework rescans `user://mods/` and surfaces the new mod in the dialog.
-- **PCK side-file transfer is not implemented.** Only DLL bytes flow over the wire. Asset-only mods must be installed manually on each peer.
+- (was: PCK side-file transfer not implemented — *now shipped*. The host sends both `<modId>.dll` and `<modId>.pck` (when the manifest declares `pckFile`), and the receiver also writes `manifest.json` next to them from the cached peer snapshot, so the rescan finds the mod end-to-end.)
 - **Stretch end-to-end** still needs a real multiplayer lobby to verify; the apply path is implemented and unit-clean.
 - **Optional malware scan before first enable** — listed in the safety roadmap but not implemented (the trust/quarantine/hash layers are).
 

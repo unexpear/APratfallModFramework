@@ -400,6 +400,85 @@ public static class ModFrameworkSelfTest
         return result;
     }
 
+    public sealed class PckTransferResult
+    {
+        public bool Success;
+        public string ErrorMessage = "";
+        public bool DllArrived;
+        public bool PckArrived;
+        public string DllPath = "";
+        public string PckPath = "";
+        public override string ToString() =>
+            $"pck-transfer success={Success} dll={DllArrived} pck={PckArrived} err={ErrorMessage}";
+    }
+
+    // Drives a transfer of TWO files (DLL + PCK) for the same mod through the chunker
+    // concurrently. Asserts both files land at the right paths with correct hashes
+    // and that side-file routing via FileSuffix doesn't cross-contaminate.
+    public static PckTransferResult RunPckSideFileTransfer()
+    {
+        var result = new PckTransferResult();
+
+        var tempDir = ProjectSettings.GlobalizePath("user://stress-tmp");
+        Directory.CreateDirectory(tempDir);
+
+        var dllBytes = new byte[24 * 1024];
+        var pckBytes = new byte[40 * 1024];
+        new Random(0x0DEAD).NextBytes(dllBytes);
+        new Random(0x0BEEF).NextBytes(pckBytes);
+
+        var dllSrc = Path.Combine(tempDir, "PckSideTest-src.dll");
+        var pckSrc = Path.Combine(tempDir, "PckSideTest-src.pck");
+        File.WriteAllBytes(dllSrc, dllBytes);
+        File.WriteAllBytes(pckSrc, pckBytes);
+
+        var dllExpectedHash = Convert.ToHexString(SHA256.HashData(dllBytes));
+        var pckExpectedHash = Convert.ToHexString(SHA256.HashData(pckBytes));
+
+        var transfer = new ModP2PTransfer();
+        var trust = new ModTrustConfig();
+        if (!transfer.BeginSend("pck-target", "PckSideTest", "1.0.0", dllSrc, ".dll"))
+        { result.ErrorMessage = "BeginSend(.dll) returned false"; return result; }
+        if (!transfer.BeginSend("pck-target", "PckSideTest", "1.0.0", pckSrc, ".pck"))
+        { result.ErrorMessage = "BeginSend(.pck) returned false"; return result; }
+
+        for (var i = 0; i < 4096; i++)
+        {
+            var pending = transfer.TickOutgoing();
+            if (pending == null) break;
+            var rx = transfer.OnChunkReceived("pck-source", pending.Value.Chunk, trust, out var path);
+            if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
+            {
+                if (string.Equals(pending.Value.Chunk.FileSuffix, ".dll", StringComparison.OrdinalIgnoreCase))
+                { result.DllArrived = true; result.DllPath = path ?? ""; }
+                else if (string.Equals(pending.Value.Chunk.FileSuffix, ".pck", StringComparison.OrdinalIgnoreCase))
+                { result.PckArrived = true; result.PckPath = path ?? ""; }
+            }
+            else if (rx != ModP2PTransfer.ReceiveResult.Continue)
+            { result.ErrorMessage = $"receive failed for {pending.Value.Chunk.FileSuffix}: {rx}"; return result; }
+        }
+
+        if (!result.DllArrived) { result.ErrorMessage = "DLL never completed"; return result; }
+        if (!result.PckArrived) { result.ErrorMessage = "PCK never completed"; return result; }
+
+        // Verify path routing — DLL should land at <id>.dll, PCK at <id>.pck.
+        if (!result.DllPath.EndsWith("PckSideTest.dll", StringComparison.OrdinalIgnoreCase))
+        { result.ErrorMessage = $"DLL landed at wrong path: {result.DllPath}"; return result; }
+        if (!result.PckPath.EndsWith("PckSideTest.pck", StringComparison.OrdinalIgnoreCase))
+        { result.ErrorMessage = $"PCK landed at wrong path: {result.PckPath}"; return result; }
+
+        // Verify content didn't cross-contaminate (FileSuffix routing in OnChunkReceived).
+        var dllActual = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(result.DllPath)));
+        var pckActual = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(result.PckPath)));
+        if (!string.Equals(dllActual, dllExpectedHash, StringComparison.OrdinalIgnoreCase))
+        { result.ErrorMessage = "DLL content hash mismatch — possible suffix routing bug"; return result; }
+        if (!string.Equals(pckActual, pckExpectedHash, StringComparison.OrdinalIgnoreCase))
+        { result.ErrorMessage = "PCK content hash mismatch — possible suffix routing bug"; return result; }
+
+        result.Success = true;
+        return result;
+    }
+
     public sealed class CompatibilityCheckResult
     {
         public bool Success;

@@ -27,39 +27,43 @@ internal sealed class ModP2PTransfer
     public event Action<string /*modId*/, float /*0..1*/>? OnSendProgress;
     public event Action<string /*modId*/, float /*0..1*/>? OnReceiveProgress;
 
-    public bool HasOutgoing(string targetUserId, string modId) =>
-        _outgoing.ContainsKey(BuildKey(targetUserId, modId));
+    public bool HasOutgoing(string targetUserId, string modId, string fileSuffix = ".dll") =>
+        _outgoing.ContainsKey(BuildKey(targetUserId, modId, fileSuffix));
 
-    // Begin sending a mod to a target peer. Returns false if the file is missing or oversized.
-    public bool BeginSend(string targetUserId, string modId, string modVersion, string dllPath)
+    // Begin sending a mod file (DLL or PCK) to a target peer. fileSuffix selects which
+    // file: ".dll" or ".pck". Returns false if the file is missing or oversized. The
+    // outgoing key includes the suffix so DLL and PCK transfers for the same mod can
+    // run concurrently through the round-robin scheduler.
+    public bool BeginSend(string targetUserId, string modId, string modVersion, string filePath, string fileSuffix = ".dll")
     {
-        if (string.IsNullOrWhiteSpace(targetUserId) || string.IsNullOrWhiteSpace(modId) || !File.Exists(dllPath))
+        if (string.IsNullOrWhiteSpace(targetUserId) || string.IsNullOrWhiteSpace(modId) || !File.Exists(filePath))
             return false;
+        if (string.IsNullOrWhiteSpace(fileSuffix)) fileSuffix = ".dll";
 
         byte[] bytes;
         try
         {
-            var info = new FileInfo(dllPath);
+            var info = new FileInfo(filePath);
             if (info.Length > MaxModBytes)
             {
-                GD.PrintErr($"[ModFramework] Refusing to send {modId}: {info.Length} bytes exceeds {MaxModBytes} byte cap");
+                GD.PrintErr($"[ModFramework] Refusing to send {modId}{fileSuffix}: {info.Length} bytes exceeds {MaxModBytes} byte cap");
                 return false;
             }
-            bytes = File.ReadAllBytes(dllPath);
+            bytes = File.ReadAllBytes(filePath);
         }
         catch (Exception ex)
         {
-            GD.PrintErr($"[ModFramework] Failed to read {dllPath} for transfer: {ex.Message}");
+            GD.PrintErr($"[ModFramework] Failed to read {filePath} for transfer: {ex.Message}");
             return false;
         }
 
         var hash = Convert.ToHexString(SHA256.HashData(bytes));
         var totalChunks = Math.Max(1, (bytes.Length + ChunkSize - 1) / ChunkSize);
-        var key = BuildKey(targetUserId, modId);
+        var key = BuildKey(targetUserId, modId, fileSuffix);
         var isNew = !_outgoing.ContainsKey(key);
-        _outgoing[key] = new OutgoingTransfer(targetUserId, modId, modVersion, bytes, hash, totalChunks);
+        _outgoing[key] = new OutgoingTransfer(targetUserId, modId, modVersion, bytes, hash, totalChunks, fileSuffix);
         if (isNew) _outgoingOrder.Add(key);
-        GD.Print($"[ModFramework] Transfer started: send {modId} v{modVersion} -> {targetUserId} ({bytes.Length} bytes, {totalChunks} chunks)");
+        GD.Print($"[ModFramework] Transfer started: send {modId}{fileSuffix} v{modVersion} -> {targetUserId} ({bytes.Length} bytes, {totalChunks} chunks)");
         return true;
     }
 
@@ -109,6 +113,7 @@ internal sealed class ModP2PTransfer
                 ChunkBase64 = Convert.ToBase64String(slice),
                 IsLast = t.NextChunkIndex == t.TotalChunks - 1,
                 Sha256Hex = (t.NextChunkIndex == t.TotalChunks - 1) ? t.Sha256Hex : "",
+                FileSuffix = t.FileSuffix,
             };
 
             t.NextChunkIndex++;
@@ -154,7 +159,9 @@ internal sealed class ModP2PTransfer
     {
         persistedDllPath = null;
         chunk.Normalize();
-        var key = BuildKey(sourceUserId, chunk.ModId);
+        // Key by suffix too so DLL and PCK transfers for the same mod are tracked as
+        // separate active transfers and don't collide in the incoming dictionary.
+        var key = BuildKey(sourceUserId, chunk.ModId, chunk.FileSuffix);
 
         if (!_incoming.TryGetValue(key, out var t))
         {
@@ -238,7 +245,9 @@ internal sealed class ModP2PTransfer
         {
             var modDir = ProjectSettings.GlobalizePath($"{rootDir}/{chunk.ModId}/");
             Directory.CreateDirectory(modDir);
-            persistedDllPath = Path.Combine(modDir, $"{chunk.ModId}.dll");
+            // chunk.FileSuffix decides which file inside the mod folder we land in:
+            // ".dll" -> <modId>.dll (default), ".pck" -> <modId>.pck.
+            persistedDllPath = Path.Combine(modDir, $"{chunk.ModId}{chunk.FileSuffix}");
             File.WriteAllBytes(persistedDllPath, bytes);
         }
         catch (Exception ex)
@@ -249,9 +258,9 @@ internal sealed class ModP2PTransfer
         }
 
         if (quarantine)
-            GD.Print($"[ModFramework] Transfer quarantined: {chunk.ModId} v{chunk.ModVersion} sha256={actualHash[..16]}... -> {rootDir}/. Add the hash to {ModTrustConfig.ConfigPath} to trust.");
+            GD.Print($"[ModFramework] Transfer quarantined: {chunk.ModId}{chunk.FileSuffix} v{chunk.ModVersion} sha256={actualHash[..16]}... -> {rootDir}/. Add the hash to {ModTrustConfig.ConfigPath} to trust.");
         else
-            GD.Print($"[ModFramework] Transfer complete: received {chunk.ModId} v{chunk.ModVersion} ({bytes.Length} bytes, sha256={actualHash[..16]}...)");
+            GD.Print($"[ModFramework] Transfer complete: received {chunk.ModId}{chunk.FileSuffix} v{chunk.ModVersion} ({bytes.Length} bytes, sha256={actualHash[..16]}...)");
 
         _incoming.Remove(key);
         return quarantine ? ReceiveResult.CompletedAndQuarantined : ReceiveResult.CompletedAndPersisted;
@@ -265,7 +274,7 @@ internal sealed class ModP2PTransfer
         _incoming.Clear();
     }
 
-    private static string BuildKey(string userId, string modId) => $"{userId}|{modId}";
+    private static string BuildKey(string userId, string modId, string fileSuffix = ".dll") => $"{userId}|{modId}|{fileSuffix}";
 
     private sealed class OutgoingTransfer
     {
@@ -275,9 +284,10 @@ internal sealed class ModP2PTransfer
         public byte[] Bytes { get; }
         public string Sha256Hex { get; }
         public int TotalChunks { get; }
+        public string FileSuffix { get; }
         public int NextChunkIndex;
 
-        public OutgoingTransfer(string targetUserId, string modId, string modVersion, byte[] bytes, string sha256Hex, int totalChunks)
+        public OutgoingTransfer(string targetUserId, string modId, string modVersion, byte[] bytes, string sha256Hex, int totalChunks, string fileSuffix)
         {
             TargetUserId = targetUserId;
             ModId = modId;
@@ -285,6 +295,7 @@ internal sealed class ModP2PTransfer
             Bytes = bytes;
             Sha256Hex = sha256Hex;
             TotalChunks = totalChunks;
+            FileSuffix = fileSuffix;
             NextChunkIndex = 0;
         }
     }

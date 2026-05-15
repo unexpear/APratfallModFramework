@@ -552,17 +552,43 @@ public class ModManager
             return;
         }
 
-        _transfer.BeginSend(requesterUserId, manifest.Id, manifest.Version, dllPath);
+        _transfer.BeginSend(requesterUserId, manifest.Id, manifest.Version, dllPath, ".dll");
+
+        // If the mod ships a side-file PCK, send that too. Receiver writes both into
+        // mods/<id>/ and only enables the mod once the DLL has arrived.
+        if (!string.IsNullOrWhiteSpace(manifest.PckFile) && !string.IsNullOrWhiteSpace(manifest.DirectoryPath))
+        {
+            var pckPath = Path.Combine(manifest.DirectoryPath, manifest.PckFile);
+            if (File.Exists(pckPath))
+                _transfer.BeginSend(requesterUserId, manifest.Id, manifest.Version, pckPath, ".pck");
+            else
+                GD.PrintErr($"[ModFramework] Mod {manifest.Id} declares PckFile={manifest.PckFile} but file missing at {pckPath}");
+        }
     }
 
     private void OnTransferChunkReceived(string sourceUserId, ModTransferChunk chunk)
     {
-        var result = _transfer.OnChunkReceived(sourceUserId, chunk, _trust, out var persistedDllPath);
-        if (result != ModP2PTransfer.ReceiveResult.CompletedAndPersisted || persistedDllPath == null)
+        var result = _transfer.OnChunkReceived(sourceUserId, chunk, _trust, out var persistedPath);
+        if (result != ModP2PTransfer.ReceiveResult.CompletedAndPersisted || persistedPath == null)
             return;
 
         try
         {
+            var isDll = string.Equals(chunk.FileSuffix, ".dll", StringComparison.OrdinalIgnoreCase);
+
+            // PCK arrived — write it out (already persisted by ModP2PTransfer) and stop.
+            // Enable only fires when the DLL has been received and the manifest exists.
+            if (!isDll)
+            {
+                GD.Print($"[ModFramework] Side-file persisted: {chunk.ModId}{chunk.FileSuffix}");
+                return;
+            }
+
+            // DLL arrived. Before re-scanning, write a manifest.json next to it so the
+            // scan picks the mod up. We pull the manifest from the cached peer snapshot
+            // — it travels in the manifest broadcast, never as a transfer chunk.
+            EnsureTransferredManifestOnDisk(sourceUserId, chunk.ModId, persistedPath);
+
             // Re-scan to pick up the newly-arrived manifest + DLL, then enable.
             _localMods = ManifestManager.ScanLocalMods();
             foreach (var mod in _localMods)
@@ -577,7 +603,7 @@ public class ModManager
 
             if (TryGetLocalManifest(chunk.ModId, out var manifest) && UsesFrameworkAssemblyLoader(manifest))
             {
-                _modDllPaths[manifest.Id] = persistedDllPath;
+                _modDllPaths[manifest.Id] = persistedPath;
                 _modSessionAvailable[manifest.Id] = true;
                 EnableMod(manifest.Id, broadcast: true);
             }
@@ -585,6 +611,33 @@ public class ModManager
         catch (Exception ex)
         {
             GD.PrintErr($"[ModFramework] Failed to integrate transferred mod {chunk.ModId}: {ex.Message}");
+        }
+    }
+
+    // The manifest doesn't travel as a transfer chunk — it's already in the peer's
+    // broadcast snapshot. Write it to disk next to the freshly-arrived DLL so the
+    // local scan can find the mod.
+    private void EnsureTransferredManifestOnDisk(string sourceUserId, string modId, string persistedDllPath)
+    {
+        if (!_peerSnapshots.TryGetValue(sourceUserId, out var snapshot)) return;
+        var manifest = snapshot.InstalledManifests
+            .FirstOrDefault(m => string.Equals(m.Id, modId, StringComparison.OrdinalIgnoreCase));
+        if (manifest == null) return;
+
+        try
+        {
+            var dir = Path.GetDirectoryName(persistedDllPath);
+            if (string.IsNullOrEmpty(dir)) return;
+            var manifestPath = Path.Combine(dir, "manifest.json");
+            if (File.Exists(manifestPath)) return; // don't overwrite a local manifest
+
+            var json = System.Text.Json.JsonSerializer.Serialize(manifest, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(manifestPath, json);
+            GD.Print($"[ModFramework] Wrote transferred manifest for {modId} to {manifestPath}");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Failed to write transferred manifest for {modId}: {ex.Message}");
         }
     }
 

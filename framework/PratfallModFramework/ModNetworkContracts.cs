@@ -138,6 +138,10 @@ public sealed class ModTransferChunk
     public string Sha256Hex { get; set; } = "";
     // True when this is the last chunk (also implies Sha256Hex is set).
     public bool IsLast { get; set; }
+    // File this chunk belongs to within the mod folder. Default ".dll" for back-compat
+    // with v1.0 chunks. Recognized values: ".dll", ".pck". Manifests use a separate
+    // path (TransferRequest.ManifestJson) since they're tiny.
+    public string FileSuffix { get; set; } = ".dll";
 
     public void Normalize()
     {
@@ -145,6 +149,7 @@ public sealed class ModTransferChunk
         ModVersion = ModVersion.Trim();
         ChunkBase64 ??= "";
         Sha256Hex = (Sha256Hex ?? "").Trim();
+        FileSuffix = string.IsNullOrWhiteSpace(FileSuffix) ? ".dll" : FileSuffix.Trim();
         if (ChunkIndex < 0) ChunkIndex = 0;
         if (TotalChunks < 1) TotalChunks = 1;
         if (TotalBytes < 0) TotalBytes = 0;

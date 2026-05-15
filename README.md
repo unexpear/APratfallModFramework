@@ -24,51 +24,57 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 
 ## What it provides
 
-- bootstrap injection into the game
+- bootstrap injection into the game (Cecil patches `GcManager._Ready()`, original `Pratfall.dll` backed up first)
 - runtime DLL mod loading with Harmony patches
-- a main-menu Mods UI for enable/disable
+- a Pratfall-styled Mods UI in the main menu for enable/disable, persists across game ↔ menu
 - a real Pratfall-backed multiplayer control plane for:
   - installed + enabled mod snapshots
   - host-authoritative mod votes
   - session-state reconciliation
-
-It does **not** currently guarantee that arbitrary mods are compatible with each other.
-The framework is meant to detect mismatches, attribute them to specific mods, and drive the lobby toward a shared session state.
+- chunked P2P mod transfer with SHA-256 verification, order-independent reassembly, round-robin scheduling for fairness across concurrent transfers
+- per-event peer authentication (claimed sender must be in the current lobby member list)
+- automatic compatibility checking across the union of local + every known peer's mod set, fired on every state change
+- conflict-resolution dialog when two locally-enabled mods declare each other incompatible — pick which one stays, loser is disabled and persisted
+- trust policy with `open` and `trusted-only` modes (trusted-only routes unknown transfers to `mods-quarantine/`)
+- PCK loading for asset mods
+- bubble around the game's official mod loader so framework state + official-style mods coexist
+- offline-gated debug peer for solo testing without a second PC
 
 ## Current Status
 
-What is implemented now:
+### Verified solo (passes the local smoke + stress suite)
 
-- runtime DLL loading for framework-style mods
-- manifest scan from the Pratfall `mods/` folder
-- enable/disable UI from the main menu (Pratfall-styled, persists across game ↔ menu transitions)
-- real lobby/network integration using Pratfall's own multiplayer stack
-- peer authentication: framework events are dropped unless the claimed sender is a current lobby member
-- vote transport for mod-state mismatches
-- apply order that prefers:
-  - already-installed local match first
-  - stretch/settings path second
-  - chunked P2P transfer when the mod is missing on a peer (SHA-256 verified)
-- SHA-256 verification for transferred mods AND optional manifest-pinned `assemblySha256` for local mods
-- trust policy at `user://modframework-trust.json` with `open` (default) and `trusted-only` modes; trusted-only routes unknown transfers into a quarantine folder
-- PCK loading (`pckFile` manifest field) for asset mods
-- real stretch apply for explicit `CustomGameSettings` overrides and `fixedSeedString`
-- first-pass official loader bubble:
-  - dual manifest parsing for framework-style and official-style mods
-  - framework-owned desired enabled state in `user://modframework-state.json`
-  - built-in `enabled_mods.json` startup read intercepted and stalled
-  - official-style mods apply later through the game's own `EnableMod()` / `DisableMod()`
-  - `Load Enabled Mods` action in the Mods menu
-  - pending official-style mod apply before `Host Game` / `Play Offline`
-- debug peer (`modframework-debug-peer.json`) gated to offline-only sessions so it never races real-Steam multiplayer
-- public sample template at [`sample-mods/HelloWorldMod/`](sample-mods/HelloWorldMod/README.md)
+- Framework loads, Mods button injects, dialog opens with the correct rocky-frame styling
+- Toggle persistence across launches via `user://modframework-state.json`
+- Vote system fires from the park (offline session-start), not the main menu
+- Official-loader bubble integrates cleanly with Tim's `example_mod`: toggling on + Load Enabled Mods → game's `ModEntry.ModInit()` runs, log confirms `Mod initialized!`
+- Transfer chunker / reassembler / SHA-256 / disk write — full loopback pass, including reversed delivery, duplicate chunks, and 5 boundary payload sizes
+- Tampered chunk mid-stream → receiver returns `FailedHashMismatch` (rejected before persist)
+- Trust quarantine: trusted-only mode + unknown hash routes to `user://mods-quarantine/<id>/<id>.dll`
+- Concurrent transfers (3 simultaneous) interleave fairly via round-robin scheduling, no chunk cross-talk
+- Vote consensus math: 10 scenarios across 2/3/4 peers including ties (tied = fail, by contract)
+- Compatibility checker detects all 5 issue categories on synthetic fixtures
+- Conflict-resolution prompt fires on real conflicting mods, disables loser, syncs the dialog toggle visually
 
-What is not finished yet:
+### Known limitations / waiting items
 
-- end-to-end stretch verification in a real multiplayer lobby
-- in-game validation of the official-loader bubble path against a real official-style sample mod
-- coordination with Tim on a stable network-event-ID range (currently uses private `62000-62005`)
-- transfer of PCK side-files (only the DLL is transferred today; PCKs must be installed locally)
+- **No real multiplayer test yet.** All transfer / vote / member-join behavior is verified by solo loopback or debug peer, never by two real Steam clients. Audit cleared the wire format against `Pratfall.ByteBufferWriter`'s 32 KB cap (chunks sized to 14 KB raw → ~20 KB JSON envelope).
+- **`ModManager.EnableMod` returns false on second call within a session after `DisableMod`.** Confirmed game-side issue; Tim is shipping a fix that wraps the second call in try/catch. Workaround: restart Pratfall before re-enabling. The `tmp/stress-mods/` `StressHashGuardMod` and conflict-resolution flow surface this if exercised.
+- **Workshop integration is stubbed.** `WorkshopHook.NotifyItemInstalled(folder, publishedFileId)` is a public entry point waiting for Tim to wire Steam's `OnItemInstalled` callback to it. When invoked, the framework rescans `user://mods/` and surfaces the new mod in the dialog.
+- **PCK side-file transfer is not implemented.** Only DLL bytes flow over the wire. Asset-only mods must be installed manually on each peer.
+- **Stretch end-to-end** still needs a real multiplayer lobby to verify; the apply path is implemented and unit-clean.
+- **Optional malware scan before first enable** — listed in the safety roadmap but not implemented (the trust/quarantine/hash layers are).
+
+### Resolved with the dev (Tim, Robert)
+
+- **Network event IDs `62000-62005`** — confirmed safe forever (game counts up from low numbers, never approaches that range).
+- **Bubble approach blessed.** Per Tim: *"its not meant as a replacement for custom mod loader. its just a way to have an easy way to sideload code/packages."* The framework owns the policy layer; the official loader is the execution layer for official-style mods. Current full-stall of `enabled_mods.json` startup is acceptable long-term.
+- **`RegisterCustomType` for runtime Godot Node registration** — withdrawn, not realistic. Robert's recommended pattern is to load `RandomWeightedDropPool` resources and add to the array directly. `ModDropPoolHelper.Register(poolPath, scene, weight)` and `RegisterIn(pool, scene, weight)` implement that pattern with proper unregister-on-unload.
+- **Analytics suppression for mod exceptions** (Robert's request) — `ModExceptionFilter` is in place and active.
+
+### Public template
+
+[`sample-mods/HelloWorldMod/`](sample-mods/HelloWorldMod/README.md) — minimal DLL mod with `OnLoad`/`OnUnload` and a build target that copies output into `%APPDATA%\Pratfall\mods\HelloWorldMod\`.
 
 ## Official Loader Direction
 
@@ -108,9 +114,10 @@ Current first-pass behavior:
 - pressing `Host Game` or `Play Offline` also applies pending desired state first
 - the game's own `WriteLoadedModsToFile()` is no-op'ed inside the bubble so it does not overwrite framework policy
 
-Current limitation:
+Current state:
 
-- this first pass has been built and deployed, but still needs an in-game smoke test with a real official-style sample mod
+- smoke-tested in-game with Tim's `example_mod`. Toggling on + Load Enabled Mods causes the game's `ModEntry.ModInit()` to run (verified via `Mod initialized!` in `godot.log`). Pre-session apply via `Host Game` / `Play Offline` also runs the init.
+- known same-session limitation: re-enabling an official-style mod after disabling it returns false from the game's `ModManager.EnableMod`. Tim is fixing this game-side by wrapping in try/catch. Until that ships, the workaround is to restart Pratfall before re-enabling.
 
 Discovery scope for that bubble is intentionally limited. The framework should only scan Pratfall-relevant roots such as:
 
@@ -206,11 +213,12 @@ It does **not** simulate real chunked transfer.
 
 ## For Mod Developers
 
-The repo does not currently ship a bundled public sample mod.
+Public starter template at [`sample-mods/HelloWorldMod/`](sample-mods/HelloWorldMod/README.md). It builds against the framework, has a working post-build target that drops the DLL + manifest into your user mods folder, and is intentionally minimal — copy it, rename, add your own logic.
 
-`ExampleMod` was removed because it introduced extra debugging variables, and `NoFallDamage` is already a built-in custom game setting in Pratfall rather than a representative DLL mod.
+Two helpers worth knowing about:
 
-A private template/baseline is planned, but the public repo is not treating a placeholder sample as proof of multiplayer correctness.
+- `ModDropPoolHelper.Register(poolResPath, scene, weight)` — the recommended pattern for content mods (per Robert on the dev side). Loads a `RandomWeightedDropPool` resource, appends a `RandomWeightedScene` entry, returns an `IDisposable` that removes it on dispose. Call from `OnLoad`, dispose from `OnUnload` and the pool is left exactly as it was.
+- `WorkshopHook.OnWorkshopItemInstalled` — subscribe if you want to react when Steam Workshop drops a new mod folder (Tim is wiring the game-side callback).
 
 ### Official Loader Manifest
 
@@ -378,12 +386,16 @@ This framework loads user-provided DLLs into the game process.
 
 That means DLL mods should be treated as fully trusted code from the player's point of view.
 
-Planned safety layers for broader release:
+Trust layers shipped:
 
-- quarantine for newly discovered mods
-- hash tracking
-- trusted-only mode
-- optional malware scan before first enable
+- **Quarantine** — `ModTrustConfig` with `mode: "trusted-only"` routes incoming transferred mods into `user://mods-quarantine/<id>/` instead of the live mods folder. The user must move the file (or add the SHA-256 to `trustedSha256`) to activate it.
+- **Hash tracking** — manifests can pin `assemblySha256`. The framework refuses to load a DLL whose actual hash differs.
+- **Trusted-only mode** — full mode at `user://modframework-trust.json` (default `open`).
+- **Peer authentication** — every framework network event is dropped if the claimed sender isn't a current lobby member.
+
+Not yet shipped:
+
+- **Optional malware scan before first enable.** Roadmap item; would call out to Windows Defender or similar.
 
 These are trust layers, not a real code sandbox.
 
@@ -410,16 +422,31 @@ Projects:
 ## Architecture
 
 ```text
-Pratfall.exe
+Pratfall.exe (patched by Cecil to call Bootstrap.Init on GcManager._Ready)
 `- PratfallModFramework.dll
-   |- Bootstrap
-   |- ModManager
-   |- ModAssemblyLoader
-   |- MainMenuIntegration
-   |- ModNetworkLayer
-   |- ModNetworkContracts
-   |- ModVoteSession
-   |- ModNetworkStretch
-   |- ModExceptionFilter
-   `- ModAPI
+   ├─ Bootstrap                  entry point + startup status banner
+   ├─ ModManager                 orchestrator: scan, load, enable/disable, vote, transfer
+   ├─ ModAssemblyLoader          AssemblyLoadContext + Harmony, with SHA-256 hash gate
+   ├─ ModManifest                dual-shape parser (framework + official-loader formats)
+   ├─ ManifestManager            mod-folder scanner
+   ├─ FrameworkModStateStore     persistent desired-enabled state (user://modframework-state.json)
+   ├─ MainMenuIntegration        Mods button + dialog + conflict-resolution prompt
+   ├─ ToggleSwitch               custom toggle widget used in the dialog
+   ├─ ModNetworkLayer            Pratfall network bindings (events, lobby member auth)
+   ├─ ModNetworkContracts        wire types: manifest snapshot, vote, transfer chunk
+   ├─ ModVoteSession             tally + tie-break (yes > no, ties = fail)
+   ├─ ModP2PTransfer             chunker, reassembler, round-robin scheduler
+   ├─ ModNetworkStretch          settings-mode apply path (CustomGameSettings)
+   ├─ ModCompatibilityResolver   peer-vs-local diff for vote/transfer planning
+   ├─ ModCompatibilityChecker    local-set + union check (auto-runs on every state change)
+   ├─ ModTrustConfig             open / trusted-only mode + hash allowlist
+   ├─ ModDropPoolHelper          register/unregister entries on RandomWeightedDropPool
+   ├─ ModFrameworkSelfTest       public test API used by tmp/stress-mods/
+   ├─ ModExceptionFilter         keeps mod exceptions out of game analytics
+   ├─ SessionStartHooks          Harmony patches on Host Game / Play Offline
+   ├─ OfficialModBridge          patches game's ModManager.Read/WriteLoadedModsToFile
+   ├─ NativeDialogBridge         calls into the game's DialogUIViewController
+   ├─ VoteUI                     vote prompt (uses native dialog when available)
+   ├─ WorkshopHook               waiting for Tim's Steam Workshop callback to land
+   └─ ModAPI                     thin public-API surface for mods
 ```

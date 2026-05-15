@@ -67,7 +67,8 @@ public class ModManager
             getMods: () => _localMods,
             isModEnabled: id => IsModDesiredEnabled(id),
             onToggleMod: (id, enabled) => ToggleMod(id, enabled),
-            getModIssueTooltip: BuildModIssueTooltip);
+            getModIssueTooltip: BuildModIssueTooltip,
+            inspectMod: id => InspectMod(id));
 
         try { ModExceptionFilter.Install(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] Exception filter failed: {ex.Message}"); }
@@ -419,6 +420,18 @@ public class ModManager
     }
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
+
+    // Build an inspection report for a mod by id. If the mod is currently loaded, its
+    // assembly is reflected to find [ModPatch] declarations. Otherwise the report still
+    // includes manifest + file listing + hashes — enough to vet a community download.
+    public ModInspector.Report? InspectMod(string modId)
+    {
+        if (!TryGetLocalManifest(modId, out var manifest)) return null;
+        System.Reflection.Assembly? loaded = null;
+        if (_loader.SnapshotLoadedAssemblies().TryGetValue(modId, out var asm))
+            loaded = asm;
+        return ModInspector.Inspect(manifest, loaded);
+    }
 
     // Used by the Mods dialog to decide whether to show a ⚠ badge next to a mod card.
     // Returns null if there are no relevant issues, otherwise a short multi-line summary.

@@ -28,6 +28,8 @@ public static class MainMenuIntegration
     // Returns null when the mod has no compatibility issues, otherwise a short
     // human-readable summary suitable for a tooltip ("conflicts with X; missing dep Y").
     private static Func<string, string?>? _getModIssueTooltip;
+    // Returns an inspection report for the mod id, or null if the mod is unknown.
+    private static Func<string, ModInspector.Report?>? _inspectMod;
 
     public static void Install(SceneTree tree,
         Action? onModsPressed = null,
@@ -35,7 +37,8 @@ public static class MainMenuIntegration
         Func<List<ModManifest>>? getMods = null,
         Func<string, bool>? isModEnabled = null,
         Action<string, bool>? onToggleMod = null,
-        Func<string, string?>? getModIssueTooltip = null)
+        Func<string, string?>? getModIssueTooltip = null,
+        Func<string, ModInspector.Report?>? inspectMod = null)
     {
         _tree = tree;
         _onModsButtonPressed = onModsPressed;
@@ -44,6 +47,7 @@ public static class MainMenuIntegration
         _isModEnabled = isModEnabled;
         _onToggleMod = onToggleMod;
         _getModIssueTooltip = getModIssueTooltip;
+        _inspectMod = inspectMod;
         if (_installed) return;
         _installed = true;
         GD.Print("[ModFramework] MainMenuIntegration installed, waiting for main menu...");
@@ -346,6 +350,27 @@ public static class MainMenuIntegration
                 authorLabel.AddThemeColorOverride("font_color", new Color(0.76f, 0.88f, 0.92f));
                 infoColumn.AddChild(authorLabel);
 
+                if (_inspectMod != null)
+                {
+                    var inspectBtn = new Button
+                    {
+                        Text = "🔍",
+                        FocusMode = Control.FocusModeEnum.All,
+                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+                        TooltipText = "Inspect this mod (manifest, files, hashes, declared patches)",
+                    };
+                    ApplyButtonTheme(inspectBtn);
+                    inspectBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
+                    var capturedId = mod.Id;
+                    inspectBtn.Pressed += () =>
+                    {
+                        var report = _inspectMod(capturedId);
+                        if (report != null && _tree != null)
+                            ShowInspectionPanel(_tree, report);
+                    };
+                    topRow.AddChild(inspectBtn);
+                }
+
                 var toggle = new ToggleSwitch(_isModEnabled?.Invoke(mod.Id) ?? false);
                 var captured = mod.Id;
                 _dialogToggles[captured] = toggle;
@@ -393,6 +418,174 @@ public static class MainMenuIntegration
         (focusables.FirstOrDefault() ?? closeBtn).CallDeferred("grab_focus");
     }
 
+
+    // User-directed mod scanner panel — fired from the 🔍 button on a mod card. Shows
+    // the manifest summary, every file in the mod folder with size + SHA-256, and the
+    // declared [ModPatch] targets if the mod is currently loaded. Read-only — surfaces
+    // facts, makes no judgments. Layer 130 so it sits above the Mods dialog at 128.
+    public static void ShowInspectionPanel(SceneTree tree, ModInspector.Report report)
+    {
+        if (tree?.Root == null || report == null) return;
+        var existing = tree.Root.GetNodeOrNull("ModFrameworkInspectLayer");
+        if (existing != null) existing.QueueFree();
+
+        var canvasLayer = new CanvasLayer { Name = "ModFrameworkInspectLayer", Layer = 130 };
+        tree.Root.AddChild(canvasLayer);
+
+        var overlay = new Control { Name = "ModFrameworkInspectDialog", MouseFilter = Control.MouseFilterEnum.Stop };
+        SetFullRect(overlay);
+        canvasLayer.AddChild(overlay);
+
+        _tree ??= tree;
+
+        var viewportSize = tree.Root.GetViewport().GetVisibleRect().Size;
+        var dialogSize = new Vector2(
+            Mathf.Clamp(viewportSize.X * 0.55f, 600f, 820f),
+            Mathf.Clamp(viewportSize.Y * 0.72f, 460f, 720f));
+        var panel = CreateFallbackDialogHost(overlay, dialogSize, compact: false);
+
+        var title = new Label
+        {
+            Text = $"Inspecting: {report.Manifest?.Name ?? report.ModId}",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        ApplyFont(title, Math.Max(_buttonFontSize + 8, 24));
+        title.AddThemeColorOverride("font_color", new Color(0.99f, 0.86f, 0.42f));
+        panel.AddChild(title);
+
+        var scroll = new ScrollContainer
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+        };
+        panel.AddChild(scroll);
+
+        var body = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        body.AddThemeConstantOverride("separation", 10);
+        scroll.AddChild(body);
+
+        // Manifest section
+        AddInspectHeader(body, "Manifest");
+        if (report.Manifest is { } m)
+        {
+            AddInspectKV(body, "id", m.Id);
+            AddInspectKV(body, "version", m.Version);
+            if (!string.IsNullOrWhiteSpace(m.Author)) AddInspectKV(body, "author", m.Author);
+            if (!string.IsNullOrWhiteSpace(m.Description)) AddInspectKV(body, "description", m.Description);
+            AddInspectKV(body, "multiplayer mode", m.EffectiveMode);
+            if (!string.IsNullOrWhiteSpace(m.PinnedSha256)) AddInspectKV(body, "pinned sha256", m.PinnedSha256);
+            if (!string.IsNullOrWhiteSpace(m.PckFile)) AddInspectKV(body, "pck file", m.PckFile);
+            if (m.Requires.Count > 0) AddInspectKV(body, "requires", string.Join(", ", m.Requires));
+            if (m.ConflictsWith.Count > 0) AddInspectKV(body, "conflicts with", string.Join(", ", m.ConflictsWith));
+        }
+        if (!string.IsNullOrEmpty(report.FolderPath)) AddInspectKV(body, "folder", report.FolderPath);
+
+        // Files section
+        AddInspectHeader(body, $"Files ({report.Files.Count})");
+        if (report.Files.Count == 0)
+            AddInspectMuted(body, "No files in mod folder.");
+        else
+        {
+            foreach (var f in report.Files)
+            {
+                var sizeStr = f.ByteSize >= 1024 * 1024 ? $"{f.ByteSize / (1024.0 * 1024.0):0.00} MB"
+                            : f.ByteSize >= 1024 ? $"{f.ByteSize / 1024.0:0.0} KB"
+                            : $"{f.ByteSize} B";
+                var line = new Label
+                {
+                    Text = $"  {f.FileName,-32} {sizeStr,12}    {f.Sha256Hex[..16]}…",
+                    SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                    TooltipText = $"{f.FileName}\nSize: {f.ByteSize} bytes\nSHA-256: {f.Sha256Hex}",
+                    MouseFilter = Control.MouseFilterEnum.Stop,
+                };
+                ApplyFont(line, Math.Max(_buttonFontSize - 1, 13));
+                line.AddThemeColorOverride("font_color", new Color(0.85f, 0.92f, 0.95f));
+                body.AddChild(line);
+            }
+        }
+
+        // Patches section
+        AddInspectHeader(body, $"Declared Harmony patches ({report.DeclaredPatches.Count})");
+        if (!report.PatchesAreFromLoadedAssembly)
+        {
+            AddInspectMuted(body, report.LoadStateNote ?? "Mod is not currently loaded — patches not inspected.");
+        }
+        else if (report.DeclaredPatches.Count == 0)
+        {
+            AddInspectMuted(body, "No [ModPatch] declarations found in this mod.");
+        }
+        else
+        {
+            foreach (var p in report.DeclaredPatches)
+            {
+                var line = new Label
+                {
+                    Text = $"  {p.PatchType,-10} {p.TargetTypeFullName}.{p.TargetMethod}",
+                    SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                    TooltipText = $"Declared in: {p.DeclaringTypeFullName}",
+                    MouseFilter = Control.MouseFilterEnum.Stop,
+                };
+                ApplyFont(line, Math.Max(_buttonFontSize - 1, 13));
+                line.AddThemeColorOverride("font_color", new Color(0.85f, 0.92f, 0.95f));
+                body.AddChild(line);
+            }
+        }
+
+        var closeBtn = new Button
+        {
+            Text = "Close",
+            FocusMode = Control.FocusModeEnum.All,
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
+            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
+        };
+        ApplyButtonTheme(closeBtn);
+        closeBtn.Pressed += () => canvasLayer.QueueFree();
+        panel.AddChild(closeBtn);
+
+        overlay.GuiInput += (InputEvent ev) =>
+        {
+            if (!IsActionPressed(ev, "ui_cancel")) return;
+            canvasLayer.QueueFree();
+            overlay.AcceptEvent();
+        };
+
+        closeBtn.CallDeferred("grab_focus");
+    }
+
+    private static void AddInspectHeader(VBoxContainer body, string text)
+    {
+        var lbl = new Label { Text = text, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        ApplyFont(lbl, Math.Max(_buttonFontSize + 1, 17));
+        lbl.AddThemeColorOverride("font_color", new Color(0.97f, 0.92f, 0.71f));
+        body.AddChild(lbl);
+    }
+
+    private static void AddInspectKV(VBoxContainer body, string key, string value)
+    {
+        var lbl = new Label
+        {
+            Text = $"  {key}: {value}",
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        ApplyFont(lbl, Math.Max(_buttonFontSize - 1, 13));
+        lbl.AddThemeColorOverride("font_color", new Color(0.85f, 0.92f, 0.95f));
+        body.AddChild(lbl);
+    }
+
+    private static void AddInspectMuted(VBoxContainer body, string text)
+    {
+        var lbl = new Label
+        {
+            Text = $"  {text}",
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        ApplyFont(lbl, Math.Max(_buttonFontSize - 1, 13));
+        lbl.AddThemeColorOverride("font_color", new Color(0.7f, 0.78f, 0.82f));
+        body.AddChild(lbl);
+    }
 
     // Pushes a mod's enabled state into the matching toggle widget in the open Mods
     // dialog (if any). Use this when something other than a user click flips a mod on

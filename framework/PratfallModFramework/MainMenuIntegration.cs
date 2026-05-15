@@ -28,6 +28,9 @@ public static class MainMenuIntegration
     // Returns null when the mod has no compatibility issues, otherwise a short
     // human-readable summary suitable for a tooltip ("conflicts with X; missing dep Y").
     private static Func<string, string?>? _getModIssueTooltip;
+    // Trust panel callbacks — wired by ModManager.Initialize. When null, the Trust button
+    // simply isn't rendered in the Mods dialog header.
+    private static Action? _onOpenTrustPanel;
 
     public static void Install(SceneTree tree,
         Action? onModsPressed = null,
@@ -35,7 +38,8 @@ public static class MainMenuIntegration
         Func<List<ModManifest>>? getMods = null,
         Func<string, bool>? isModEnabled = null,
         Action<string, bool>? onToggleMod = null,
-        Func<string, string?>? getModIssueTooltip = null)
+        Func<string, string?>? getModIssueTooltip = null,
+        Action? onOpenTrustPanel = null)
     {
         _tree = tree;
         _onModsButtonPressed = onModsPressed;
@@ -44,6 +48,7 @@ public static class MainMenuIntegration
         _isModEnabled = isModEnabled;
         _onToggleMod = onToggleMod;
         _getModIssueTooltip = getModIssueTooltip;
+        _onOpenTrustPanel = onOpenTrustPanel;
         if (_installed) return;
         _installed = true;
         GD.Print("[ModFramework] MainMenuIntegration installed, waiting for main menu...");
@@ -192,6 +197,22 @@ public static class MainMenuIntegration
             header.AddChild(applyButton);
             focusables.Add(applyButton);
             // Note: no EnsureControlVisible — applyButton is outside the ScrollContainer.
+        }
+
+        if (_onOpenTrustPanel != null)
+        {
+            var trustButton = new Button
+            {
+                Text = "Trust",
+                FocusMode = Control.FocusModeEnum.All,
+                SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+                TooltipText = "Trust settings: Open / Trusted-only mode, manage trusted mod hashes, promote quarantined mods.",
+            };
+            ApplyButtonTheme(trustButton);
+            trustButton.CustomMinimumSize = new Vector2(110f, Math.Max(GetReferenceButtonHeight(), 48f));
+            trustButton.Pressed += _onOpenTrustPanel;
+            header.AddChild(trustButton);
+            focusables.Add(trustButton);
         }
 
         var mods = _getMods?.Invoke() ?? new List<ModManifest>();
@@ -390,6 +411,217 @@ public static class MainMenuIntegration
         focusables.Add(closeBtn);
         WireVerticalFocus(focusables);
         (focusables.FirstOrDefault() ?? closeBtn).CallDeferred("grab_focus");
+    }
+
+    // Trust settings panel — toggle Open / Trusted-only mode, view/remove trusted
+    // hashes, see quarantined mods waiting for trust, and promote them with one click.
+    // Reuses the same compact dialog scaffolding as the conflict prompt. Layer 130 so
+    // it sits above the Mods dialog at 128.
+    public static void ShowTrustPanel(SceneTree tree,
+        Func<ModTrustConfig> getTrust,
+        Action<ModTrustConfig> saveTrust,
+        Func<IReadOnlyList<ModManager.QuarantinedModInfo>> scanQuarantine,
+        Func<ModManager.QuarantinedModInfo, string?> promoteQuarantine)
+    {
+        if (tree?.Root == null) return;
+        var existing = tree.Root.GetNodeOrNull("ModFrameworkTrustLayer");
+        if (existing != null) { existing.QueueFree(); return; }
+
+        var canvasLayer = new CanvasLayer { Name = "ModFrameworkTrustLayer", Layer = 130 };
+        tree.Root.AddChild(canvasLayer);
+
+        var overlay = new Control { Name = "ModFrameworkTrustDialog", MouseFilter = Control.MouseFilterEnum.Stop };
+        SetFullRect(overlay);
+        canvasLayer.AddChild(overlay);
+
+        _tree ??= tree;
+
+        var viewportSize = tree.Root.GetViewport().GetVisibleRect().Size;
+        var dialogSize = new Vector2(
+            Mathf.Clamp(viewportSize.X * 0.50f, 540f, 760f),
+            Mathf.Clamp(viewportSize.Y * 0.65f, 420f, 640f));
+        var panel = CreateFallbackDialogHost(overlay, dialogSize, compact: false);
+
+        // We rebuild the body on every change so the trusted-hash list and quarantine
+        // list stay in sync without manually wiring per-row events.
+        Action? rebuild = null;
+        rebuild = () =>
+        {
+            foreach (var child in panel.GetChildren()) child.QueueFree();
+            BuildTrustPanelBody(panel, dialogSize, getTrust, saveTrust, scanQuarantine, promoteQuarantine, rebuild!,
+                close: () => canvasLayer.QueueFree());
+        };
+        rebuild();
+
+        overlay.GuiInput += (InputEvent ev) =>
+        {
+            if (!IsActionPressed(ev, "ui_cancel")) return;
+            canvasLayer.QueueFree();
+            overlay.AcceptEvent();
+        };
+    }
+
+    private static void BuildTrustPanelBody(VBoxContainer panel, Vector2 dialogSize,
+        Func<ModTrustConfig> getTrust,
+        Action<ModTrustConfig> saveTrust,
+        Func<IReadOnlyList<ModManager.QuarantinedModInfo>> scanQuarantine,
+        Func<ModManager.QuarantinedModInfo, string?> promoteQuarantine,
+        Action rebuild,
+        Action close)
+    {
+        var trust = getTrust();
+
+        var title = new Label
+        {
+            Text = "Trust Settings",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        ApplyFont(title, Math.Max(_buttonFontSize + 8, 24));
+        title.AddThemeColorOverride("font_color", new Color(0.99f, 0.86f, 0.42f));
+        panel.AddChild(title);
+
+        // Mode row — two pill buttons, the active one styled as the accent yellow.
+        var modeRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        modeRow.AddThemeConstantOverride("separation", 12);
+        panel.AddChild(modeRow);
+
+        var modeLabel = new Label { Text = "Mode:", VerticalAlignment = VerticalAlignment.Center };
+        ApplyFont(modeLabel, Math.Max(_buttonFontSize, 16));
+        modeRow.AddChild(modeLabel);
+
+        var btnOpen = new Button { Text = trust.IsTrustedOnly ? "Open" : "● Open", FocusMode = Control.FocusModeEnum.All };
+        ApplyButtonTheme(btnOpen);
+        btnOpen.CustomMinimumSize = new Vector2(140, 40);
+        btnOpen.Pressed += () => { trust.Mode = ModTrustConfig.ModeOpen; saveTrust(trust); rebuild(); };
+        modeRow.AddChild(btnOpen);
+
+        var btnTrusted = new Button { Text = trust.IsTrustedOnly ? "● Trusted-only" : "Trusted-only", FocusMode = Control.FocusModeEnum.All };
+        ApplyButtonTheme(btnTrusted);
+        btnTrusted.CustomMinimumSize = new Vector2(180, 40);
+        btnTrusted.Pressed += () => { trust.Mode = ModTrustConfig.ModeTrustedOnly; saveTrust(trust); rebuild(); };
+        modeRow.AddChild(btnTrusted);
+
+        var modeNote = new Label
+        {
+            Text = trust.IsTrustedOnly
+                ? "Trusted-only: incoming transfers with unknown hashes go to user://mods-quarantine/ until you trust them."
+                : "Open: all received mods auto-install. Set Trusted-only if you only want vetted mods to activate.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        ApplyFont(modeNote, Math.Max(_buttonFontSize - 1, 13));
+        modeNote.AddThemeColorOverride("font_color", new Color(0.78f, 0.88f, 0.92f));
+        panel.AddChild(modeNote);
+
+        // Trusted hashes — scrollable list with [×] remove on each row.
+        var hashHeader = new Label { Text = $"Trusted hashes ({trust.TrustedSha256.Count})" };
+        ApplyFont(hashHeader, Math.Max(_buttonFontSize, 16));
+        hashHeader.AddThemeColorOverride("font_color", new Color(0.97f, 0.92f, 0.71f));
+        panel.AddChild(hashHeader);
+
+        var scroll = new ScrollContainer
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0, Math.Max(dialogSize.Y * 0.40f, 180f)),
+        };
+        panel.AddChild(scroll);
+
+        var list = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        list.AddThemeConstantOverride("separation", 6);
+        scroll.AddChild(list);
+
+        if (trust.TrustedSha256.Count == 0)
+        {
+            var empty = new Label { Text = "No trusted hashes yet.", HorizontalAlignment = HorizontalAlignment.Center };
+            ApplyFont(empty, Math.Max(_buttonFontSize - 1, 13));
+            empty.AddThemeColorOverride("font_color", new Color(0.7f, 0.78f, 0.82f));
+            list.AddChild(empty);
+        }
+        else
+        {
+            for (var i = 0; i < trust.TrustedSha256.Count; i++)
+            {
+                var hash = trust.TrustedSha256[i];
+                var row = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+                row.AddThemeConstantOverride("separation", 8);
+                list.AddChild(row);
+
+                var hashLabel = new Label { Text = hash.Length > 24 ? hash[..24] + "..." : hash, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill, TooltipText = hash };
+                ApplyFont(hashLabel, Math.Max(_buttonFontSize - 1, 13));
+                hashLabel.AddThemeColorOverride("font_color", new Color(0.85f, 0.92f, 0.95f));
+                row.AddChild(hashLabel);
+
+                var removeBtn = new Button { Text = "×", FocusMode = Control.FocusModeEnum.All };
+                ApplyButtonTheme(removeBtn);
+                removeBtn.CustomMinimumSize = new Vector2(40, 32);
+                var captured = hash;
+                removeBtn.Pressed += () =>
+                {
+                    trust.TrustedSha256.Remove(captured);
+                    saveTrust(trust);
+                    rebuild();
+                };
+                row.AddChild(removeBtn);
+            }
+        }
+
+        // Quarantined mods — show with [Trust + Move] button per entry.
+        var quarantined = scanQuarantine();
+        var quarantineHeader = new Label { Text = $"Quarantined mods ({quarantined.Count})" };
+        ApplyFont(quarantineHeader, Math.Max(_buttonFontSize, 16));
+        quarantineHeader.AddThemeColorOverride("font_color", new Color(0.97f, 0.92f, 0.71f));
+        panel.AddChild(quarantineHeader);
+
+        if (quarantined.Count == 0)
+        {
+            var none = new Label { Text = "Nothing quarantined.", HorizontalAlignment = HorizontalAlignment.Center };
+            ApplyFont(none, Math.Max(_buttonFontSize - 1, 13));
+            none.AddThemeColorOverride("font_color", new Color(0.7f, 0.78f, 0.82f));
+            panel.AddChild(none);
+        }
+        else
+        {
+            foreach (var q in quarantined)
+            {
+                var qrow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+                qrow.AddThemeConstantOverride("separation", 8);
+                panel.AddChild(qrow);
+
+                var qlabel = new Label
+                {
+                    Text = $"{q.ModId} ({q.ByteSize / 1024} KB)  {q.Sha256Hex[..16]}...",
+                    SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                    TooltipText = $"{q.FilePath}\nSHA-256: {q.Sha256Hex}",
+                };
+                ApplyFont(qlabel, Math.Max(_buttonFontSize - 1, 13));
+                qrow.AddChild(qlabel);
+
+                var trustBtn = new Button { Text = "Trust + activate", FocusMode = Control.FocusModeEnum.All };
+                ApplyButtonTheme(trustBtn);
+                trustBtn.CustomMinimumSize = new Vector2(180, 32);
+                var captured = q;
+                trustBtn.Pressed += () =>
+                {
+                    var moved = promoteQuarantine(captured);
+                    if (moved != null) rebuild();
+                };
+                qrow.AddChild(trustBtn);
+            }
+        }
+
+        var closeBtn = new Button
+        {
+            Text = "Close",
+            FocusMode = Control.FocusModeEnum.All,
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
+            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
+        };
+        ApplyButtonTheme(closeBtn);
+        closeBtn.Pressed += () => close();
+        panel.AddChild(closeBtn);
+        closeBtn.CallDeferred("grab_focus");
     }
 
     // Pushes a mod's enabled state into the matching toggle widget in the open Mods

@@ -69,7 +69,8 @@ public class ModManager
             onApplySelectedMods: ApplyDesiredModsForSession,
             getMods: () => _localMods,
             isModEnabled: id => IsModDesiredEnabled(id),
-            onToggleMod: (id, enabled) => ToggleMod(id, enabled));
+            onToggleMod: (id, enabled) => ToggleMod(id, enabled),
+            getModIssueTooltip: BuildModIssueTooltip);
 
         try { ModExceptionFilter.Install(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] Exception filter failed: {ex.Message}"); }
@@ -421,6 +422,28 @@ public class ModManager
     }
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
+
+    // Used by the Mods dialog to decide whether to show a ⚠ badge next to a mod card.
+    // Returns null if there are no relevant issues, otherwise a short multi-line summary.
+    private string? BuildModIssueTooltip(string modId)
+    {
+        var report = _latestCompatibilityReport;
+        if (report == null || !report.HasIssues) return null;
+
+        var lines = new List<string>();
+        foreach (var c in report.Conflicts)
+            if (string.Equals(c.ModA, modId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.ModB, modId, StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Conflict: {c.ModA} vs {c.ModB} — {c.Reason}");
+        foreach (var w in report.Warnings)
+            if (w.InvolvedMods.Any(id => string.Equals(id, modId, StringComparison.OrdinalIgnoreCase)))
+                lines.Add($"Warning: {w.Detail}");
+        foreach (var d in report.MissingDependencies)
+            if (string.Equals(d.ModId, modId, StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Missing dependency: requires {d.MissingDependencyId}");
+
+        return lines.Count == 0 ? null : string.Join("\n", lines);
+    }
 
     // Walks the latest report for actionable local conflicts (both mods enabled here)
     // and pops the resolution prompt for the first one we haven't already handled. Only

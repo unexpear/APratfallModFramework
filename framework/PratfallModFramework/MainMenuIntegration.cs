@@ -25,13 +25,17 @@ public static class MainMenuIntegration
     private static Func<List<ModManifest>>? _getMods;
     private static Func<string, bool>? _isModEnabled;
     private static Action<string, bool>? _onToggleMod;
+    // Returns null when the mod has no compatibility issues, otherwise a short
+    // human-readable summary suitable for a tooltip ("conflicts with X; missing dep Y").
+    private static Func<string, string?>? _getModIssueTooltip;
 
     public static void Install(SceneTree tree,
         Action? onModsPressed = null,
         Action? onApplySelectedMods = null,
         Func<List<ModManifest>>? getMods = null,
         Func<string, bool>? isModEnabled = null,
-        Action<string, bool>? onToggleMod = null)
+        Action<string, bool>? onToggleMod = null,
+        Func<string, string?>? getModIssueTooltip = null)
     {
         _tree = tree;
         _onModsButtonPressed = onModsPressed;
@@ -39,6 +43,7 @@ public static class MainMenuIntegration
         _getMods = getMods;
         _isModEnabled = isModEnabled;
         _onToggleMod = onToggleMod;
+        _getModIssueTooltip = getModIssueTooltip;
         if (_installed) return;
         _installed = true;
         GD.Print("[ModFramework] MainMenuIntegration installed, waiting for main menu...");
@@ -300,6 +305,10 @@ public static class MainMenuIntegration
                 infoColumn.AddThemeConstantOverride("separation", 3);
                 topRow.AddChild(infoColumn);
 
+                var titleRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+                titleRow.AddThemeConstantOverride("separation", 8);
+                infoColumn.AddChild(titleRow);
+
                 var titleLabel = new Label
                 {
                     Text = $"{mod.Name}  v{mod.Version}",
@@ -307,7 +316,25 @@ public static class MainMenuIntegration
                 };
                 ApplyFont(titleLabel, Math.Max(_buttonFontSize + 2, 18));
                 titleLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.97f, 0.98f));
-                infoColumn.AddChild(titleLabel);
+                titleRow.AddChild(titleLabel);
+
+                // Compatibility badge: if the cached compat report flags this mod, show a
+                // ⚠ next to the name with the issue list as a hover tooltip. Snapshot at
+                // dialog-open time — for live updates the dialog would need to subscribe.
+                var issueTooltip = _getModIssueTooltip?.Invoke(mod.Id);
+                if (!string.IsNullOrEmpty(issueTooltip))
+                {
+                    var badge = new Label
+                    {
+                        Text = "⚠",
+                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+                        TooltipText = issueTooltip,
+                        MouseFilter = Control.MouseFilterEnum.Stop, // needed for tooltip
+                    };
+                    ApplyFont(badge, Math.Max(_buttonFontSize + 4, 22));
+                    badge.AddThemeColorOverride("font_color", new Color(1f, 0.78f, 0.25f));
+                    titleRow.AddChild(badge);
+                }
 
                 var authorLabel = new Label
                 {

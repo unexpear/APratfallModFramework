@@ -381,8 +381,13 @@ public static class MainMenuIntegration
         // Rebind _tree so CreateFallbackDialogHost's harvest helpers work in this context.
         _tree ??= tree;
 
-        var dialogSize = GetDialogSize();
-        var panel = CreateFallbackDialogHost(overlay, dialogSize);
+        // Conflict prompt is small content (~6 lines + 3 buttons). A compact dialog hugs
+        // its content instead of stretching to the Mods-dialog floor.
+        var viewportSize = tree.Root.GetViewport().GetVisibleRect().Size;
+        var dialogSize = new Vector2(
+            Mathf.Clamp(viewportSize.X * 0.42f, 480f, 640f),
+            0f /* compact host ignores Y floor */);
+        var panel = CreateFallbackDialogHost(overlay, dialogSize, compact: true);
 
         var title = new Label
         {
@@ -459,7 +464,7 @@ public static class MainMenuIntegration
         keepA.CallDeferred("grab_focus");
     }
 
-    private static VBoxContainer CreateFallbackDialogHost(Control overlay, Vector2 dialogSize)
+    private static VBoxContainer CreateFallbackDialogHost(Control overlay, Vector2 dialogSize, bool compact = false)
     {
         // Light scrim like Options — the game world stays visible behind the dialog.
         var scrim = new ColorRect
@@ -477,15 +482,19 @@ public static class MainMenuIntegration
         SetFullRect(centering);
         overlay.AddChild(centering);
 
-        var contentWidth = Math.Max(500f, dialogSize.X - Math.Max(dialogSize.X * 0.1f, 72f));
-        var contentHeight = Math.Max(340f, dialogSize.Y - Math.Max(dialogSize.Y * 0.14f, 92f));
+        // The Mods dialog wants a tall content area for its mod list. Compact callers
+        // (conflict prompt, etc.) skip that floor so the panel hugs its content instead
+        // of stretching to a tall empty box.
+        var contentWidth = Math.Max(compact ? 380f : 500f, dialogSize.X - Math.Max(dialogSize.X * 0.1f, 72f));
+        var contentHeightFloor = compact ? 0f : 340f;
+        var contentHeight = Math.Max(contentHeightFloor, dialogSize.Y - Math.Max(dialogSize.Y * 0.14f, 92f));
 
         HarvestNativeStyleboxes();
         HarvestNativeFrameTextures();
 
         var shell = new PanelContainer
         {
-            CustomMinimumSize = dialogSize,
+            CustomMinimumSize = compact ? new Vector2(dialogSize.X, 0) : dialogSize,
             SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
             SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
             MouseFilter = Control.MouseFilterEnum.Stop,
@@ -509,7 +518,7 @@ public static class MainMenuIntegration
         var panel = new VBoxContainer
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = compact ? Control.SizeFlags.ShrinkBegin : Control.SizeFlags.ExpandFill,
             CustomMinimumSize = new Vector2(contentWidth, contentHeight),
         };
         panel.AddThemeConstantOverride("separation", 14);

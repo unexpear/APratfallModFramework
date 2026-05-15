@@ -459,6 +459,9 @@ public class ModManager
                     var disableId = string.Equals(keepId, modAId, StringComparison.OrdinalIgnoreCase) ? modBId : modAId;
                     GD.Print($"[ModFramework] Conflict resolved: keep {keepId}, disable {disableId}");
                     ToggleMod(disableId, false);
+                    // Push the new state into the dialog so the user sees the toggle
+                    // flip — they may still have the Mods dialog open behind the prompt.
+                    MainMenuIntegration.SyncDialogToggle(disableId, false);
                 }
                 // After this prompt resolves, see if a sibling conflict needs prompting.
                 TryShowNextConflictPrompt();

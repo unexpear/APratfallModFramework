@@ -6,6 +6,10 @@ public static class MainMenuIntegration
 {
     private static SceneTree? _tree;
     private static bool _installed;
+    // Toggle widgets currently in the open Mods dialog, keyed by mod id. Lets the
+    // framework push visual state into the dialog when something other than the user
+    // (e.g. the conflict-resolution prompt) flips a mod off.
+    private static readonly Dictionary<string, ToggleSwitch> _dialogToggles = new(StringComparer.OrdinalIgnoreCase);
     private static Theme? _buttonTheme;
     private static Font? _buttonFont;
     private static int _buttonFontSize;
@@ -316,7 +320,13 @@ public static class MainMenuIntegration
 
                 var toggle = new ToggleSwitch(_isModEnabled?.Invoke(mod.Id) ?? false);
                 var captured = mod.Id;
+                _dialogToggles[captured] = toggle;
                 toggle.Toggled += (pressed) => _onToggleMod?.Invoke(captured, pressed);
+                toggle.TreeExited += () =>
+                {
+                    if (_dialogToggles.TryGetValue(captured, out var current) && current == toggle)
+                        _dialogToggles.Remove(captured);
+                };
                 toggle.FocusEntered += () => scroll.EnsureControlVisible(toggle);
                 focusables.Add(toggle);
                 topRow.AddChild(toggle);
@@ -353,6 +363,17 @@ public static class MainMenuIntegration
         focusables.Add(closeBtn);
         WireVerticalFocus(focusables);
         (focusables.FirstOrDefault() ?? closeBtn).CallDeferred("grab_focus");
+    }
+
+    // Pushes a mod's enabled state into the matching toggle widget in the open Mods
+    // dialog (if any). Use this when something other than a user click flips a mod on
+    // or off — e.g. the conflict-resolution prompt — so the dialog stays in sync with
+    // the framework's truth. Setter on ToggleSwitch updates visuals only, doesn't
+    // re-fire the Toggled event, so this is safe from feedback loops.
+    public static void SyncDialogToggle(string modId, bool isEnabled)
+    {
+        if (_dialogToggles.TryGetValue(modId, out var toggle) && GodotObject.IsInstanceValid(toggle))
+            toggle.IsOn = isEnabled;
     }
 
     // Shows a "two mods declared incompatible — keep which?" dialog. Reuses the same

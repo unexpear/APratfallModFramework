@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>HelloWorldMod</AssemblyName>
+    <RootNamespace>HelloWorldMod</RootNamespace>
+
+    <!-- Adjust these two paths for your install. -->
+    <GameDir>C:\Program Files (x86)\Steam\steamapps\common\Pratfall</GameDir>
+    <UserModsDir>$(APPDATA)\Pratfall\mods</UserModsDir>
+
+    <ModId>HelloWorldMod</ModId>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference the framework so manifest types and patch helpers compile. -->
+    <ProjectReference Include="..\..\framework\PratfallModFramework\PratfallModFramework.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="GodotSharp">
+      <HintPath>$(GameDir)\data_Pratfall_windows_x86_64\GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Pratfall">
+      <HintPath>$(GameDir)\data_Pratfall_windows_x86_64\Pratfall.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Copies the built DLL + manifest into the user's mods folder so the framework
+       picks it up on next launch. Remove or override for your own deploy flow. -->
+  <Target Name="InstallSample" AfterTargets="Build">
+    <MakeDir Directories="$(UserModsDir)\$(ModId)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(UserModsDir)\$(ModId)" />
+    <Copy SourceFiles="manifest.json" DestinationFolder="$(UserModsDir)\$(ModId)" />
+  </Target>
+
+</Project>

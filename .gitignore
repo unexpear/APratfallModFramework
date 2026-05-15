@@ -1,0 +1,34 @@
+# Build output
+**/bin/
+**/obj/
+**/.vs/
+*.user
+*.suo
+
+# Visual Studio Code
+.vscode/
+
+# Rider
+.idea/
+*.DotSettings.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Private dev-only mods + experimental sandboxes (do NOT ship publicly)
+tmp/
+private-mods/
+
+# Local state files that should never be committed
+**/modframework-debug-peer.json
+**/modframework-state.json
+**/modframework-trust.json
+
+# Internal working notes (Claude Code continuation, AGENTS guidance)
+CLAUDE_CODE_CONTINUATION.md
+AGENTS.md
+
+# Game install / user data leaking in
+data_Pratfall_windows_x86_64/
+*.pck

@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GameDir>D:\SteamLibrary\steamapps\common\Pratfall</GameDir>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="GodotSharp">
+      <HintPath>$(GameDir)\data_Pratfall_windows_x86_64\GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Facepunch.Steamworks.Win64">
+      <HintPath>$(GameDir)\data_Pratfall_windows_x86_64\Facepunch.Steamworks.Win64.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Pratfall">
+      <HintPath>$(GameDir)\data_Pratfall_windows_x86_64\Pratfall.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.3.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(NuGetPackageRoot)lib.harmony\2.3.3\lib\net8.0\0Harmony.dll" LogicalName="0Harmony.dll" />
+  </ItemGroup>
+
+  <Target Name="PostBuild" AfterTargets="Build">
+    <Copy SourceFiles="$(OutputPath)PratfallModFramework.dll" DestinationFolder="$(GameDir)\data_Pratfall_windows_x86_64" />
+    <Copy SourceFiles="$(NuGetPackageRoot)lib.harmony\2.3.3\lib\net8.0\0Harmony.dll" DestinationFolder="$(GameDir)\data_Pratfall_windows_x86_64" Condition="Exists('$(NuGetPackageRoot)lib.harmony\2.3.3\lib\net8.0\0Harmony.dll')" />
+  </Target>
+</Project>

@@ -1,0 +1,20 @@
+{
+  "id": "HelloWorldMod",
+  "name": "Hello World Mod",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "Minimal sample mod: prints a message at load and unload. Demonstrates the framework's DLL mod entry points.",
+  "type": "patch",
+  "effects": {
+    "settings": [],
+    "patches": [],
+    "nodes": [],
+    "assets": [],
+    "needsRestart": false
+  },
+  "multiplayer": {
+    "mode": "local_only",
+    "requires": [],
+    "conflictsWith": []
+  }
+}

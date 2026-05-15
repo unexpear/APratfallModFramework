@@ -32,3 +32,6 @@ AGENTS.md
 # Game install / user data leaking in
 data_Pratfall_windows_x86_64/
 *.pck
+
+# Release zips — uploaded as GitHub Release assets, no need to keep in repo
+release/*.zip

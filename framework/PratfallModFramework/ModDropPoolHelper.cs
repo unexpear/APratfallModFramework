@@ -29,12 +29,22 @@ public static class ModDropPoolHelper
     {
         if (string.IsNullOrWhiteSpace(poolResPath))
             throw new ArgumentException("poolResPath is required", nameof(poolResPath));
-        if (scene == null)
-            throw new ArgumentNullException(nameof(scene));
-
         var pool = ResourceLoader.Load<RandomWeightedDropPool>(poolResPath);
         if (pool == null)
             throw new InvalidOperationException($"RandomWeightedDropPool not found at {poolResPath}");
+        return RegisterIn(pool, scene, weight, weightAdvantage, weightDisadvantage, canDropSingleplayer, poolResPath);
+    }
+
+    // Same as Register, but takes an already-loaded pool. Useful for tests that want to
+    // exercise the helper against an in-memory pool without touching shipped game data.
+    public static IDisposable RegisterIn(RandomWeightedDropPool pool, PackedScene scene, int weight,
+        int weightAdvantage = 0, int weightDisadvantage = 0, bool canDropSingleplayer = true,
+        string label = "<in-memory>")
+    {
+        if (pool == null)
+            throw new ArgumentNullException(nameof(pool));
+        if (scene == null)
+            throw new ArgumentNullException(nameof(scene));
 
         var entry = new RandomWeightedScene
         {
@@ -51,8 +61,8 @@ public static class ModDropPoolHelper
         grown[existing.Length] = entry;
         pool.Pool = grown;
 
-        GD.Print($"[ModFramework] Drop-pool registered: +1 entry (weight={weight}) on {poolResPath}");
-        return new PoolRegistration(pool, entry, poolResPath);
+        GD.Print($"[ModFramework] Drop-pool registered: +1 entry (weight={weight}) on {label}");
+        return new PoolRegistration(pool, entry, label);
     }
 
     private sealed class PoolRegistration : IDisposable

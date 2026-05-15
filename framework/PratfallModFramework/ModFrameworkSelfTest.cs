@@ -305,8 +305,9 @@ public static class ModFrameworkSelfTest
         public int TransferCount;
         public int CompletedCount;
         public int CrossContaminationDetected;
+        public int MaxConsecutiveSameTransfer;
         public override string ToString() =>
-            $"concurrent success={Success} {CompletedCount}/{TransferCount} completed cross_contamination={CrossContaminationDetected} err={ErrorMessage}";
+            $"concurrent success={Success} {CompletedCount}/{TransferCount} completed cross_contamination={CrossContaminationDetected} max_consecutive_same={MaxConsecutiveSameTransfer} err={ErrorMessage}";
     }
 
     // Starts N concurrent transfers from a single ModP2PTransfer instance, drains all
@@ -342,22 +343,31 @@ public static class ModFrameworkSelfTest
         }
 
         var persistedByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Track scheduling fairness: consecutive chunks from the same mod indicate the
+        // round-robin starved siblings.
+        var lastModId = "";
+        var consecutive = 0;
         for (var i = 0; i < 8192; i++)
         {
             var pending = transfer.TickOutgoing();
             if (pending == null) break;
-            var rx = transfer.OnChunkReceived($"ct-source-{pending.Value.Chunk.ModId}", pending.Value.Chunk, trust, out var path);
+            var thisMod = pending.Value.Chunk.ModId;
+            if (thisMod == lastModId) consecutive++;
+            else { result.MaxConsecutiveSameTransfer = Math.Max(result.MaxConsecutiveSameTransfer, consecutive); consecutive = 1; lastModId = thisMod; }
+
+            var rx = transfer.OnChunkReceived($"ct-source-{thisMod}", pending.Value.Chunk, trust, out var path);
             if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
             {
-                persistedByMod[pending.Value.Chunk.ModId] = path ?? "";
+                persistedByMod[thisMod] = path ?? "";
                 result.CompletedCount++;
             }
             else if (rx != ModP2PTransfer.ReceiveResult.Continue)
             {
-                result.ErrorMessage = $"receive failed for {pending.Value.Chunk.ModId}: {rx}";
+                result.ErrorMessage = $"receive failed for {thisMod}: {rx}";
                 return result;
             }
         }
+        result.MaxConsecutiveSameTransfer = Math.Max(result.MaxConsecutiveSameTransfer, consecutive);
 
         // Verify each persisted file matches its own expected hash. Cross-contamination
         // would show as a hash mismatch (file contains bytes from a sibling transfer).
@@ -376,7 +386,17 @@ public static class ModFrameworkSelfTest
             }
         }
 
-        result.Success = result.CompletedCount == transferCount && result.CrossContaminationDetected == 0;
+        // Fairness check: with N concurrent transfers and round-robin scheduling, the
+        // scheduler should never serve more than 1 consecutive chunk from the same mod
+        // (until others finish). Allow a small cushion (2) for the very last chunks where
+        // siblings have already drained.
+        const int fairnessCushion = 2;
+        var fairnessOk = result.MaxConsecutiveSameTransfer <= fairnessCushion;
+        result.Success = result.CompletedCount == transferCount &&
+                         result.CrossContaminationDetected == 0 &&
+                         fairnessOk;
+        if (!fairnessOk && string.IsNullOrEmpty(result.ErrorMessage))
+            result.ErrorMessage = $"unfair scheduling — {result.MaxConsecutiveSameTransfer} consecutive chunks from same transfer";
         return result;
     }
 

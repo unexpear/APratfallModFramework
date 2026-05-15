@@ -19,6 +19,10 @@ internal sealed class ModP2PTransfer
 
     private readonly Dictionary<string, OutgoingTransfer> _outgoing = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IncomingTransfer> _incoming = new(StringComparer.OrdinalIgnoreCase);
+    // Round-robin order of active outgoing transfer keys. We advance through this each
+    // TickOutgoing call so a 5 MB transfer can't starve a sibling 100 KB transfer.
+    private readonly List<string> _outgoingOrder = new();
+    private int _outgoingCursor;
 
     public event Action<string /*modId*/, float /*0..1*/>? OnSendProgress;
     public event Action<string /*modId*/, float /*0..1*/>? OnReceiveProgress;
@@ -52,7 +56,9 @@ internal sealed class ModP2PTransfer
         var hash = Convert.ToHexString(SHA256.HashData(bytes));
         var totalChunks = Math.Max(1, (bytes.Length + ChunkSize - 1) / ChunkSize);
         var key = BuildKey(targetUserId, modId);
+        var isNew = !_outgoing.ContainsKey(key);
         _outgoing[key] = new OutgoingTransfer(targetUserId, modId, modVersion, bytes, hash, totalChunks);
+        if (isNew) _outgoingOrder.Add(key);
         GD.Print($"[ModFramework] Transfer started: send {modId} v{modVersion} -> {targetUserId} ({bytes.Length} bytes, {totalChunks} chunks)");
         return true;
     }
@@ -66,13 +72,25 @@ internal sealed class ModP2PTransfer
 
     // Drain one outgoing transfer step. Returns the next (target, chunk) pair to send, or
     // null if nothing is pending right now. Caller invokes this in a loop until null.
+    //
+    // Round-robin scheduling: each call advances `_outgoingCursor` past the previously
+    // served transfer so concurrent transfers interleave 1-chunk-at-a-time. Without this,
+    // a 5 MB transfer would fully drain before any sibling 100 KB transfer began.
     public PendingChunk? TickOutgoing()
     {
-        foreach (var (key, t) in _outgoing)
+        if (_outgoingOrder.Count == 0) return null;
+
+        for (var probe = 0; probe < _outgoingOrder.Count; probe++)
         {
-            if (t.NextChunkIndex >= t.TotalChunks)
+            var idx = (_outgoingCursor + probe) % _outgoingOrder.Count;
+            var key = _outgoingOrder[idx];
+            if (!_outgoing.TryGetValue(key, out var t) || t.NextChunkIndex >= t.TotalChunks)
             {
                 _outgoing.Remove(key);
+                _outgoingOrder.RemoveAt(idx);
+                if (_outgoingOrder.Count == 0) return null;
+                if (idx <= _outgoingCursor && _outgoingCursor > 0) _outgoingCursor--;
+                probe--; // re-probe at the same logical position now that we shifted
                 continue;
             }
 
@@ -95,8 +113,18 @@ internal sealed class ModP2PTransfer
 
             t.NextChunkIndex++;
             OnSendProgress?.Invoke(t.ModId, (float)t.NextChunkIndex / t.TotalChunks);
+
+            // Advance cursor so the NEXT TickOutgoing serves a different transfer if any.
+            _outgoingCursor = (idx + 1) % Math.Max(_outgoingOrder.Count, 1);
+
             if (t.NextChunkIndex >= t.TotalChunks)
+            {
                 _outgoing.Remove(key);
+                _outgoingOrder.RemoveAt(idx);
+                if (_outgoingOrder.Count == 0) _outgoingCursor = 0;
+                else if (idx < _outgoingCursor) _outgoingCursor--;
+                else if (_outgoingCursor >= _outgoingOrder.Count) _outgoingCursor = 0;
+            }
             return new PendingChunk(t.TargetUserId, chunk);
         }
         return null;
@@ -232,6 +260,8 @@ internal sealed class ModP2PTransfer
     public void Reset()
     {
         _outgoing.Clear();
+        _outgoingOrder.Clear();
+        _outgoingCursor = 0;
         _incoming.Clear();
     }
 

@@ -42,7 +42,6 @@ public static class ModFrameworkSelfTest
         result.ExpectedSha256 = Convert.ToHexString(SHA256.HashData(sourceBytes));
 
         var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig(); // open mode
         if (!transfer.BeginSend(targetUserId: "self-test-target", modId, modVersion, sourceDllPath))
         {
             result.ErrorMessage = "BeginSend returned false";
@@ -59,7 +58,7 @@ public static class ModFrameworkSelfTest
                 return result;
             }
             result.ChunkCount++;
-            var rx = transfer.OnChunkReceived("self-test-source", pending.Value.Chunk, trust, out var persistedPath);
+            var rx = transfer.OnChunkReceived("self-test-source", pending.Value.Chunk, out var persistedPath);
             if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
             {
                 result.PersistedPath = persistedPath ?? "";
@@ -95,7 +94,6 @@ public static class ModFrameworkSelfTest
         File.WriteAllBytes(sourcePath, sourceBytes);
 
         var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig();
         if (!transfer.BeginSend("tamper-target", "TamperTest", "1.0.0", sourcePath))
             return false;
 
@@ -115,7 +113,7 @@ public static class ModFrameworkSelfTest
                 if (bytes.Length > 0) bytes[0] ^= 0xFF;
                 chunk.ChunkBase64 = Convert.ToBase64String(bytes);
             }
-            var rx = transfer.OnChunkReceived("tamper-source", chunk, trust, out _);
+            var rx = transfer.OnChunkReceived("tamper-source", chunk, out _);
             if (chunk.IsLast)
                 return rx == ModP2PTransfer.ReceiveResult.FailedHashMismatch;
             if (rx != ModP2PTransfer.ReceiveResult.Continue)
@@ -144,75 +142,6 @@ public static class ModFrameworkSelfTest
         var sourcePath = Path.Combine(tempDir, $"boundary-{label}.bin");
         File.WriteAllBytes(sourcePath, bytes);
         return RunTransferLoopback($"BoundaryTest_{label}", "1.0.0", sourcePath);
-    }
-
-    public sealed class QuarantineRoutingResult
-    {
-        public bool Success;
-        public string ErrorMessage = "";
-        public string PersistedPath = "";
-        public bool LandedInQuarantine;
-        public override string ToString() => $"quarantine success={Success} landed_in_quarantine={LandedInQuarantine} path={PersistedPath} err={ErrorMessage}";
-    }
-
-    // Runs a transfer with a synthetic trusted-only ModTrustConfig where the source's hash
-    // is NOT on the allowlist. The receiver should route the file into mods-quarantine/
-    // instead of mods/ and return CompletedAndQuarantined.
-    public static QuarantineRoutingResult RunQuarantineRouting()
-    {
-        var result = new QuarantineRoutingResult();
-
-        var bytes = new byte[8 * 1024];
-        new Random(unchecked((int)0xCAFEBABE)).NextBytes(bytes);
-
-        var tempDir = ProjectSettings.GlobalizePath("user://stress-tmp");
-        Directory.CreateDirectory(tempDir);
-        var sourcePath = Path.Combine(tempDir, "quarantine-src.bin");
-        File.WriteAllBytes(sourcePath, bytes);
-
-        var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig { Mode = ModTrustConfig.ModeTrustedOnly };
-        // Empty trusted-hash list = nothing trusted -> any incoming hash routes to quarantine.
-
-        if (!transfer.BeginSend("q-target", "QuarantineTest", "1.0.0", sourcePath))
-        {
-            result.ErrorMessage = "BeginSend returned false";
-            return result;
-        }
-
-        for (var i = 0; i < 1024; i++)
-        {
-            var pending = transfer.TickOutgoing();
-            if (pending == null)
-            {
-                result.ErrorMessage = "no chunk produced before completion";
-                return result;
-            }
-            var rx = transfer.OnChunkReceived("q-source", pending.Value.Chunk, trust, out var persistedPath);
-            if (rx == ModP2PTransfer.ReceiveResult.CompletedAndQuarantined)
-            {
-                result.PersistedPath = persistedPath ?? "";
-                result.LandedInQuarantine = !string.IsNullOrEmpty(result.PersistedPath) &&
-                    result.PersistedPath.Replace('\\', '/').Contains("/mods-quarantine/", StringComparison.OrdinalIgnoreCase);
-                result.Success = result.LandedInQuarantine && File.Exists(result.PersistedPath);
-                if (!result.Success && string.IsNullOrEmpty(result.ErrorMessage))
-                    result.ErrorMessage = "completed but file is not in mods-quarantine";
-                return result;
-            }
-            if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
-            {
-                result.PersistedPath = persistedPath ?? "";
-                result.ErrorMessage = "trusted-only mode persisted to mods/ instead of quarantining";
-                return result;
-            }
-            if (rx != ModP2PTransfer.ReceiveResult.Continue)
-            {
-                result.ErrorMessage = $"receive failed: {rx}";
-                return result;
-            }
-        }
-        result.ErrorMessage = "exceeded chunk iterations without completion";
-        return result;
     }
 
     public sealed class OutOfOrderResult
@@ -245,7 +174,6 @@ public static class ModFrameworkSelfTest
         File.WriteAllBytes(sourcePath, sourceBytes);
 
         var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig();
         if (!transfer.BeginSend("ooo-target", "OutOfOrderTest", "1.0.0", sourcePath))
         {
             result.ErrorMessage = "BeginSend returned false";
@@ -277,10 +205,9 @@ public static class ModFrameworkSelfTest
         string? persistedPath = null;
         foreach (var c in delivery)
         {
-            last = transfer.OnChunkReceived("ooo-source", c, trust, out var p);
+            last = transfer.OnChunkReceived("ooo-source", c, out var p);
             if (p != null) persistedPath = p;
-            if (last == ModP2PTransfer.ReceiveResult.CompletedAndPersisted ||
-                last == ModP2PTransfer.ReceiveResult.CompletedAndQuarantined) break;
+            if (last == ModP2PTransfer.ReceiveResult.CompletedAndPersisted) break;
             if (last != ModP2PTransfer.ReceiveResult.Continue)
             {
                 result.ErrorMessage = $"receive failed: {last}";
@@ -324,7 +251,6 @@ public static class ModFrameworkSelfTest
         Directory.CreateDirectory(tempDir);
 
         var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig();
         var expectedHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < transferCount; i++)
@@ -355,7 +281,7 @@ public static class ModFrameworkSelfTest
             if (thisMod == lastModId) consecutive++;
             else { result.MaxConsecutiveSameTransfer = Math.Max(result.MaxConsecutiveSameTransfer, consecutive); consecutive = 1; lastModId = thisMod; }
 
-            var rx = transfer.OnChunkReceived($"ct-source-{thisMod}", pending.Value.Chunk, trust, out var path);
+            var rx = transfer.OnChunkReceived($"ct-source-{thisMod}", pending.Value.Chunk, out var path);
             if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
             {
                 persistedByMod[thisMod] = path ?? "";
@@ -436,7 +362,6 @@ public static class ModFrameworkSelfTest
         var pckExpectedHash = Convert.ToHexString(SHA256.HashData(pckBytes));
 
         var transfer = new ModP2PTransfer();
-        var trust = new ModTrustConfig();
         if (!transfer.BeginSend("pck-target", "PckSideTest", "1.0.0", dllSrc, ".dll"))
         { result.ErrorMessage = "BeginSend(.dll) returned false"; return result; }
         if (!transfer.BeginSend("pck-target", "PckSideTest", "1.0.0", pckSrc, ".pck"))
@@ -446,7 +371,7 @@ public static class ModFrameworkSelfTest
         {
             var pending = transfer.TickOutgoing();
             if (pending == null) break;
-            var rx = transfer.OnChunkReceived("pck-source", pending.Value.Chunk, trust, out var path);
+            var rx = transfer.OnChunkReceived("pck-source", pending.Value.Chunk, out var path);
             if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
             {
                 if (string.Equals(pending.Value.Chunk.FileSuffix, ".dll", StringComparison.OrdinalIgnoreCase))

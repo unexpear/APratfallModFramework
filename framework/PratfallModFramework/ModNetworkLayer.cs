@@ -306,6 +306,31 @@ public sealed class ModNetworkLayer
         OnMemberLeftLobby?.Invoke(member.GetUserId());
     }
 
+    // Asks Pratfall's lobby manager to leave the current lobby. Used when a peer
+    // declines an acquisition prompt for a vote-passed mod they don't have — the
+    // session can't continue with state divergence, so the framework opts the player
+    // out cleanly rather than forcing a download.
+    public bool LeaveLobby()
+    {
+        var lobby = TryGetLobbyManager();
+        if (lobby == null)
+        {
+            GD.PrintErr("[ModFramework] LeaveLobby: no lobby manager available");
+            return false;
+        }
+        try
+        {
+            lobby.LeaveLobby();
+            GD.Print("[ModFramework] LeaveLobby invoked (declined required mod)");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] LeaveLobby failed: {ex.Message}");
+            return false;
+        }
+    }
+
     public bool IsUserInLobby(string userId)
     {
         if (string.IsNullOrWhiteSpace(userId)) return false;

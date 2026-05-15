@@ -139,7 +139,6 @@ internal sealed class ModP2PTransfer
     {
         Continue,
         CompletedAndPersisted,
-        CompletedAndQuarantined,
         FailedSizeExceeded,
         FailedHashMismatch,
         FailedWriteError,
@@ -147,15 +146,14 @@ internal sealed class ModP2PTransfer
     }
 
     // Receive a chunk; when ALL chunks arrive (in any order, with possible duplicates)
-    // we assemble in index order, verify SHA-256, consult the trust policy, and either
-    // persist to user://mods/<id>/<id>.dll (open mode / trusted hash) or to
-    // user://mods-quarantine/<id>/<id>.dll (trusted-only mode with unknown hash).
-    // Caller re-scans local mods only on CompletedAndPersisted.
+    // we assemble in index order, verify SHA-256, and persist to
+    // user://mods/<id>/<id><suffix>. Caller re-scans local mods only on
+    // CompletedAndPersisted (and only for the .dll suffix — see ModManager).
     //
     // Order/duplicate handling: Pratfall's `Reliable` send mode guarantees delivery but
     // not strict in-order delivery across flushes. We bucket chunks by ChunkIndex and
     // ignore duplicates so a re-sent or reordered chunk doesn't corrupt the assembly.
-    public ReceiveResult OnChunkReceived(string sourceUserId, ModTransferChunk chunk, ModTrustConfig trust, out string? persistedDllPath)
+    public ReceiveResult OnChunkReceived(string sourceUserId, ModTransferChunk chunk, out string? persistedDllPath)
     {
         persistedDllPath = null;
         chunk.Normalize();
@@ -238,12 +236,9 @@ internal sealed class ModP2PTransfer
             return ReceiveResult.FailedHashMismatch;
         }
 
-        var quarantine = trust.IsTrustedOnly && !trust.IsHashTrusted(actualHash);
-        var rootDir = quarantine ? "user://mods-quarantine" : "user://mods";
-
         try
         {
-            var modDir = ProjectSettings.GlobalizePath($"{rootDir}/{chunk.ModId}/");
+            var modDir = ProjectSettings.GlobalizePath($"user://mods/{chunk.ModId}/");
             Directory.CreateDirectory(modDir);
             // chunk.FileSuffix decides which file inside the mod folder we land in:
             // ".dll" -> <modId>.dll (default), ".pck" -> <modId>.pck.
@@ -257,13 +252,9 @@ internal sealed class ModP2PTransfer
             return ReceiveResult.FailedWriteError;
         }
 
-        if (quarantine)
-            GD.Print($"[ModFramework] Transfer quarantined: {chunk.ModId}{chunk.FileSuffix} v{chunk.ModVersion} sha256={actualHash[..16]}... -> {rootDir}/. Add the hash to {ModTrustConfig.ConfigPath} to trust.");
-        else
-            GD.Print($"[ModFramework] Transfer complete: received {chunk.ModId}{chunk.FileSuffix} v{chunk.ModVersion} ({bytes.Length} bytes, sha256={actualHash[..16]}...)");
-
+        GD.Print($"[ModFramework] Transfer complete: received {chunk.ModId}{chunk.FileSuffix} v{chunk.ModVersion} ({bytes.Length} bytes, sha256={actualHash[..16]}...)");
         _incoming.Remove(key);
-        return quarantine ? ReceiveResult.CompletedAndQuarantined : ReceiveResult.CompletedAndPersisted;
+        return ReceiveResult.CompletedAndPersisted;
     }
 
     public void Reset()

@@ -8,7 +8,6 @@ public class ModManager
     private readonly ModNetworkLayer _networkLayer = new();
     private readonly ModVoteSession _voteSession = new();
     private readonly ModP2PTransfer _transfer = new();
-    private ModTrustConfig _trust = new();
     private VoteUI? _voteUI;
     private List<ModManifest> _localMods = new();
     private readonly Dictionary<string, bool> _desiredEnabled = new(StringComparer.OrdinalIgnoreCase);
@@ -38,8 +37,6 @@ public class ModManager
     {
         GD.Print("[ModFramework] ModManager.Initialize()");
         _tree = tree;
-        _trust = ModTrustConfig.LoadOrDefault();
-        GD.Print($"[ModFramework] Trust mode: {_trust.Mode} ({_trust.TrustedSha256.Count} trusted hashes)");
         OfficialModBridge.Install();
         SessionStartHooks.Install(kind =>
         {
@@ -70,13 +67,7 @@ public class ModManager
             getMods: () => _localMods,
             isModEnabled: id => IsModDesiredEnabled(id),
             onToggleMod: (id, enabled) => ToggleMod(id, enabled),
-            getModIssueTooltip: BuildModIssueTooltip,
-            onOpenTrustPanel: () => MainMenuIntegration.ShowTrustPanel(
-                _tree!,
-                getTrust: () => _trust,
-                saveTrust: SaveTrustConfig,
-                scanQuarantine: ScanQuarantinedMods,
-                promoteQuarantine: PromoteQuarantinedMod));
+            getModIssueTooltip: BuildModIssueTooltip);
 
         try { ModExceptionFilter.Install(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] Exception filter failed: {ex.Message}"); }
@@ -429,102 +420,6 @@ public class ModManager
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
 
-    public ModTrustConfig GetTrustConfig() => _trust;
-
-    // Save the in-memory trust config to disk and apply it. Caller can pass an updated
-    // config; we replace the manager's reference. Subsequent transfers will see the new
-    // mode/allowlist immediately.
-    public void SaveTrustConfig(ModTrustConfig updated)
-    {
-        if (updated == null) return;
-        _trust = updated;
-        _trust.Save();
-        GD.Print($"[ModFramework] Trust config saved: mode={_trust.Mode} ({_trust.TrustedSha256.Count} trusted hashes)");
-    }
-
-    public sealed class QuarantinedModInfo
-    {
-        public string ModId { get; init; } = "";
-        public string FilePath { get; init; } = "";
-        public string Sha256Hex { get; init; } = "";
-        public long ByteSize { get; init; }
-    }
-
-    // Walks user://mods-quarantine/ for DLL files and returns each with its SHA-256.
-    // The trust panel uses this to offer one-click "trust + move into mods/" workflow.
-    public IReadOnlyList<QuarantinedModInfo> ScanQuarantinedMods()
-    {
-        var results = new List<QuarantinedModInfo>();
-        var root = ProjectSettings.GlobalizePath("user://mods-quarantine");
-        if (!Directory.Exists(root)) return results;
-
-        foreach (var modDir in Directory.EnumerateDirectories(root))
-        {
-            var modId = Path.GetFileName(modDir);
-            foreach (var dllPath in Directory.EnumerateFiles(modDir, "*.dll"))
-            {
-                try
-                {
-                    using var sha = System.Security.Cryptography.SHA256.Create();
-                    using var fs = File.OpenRead(dllPath);
-                    var hash = Convert.ToHexString(sha.ComputeHash(fs));
-                    results.Add(new QuarantinedModInfo
-                    {
-                        ModId = modId,
-                        FilePath = dllPath,
-                        Sha256Hex = hash,
-                        ByteSize = new FileInfo(dllPath).Length,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    GD.PrintErr($"[ModFramework] Failed to hash quarantined {dllPath}: {ex.Message}");
-                }
-            }
-        }
-        return results;
-    }
-
-    // Promote a quarantined mod: add its hash to the trust allowlist, then move the
-    // file from mods-quarantine/ to mods/ so the next scan picks it up. Returns the
-    // path the file landed at, or null on failure.
-    public string? PromoteQuarantinedMod(QuarantinedModInfo info)
-    {
-        if (info == null || string.IsNullOrWhiteSpace(info.FilePath) || !File.Exists(info.FilePath))
-            return null;
-        try
-        {
-            // Trust the hash first so subsequent transfers of the same mod don't quarantine.
-            if (!_trust.IsHashTrusted(info.Sha256Hex))
-            {
-                _trust.TrustedSha256.Add(info.Sha256Hex);
-                _trust.Save();
-            }
-
-            var modsDir = ProjectSettings.GlobalizePath($"user://mods/{info.ModId}");
-            Directory.CreateDirectory(modsDir);
-            var dest = Path.Combine(modsDir, Path.GetFileName(info.FilePath));
-            File.Move(info.FilePath, dest, overwrite: true);
-
-            // Move sibling files (manifest.json, *.pck) too if they exist.
-            var srcDir = Path.GetDirectoryName(info.FilePath);
-            if (!string.IsNullOrEmpty(srcDir) && Directory.Exists(srcDir))
-            {
-                foreach (var sibling in Directory.EnumerateFiles(srcDir))
-                    File.Move(sibling, Path.Combine(modsDir, Path.GetFileName(sibling)), overwrite: true);
-                try { Directory.Delete(srcDir, recursive: true); } catch { }
-            }
-
-            GD.Print($"[ModFramework] Promoted quarantined mod {info.ModId} -> {dest}");
-            return dest;
-        }
-        catch (Exception ex)
-        {
-            GD.PrintErr($"[ModFramework] Failed to promote quarantined {info.ModId}: {ex.Message}");
-            return null;
-        }
-    }
-
     // Used by the Mods dialog to decide whether to show a ⚠ badge next to a mod card.
     // Returns null if there are no relevant issues, otherwise a short multi-line summary.
     private string? BuildModIssueTooltip(string modId)
@@ -693,7 +588,7 @@ public class ModManager
 
     private void OnTransferChunkReceived(string sourceUserId, ModTransferChunk chunk)
     {
-        var result = _transfer.OnChunkReceived(sourceUserId, chunk, _trust, out var persistedPath);
+        var result = _transfer.OnChunkReceived(sourceUserId, chunk, out var persistedPath);
         if (result != ModP2PTransfer.ReceiveResult.CompletedAndPersisted || persistedPath == null)
             return;
 
@@ -867,25 +762,79 @@ public class ModManager
                 GD.Print($"[ModFramework] Enabled local match for {localMatch.Id} after vote");
         }
 
-        if (ModNetworkStretch.CanStretch(result.Manifest))
+        if (enabledLocalMatch)
         {
-            try
+            // We already have it — no acquisition needed. Stretch was the lazy default
+            // before; keep that auto-apply now since it's free and the user already has
+            // the bits.
+            if (ModNetworkStretch.CanStretch(result.Manifest))
             {
-                ModNetworkStretch.ApplyStretch(result.Manifest);
-                GD.Print($"[ModFramework] Applied {result.Manifest.Id} via network stretch");
-            }
-            catch (Exception ex)
-            {
-                GD.PrintErr($"[ModFramework] Failed to apply stretch for {result.Manifest.Id}: {ex.Message}");
+                try
+                {
+                    ModNetworkStretch.ApplyStretch(result.Manifest);
+                    GD.Print($"[ModFramework] Applied {result.Manifest.Id} via network stretch");
+                }
+                catch (Exception ex)
+                {
+                    GD.PrintErr($"[ModFramework] Failed to apply stretch for {result.Manifest.Id}: {ex.Message}");
+                }
             }
         }
-        else if (!enabledLocalMatch)
+        else
         {
-            _networkLayer.RequestModTransfer(result.SourceUserId, result.Manifest.Id, result.Manifest.Version);
+            // We don't have the mod — never auto-download. Ask the player how they want
+            // to acquire it. Decline leaves the lobby because the session can't proceed
+            // with state divergence.
+            PromptModAcquisition(result);
         }
 
         _networkLayer.BroadcastManifest();
         TryShowNextVote();
+    }
+
+    private void PromptModAcquisition(ModVoteResult result)
+    {
+        if (_tree == null)
+        {
+            GD.PrintErr($"[ModFramework] No SceneTree to host acquisition prompt for {result.Manifest.Id}; falling back to leave-lobby");
+            _networkLayer.LeaveLobby();
+            return;
+        }
+
+        var canStretch = ModNetworkStretch.CanStretch(result.Manifest);
+        var modName = string.IsNullOrWhiteSpace(result.Manifest.Name) ? result.Manifest.Id : result.Manifest.Name;
+        var sourceUserId = result.SourceUserId;
+        var modId = result.Manifest.Id;
+        var modVersion = result.Manifest.Version;
+        var manifest = result.Manifest;
+
+        MainMenuIntegration.ShowAcquisitionPrompt(_tree,
+            modName: modName,
+            modVersion: modVersion,
+            canStretch: canStretch,
+            approxDownloadBytes: null, // host doesn't pre-announce file size in the request
+            onDownload: () =>
+            {
+                GD.Print($"[ModFramework] Player chose Download for {modId} from {sourceUserId}");
+                _networkLayer.RequestModTransfer(sourceUserId, modId, modVersion);
+            },
+            onStretch: () =>
+            {
+                try
+                {
+                    ModNetworkStretch.ApplyStretch(manifest);
+                    GD.Print($"[ModFramework] Player chose Stretch for {modId}");
+                }
+                catch (Exception ex)
+                {
+                    GD.PrintErr($"[ModFramework] Stretch apply failed for {modId}: {ex.Message}");
+                }
+            },
+            onDecline: () =>
+            {
+                GD.Print($"[ModFramework] Player declined {modId}; leaving lobby");
+                _networkLayer.LeaveLobby();
+            });
     }
 
     private void QueueVoteRequest(ModVoteRequest request, bool isHostLocalPrompt)

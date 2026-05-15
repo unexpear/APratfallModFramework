@@ -32,10 +32,11 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
   - host-authoritative mod votes
   - session-state reconciliation
 - chunked P2P mod transfer (DLL + optional PCK side-file) with SHA-256 verification, order-independent reassembly, round-robin scheduling for fairness across concurrent transfers; manifest.json is written from the cached peer snapshot so the receive-side rescan can find the mod
+- transfer is **never automatic** — when the lobby votes to enable a mod the local player doesn't have, an in-game prompt asks: **Download** (transfer the files), **Use settings only** (stretch — only when the mod supports it), or **Decline (leave lobby)**. The framework calls `LeaveLobby` on decline so the session doesn't drift out of sync.
 - per-event peer authentication (claimed sender must be in the current lobby member list)
 - automatic compatibility checking across the union of local + every known peer's mod set, fired on every state change
 - conflict-resolution dialog when two locally-enabled mods declare each other incompatible — pick which one stays, loser is disabled and persisted
-- trust policy with `open` and `trusted-only` modes (trusted-only routes unknown transfers to `mods-quarantine/`)
+- *(trust modes / quarantine were removed in favor of the explicit per-peer acquisition prompt — every download is now a deliberate user choice, so there's nothing to silently auto-accept)*
 - PCK loading for asset mods
 - bubble around the game's official mod loader so framework state + official-style mods coexist
 - offline-gated debug peer for solo testing without a second PC
@@ -388,14 +389,13 @@ That means DLL mods should be treated as fully trusted code from the player's po
 
 Trust layers shipped:
 
-- **Quarantine** — `ModTrustConfig` with `mode: "trusted-only"` routes incoming transferred mods into `user://mods-quarantine/<id>/` instead of the live mods folder. The user must move the file (or add the SHA-256 to `trustedSha256`) to activate it.
+- **No automatic downloads** — when the lobby agrees on a mod you don't have, the framework asks you per-mod: Download / Use settings only (stretch, when applicable) / Decline (leave lobby). Replaces the old "trusted-only quarantine" UX with a direct user choice every time.
 - **Hash tracking** — manifests can pin `assemblySha256`. The framework refuses to load a DLL whose actual hash differs.
-- **Trusted-only mode** — full mode at `user://modframework-trust.json` (default `open`).
 - **Peer authentication** — every framework network event is dropped if the claimed sender isn't a current lobby member.
 
-Not yet shipped:
+Not shipped (low priority given lobbies are friends-only):
 
-- **Optional malware scan before first enable.** Roadmap item; would call out to Windows Defender or similar.
+- Malware scan before first enable.
 
 These are trust layers, not a real code sandbox.
 
@@ -439,7 +439,6 @@ Pratfall.exe (patched by Cecil to call Bootstrap.Init on GcManager._Ready)
    ├─ ModNetworkStretch          settings-mode apply path (CustomGameSettings)
    ├─ ModCompatibilityResolver   peer-vs-local diff for vote/transfer planning
    ├─ ModCompatibilityChecker    local-set + union check (auto-runs on every state change)
-   ├─ ModTrustConfig             open / trusted-only mode + hash allowlist
    ├─ ModDropPoolHelper          register/unregister entries on RandomWeightedDropPool
    ├─ ModFrameworkSelfTest       public test API used by tmp/stress-mods/
    ├─ ModExceptionFilter         keeps mod exceptions out of game analytics

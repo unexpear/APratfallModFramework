@@ -113,10 +113,15 @@ internal sealed class ModP2PTransfer
         FailedDecodeError,
     }
 
-    // Receive a chunk; when the final chunk arrives we verify SHA-256, consult the trust
-    // policy, and either persist to user://mods/<id>/<id>.dll (open mode / trusted hash)
-    // or to user://mods-quarantine/<id>/<id>.dll (trusted-only mode with unknown hash).
+    // Receive a chunk; when ALL chunks arrive (in any order, with possible duplicates)
+    // we assemble in index order, verify SHA-256, consult the trust policy, and either
+    // persist to user://mods/<id>/<id>.dll (open mode / trusted hash) or to
+    // user://mods-quarantine/<id>/<id>.dll (trusted-only mode with unknown hash).
     // Caller re-scans local mods only on CompletedAndPersisted.
+    //
+    // Order/duplicate handling: Pratfall's `Reliable` send mode guarantees delivery but
+    // not strict in-order delivery across flushes. We bucket chunks by ChunkIndex and
+    // ignore duplicates so a re-sent or reordered chunk doesn't corrupt the assembly.
     public ReceiveResult OnChunkReceived(string sourceUserId, ModTransferChunk chunk, ModTrustConfig trust, out string? persistedDllPath)
     {
         persistedDllPath = null;
@@ -130,32 +135,70 @@ internal sealed class ModP2PTransfer
                 GD.PrintErr($"[ModFramework] Reject incoming {chunk.ModId}: declared size {chunk.TotalBytes} exceeds {MaxModBytes} cap");
                 return ReceiveResult.FailedSizeExceeded;
             }
+            if (chunk.TotalChunks <= 0)
+            {
+                GD.PrintErr($"[ModFramework] Reject incoming {chunk.ModId}: invalid TotalChunks={chunk.TotalChunks}");
+                return ReceiveResult.FailedDecodeError;
+            }
             t = new IncomingTransfer(sourceUserId, chunk.ModId, chunk.ModVersion, chunk.TotalBytes, chunk.TotalChunks);
             _incoming[key] = t;
         }
+
+        // Validate index against the agreed-upon shape. A peer that sends contradictory
+        // metadata across chunks is misbehaving — drop the whole transfer.
+        if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= t.TotalChunks ||
+            chunk.TotalChunks != t.TotalChunks || chunk.TotalBytes != t.TotalBytes)
+        {
+            GD.PrintErr($"[ModFramework] Reject {chunk.ModId} chunk: bad index/shape (idx={chunk.ChunkIndex}, total={chunk.TotalChunks}/{t.TotalChunks}, bytes={chunk.TotalBytes}/{t.TotalBytes})");
+            _incoming.Remove(key);
+            return ReceiveResult.FailedDecodeError;
+        }
+
+        // Duplicate chunk: ignore. Idempotent — protects against retransmits.
+        if (t.ChunksByIndex[chunk.ChunkIndex] != null)
+            return ReceiveResult.Continue;
 
         byte[] decoded;
         try { decoded = Convert.FromBase64String(chunk.ChunkBase64); }
         catch (FormatException) { _incoming.Remove(key); return ReceiveResult.FailedDecodeError; }
 
-        if (t.Received + decoded.Length > MaxModBytes)
+        if (t.ReceivedBytes + decoded.Length > MaxModBytes)
         {
             _incoming.Remove(key);
             return ReceiveResult.FailedSizeExceeded;
         }
 
-        t.Buffer.AddRange(decoded);
-        t.Received += decoded.Length;
-        OnReceiveProgress?.Invoke(chunk.ModId, t.TotalBytes == 0 ? 1f : Math.Clamp((float)t.Received / t.TotalBytes, 0f, 1f));
+        t.ChunksByIndex[chunk.ChunkIndex] = decoded;
+        t.ReceivedBytes += decoded.Length;
+        t.ReceivedChunks++;
 
-        if (!chunk.IsLast)
+        // The last chunk is the only one carrying the full-payload SHA-256. Remember it
+        // even if it arrived early (out-of-order delivery is allowed).
+        if (chunk.IsLast || !string.IsNullOrEmpty(chunk.Sha256Hex))
+            t.FinalSha256Hex = chunk.Sha256Hex ?? "";
+
+        OnReceiveProgress?.Invoke(chunk.ModId, t.TotalBytes == 0 ? 1f : Math.Clamp((float)t.ReceivedBytes / t.TotalBytes, 0f, 1f));
+
+        // Wait until every chunk has arrived AND we've seen the trailer with the hash.
+        if (t.ReceivedChunks < t.TotalChunks || string.IsNullOrEmpty(t.FinalSha256Hex))
             return ReceiveResult.Continue;
 
-        var bytes = t.Buffer.ToArray();
-        var actualHash = Convert.ToHexString(SHA256.HashData(bytes));
-        if (!string.Equals(actualHash, chunk.Sha256Hex, StringComparison.OrdinalIgnoreCase))
+        // Reassemble in index order.
+        var totalLen = 0;
+        for (var i = 0; i < t.TotalChunks; i++) totalLen += t.ChunksByIndex[i]!.Length;
+        var bytes = new byte[totalLen];
+        var offset = 0;
+        for (var i = 0; i < t.TotalChunks; i++)
         {
-            GD.PrintErr($"[ModFramework] Hash mismatch for {chunk.ModId} from {sourceUserId}: expected {chunk.Sha256Hex} got {actualHash}");
+            var part = t.ChunksByIndex[i]!;
+            Buffer.BlockCopy(part, 0, bytes, offset, part.Length);
+            offset += part.Length;
+        }
+
+        var actualHash = Convert.ToHexString(SHA256.HashData(bytes));
+        if (!string.Equals(actualHash, t.FinalSha256Hex, StringComparison.OrdinalIgnoreCase))
+        {
+            GD.PrintErr($"[ModFramework] Hash mismatch for {chunk.ModId} from {sourceUserId}: expected {t.FinalSha256Hex} got {actualHash}");
             _incoming.Remove(key);
             return ReceiveResult.FailedHashMismatch;
         }
@@ -223,8 +266,12 @@ internal sealed class ModP2PTransfer
         public string ModVersion { get; }
         public int TotalBytes { get; }
         public int TotalChunks { get; }
-        public List<byte> Buffer { get; } = new();
-        public int Received;
+        // ChunksByIndex[i] is null until chunk i has been received. Bucketing by index
+        // makes reassembly order-independent and turns duplicate chunks into a no-op.
+        public byte[]?[] ChunksByIndex;
+        public int ReceivedChunks;
+        public int ReceivedBytes;
+        public string FinalSha256Hex = "";
 
         public IncomingTransfer(string sourceUserId, string modId, string modVersion, int totalBytes, int totalChunks)
         {
@@ -233,6 +280,7 @@ internal sealed class ModP2PTransfer
             ModVersion = modVersion;
             TotalBytes = totalBytes;
             TotalChunks = totalChunks;
+            ChunksByIndex = new byte[totalChunks][];
         }
     }
 }

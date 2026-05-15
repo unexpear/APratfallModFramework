@@ -215,6 +215,171 @@ public static class ModFrameworkSelfTest
         return result;
     }
 
+    public sealed class OutOfOrderResult
+    {
+        public bool Success;
+        public string ErrorMessage = "";
+        public int InputBytes;
+        public int ChunksProduced;
+        public string ExpectedSha256 = "";
+        public string ActualSha256 = "";
+        public override string ToString() =>
+            $"out-of-order success={Success} bytes={InputBytes} chunks={ChunksProduced} sha_match={(ExpectedSha256.Equals(ActualSha256, StringComparison.OrdinalIgnoreCase))} err={ErrorMessage}";
+    }
+
+    // Drives a multi-chunk transfer, deliberately delivers chunks in REVERSE order with
+    // a duplicate of chunk 0 thrown in. Asserts that the order-independent reassembler
+    // still hashes correctly and persists.
+    public static OutOfOrderResult RunOutOfOrderTransfer(int payloadBytes = 64 * 1024)
+    {
+        payloadBytes = Math.Clamp(payloadBytes, 1, 4 * 1024 * 1024);
+        var result = new OutOfOrderResult { InputBytes = payloadBytes };
+
+        var sourceBytes = new byte[payloadBytes];
+        new Random(payloadBytes ^ 0x0D3D2).NextBytes(sourceBytes);
+        result.ExpectedSha256 = Convert.ToHexString(SHA256.HashData(sourceBytes));
+
+        var tempDir = ProjectSettings.GlobalizePath("user://stress-tmp");
+        Directory.CreateDirectory(tempDir);
+        var sourcePath = Path.Combine(tempDir, "outoforder-src.bin");
+        File.WriteAllBytes(sourcePath, sourceBytes);
+
+        var transfer = new ModP2PTransfer();
+        var trust = new ModTrustConfig();
+        if (!transfer.BeginSend("ooo-target", "OutOfOrderTest", "1.0.0", sourcePath))
+        {
+            result.ErrorMessage = "BeginSend returned false";
+            return result;
+        }
+
+        // Drain everything into a buffer first so we control the delivery order.
+        var produced = new List<ModTransferChunk>();
+        for (var i = 0; i < 4096; i++)
+        {
+            var pending = transfer.TickOutgoing();
+            if (pending == null) break;
+            produced.Add(pending.Value.Chunk);
+        }
+        result.ChunksProduced = produced.Count;
+        if (produced.Count < 2)
+        {
+            result.ErrorMessage = "need at least 2 chunks to test ordering";
+            return result;
+        }
+
+        // Build the delivery sequence: reversed, then resend chunk 0 once at the end
+        // to test duplicate-chunk idempotency.
+        var delivery = new List<ModTransferChunk>(produced.Count + 1);
+        for (var i = produced.Count - 1; i >= 0; i--) delivery.Add(produced[i]);
+        delivery.Add(produced[0]);
+
+        ModP2PTransfer.ReceiveResult last = ModP2PTransfer.ReceiveResult.Continue;
+        string? persistedPath = null;
+        foreach (var c in delivery)
+        {
+            last = transfer.OnChunkReceived("ooo-source", c, trust, out var p);
+            if (p != null) persistedPath = p;
+            if (last == ModP2PTransfer.ReceiveResult.CompletedAndPersisted ||
+                last == ModP2PTransfer.ReceiveResult.CompletedAndQuarantined) break;
+            if (last != ModP2PTransfer.ReceiveResult.Continue)
+            {
+                result.ErrorMessage = $"receive failed: {last}";
+                return result;
+            }
+        }
+        if (last != ModP2PTransfer.ReceiveResult.CompletedAndPersisted || persistedPath == null)
+        {
+            result.ErrorMessage = $"did not complete (last={last})";
+            return result;
+        }
+        result.ActualSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(persistedPath)));
+        result.Success = string.Equals(result.ExpectedSha256, result.ActualSha256, StringComparison.OrdinalIgnoreCase);
+        if (!result.Success) result.ErrorMessage = "hash mismatch after out-of-order delivery";
+        return result;
+    }
+
+    public sealed class ConcurrentTransferResult
+    {
+        public bool Success;
+        public string ErrorMessage = "";
+        public int TransferCount;
+        public int CompletedCount;
+        public int CrossContaminationDetected;
+        public override string ToString() =>
+            $"concurrent success={Success} {CompletedCount}/{TransferCount} completed cross_contamination={CrossContaminationDetected} err={ErrorMessage}";
+    }
+
+    // Starts N concurrent transfers from a single ModP2PTransfer instance, drains all
+    // chunks via TickOutgoing (which round-robins across active transfers), feeds each
+    // chunk to OnChunkReceived, asserts every transfer completes with its own correct
+    // hash. Catches cross-talk bugs where chunks from one transfer contaminate another.
+    public static ConcurrentTransferResult RunConcurrentTransfers(int transferCount = 3, int payloadBytes = 32 * 1024)
+    {
+        transferCount = Math.Clamp(transferCount, 2, 10);
+        payloadBytes = Math.Clamp(payloadBytes, 1, 1 * 1024 * 1024);
+        var result = new ConcurrentTransferResult { TransferCount = transferCount };
+
+        var tempDir = ProjectSettings.GlobalizePath("user://stress-tmp");
+        Directory.CreateDirectory(tempDir);
+
+        var transfer = new ModP2PTransfer();
+        var trust = new ModTrustConfig();
+        var expectedHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var i = 0; i < transferCount; i++)
+        {
+            var bytes = new byte[payloadBytes];
+            new Random(0x10000 + i).NextBytes(bytes);
+            var modId = $"ConcurrentTest_{i}";
+            expectedHashes[modId] = Convert.ToHexString(SHA256.HashData(bytes));
+            var src = Path.Combine(tempDir, $"concurrent-{i}.bin");
+            File.WriteAllBytes(src, bytes);
+            if (!transfer.BeginSend($"ct-target-{i}", modId, "1.0.0", src))
+            {
+                result.ErrorMessage = $"BeginSend returned false for {modId}";
+                return result;
+            }
+        }
+
+        var persistedByMod = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < 8192; i++)
+        {
+            var pending = transfer.TickOutgoing();
+            if (pending == null) break;
+            var rx = transfer.OnChunkReceived($"ct-source-{pending.Value.Chunk.ModId}", pending.Value.Chunk, trust, out var path);
+            if (rx == ModP2PTransfer.ReceiveResult.CompletedAndPersisted)
+            {
+                persistedByMod[pending.Value.Chunk.ModId] = path ?? "";
+                result.CompletedCount++;
+            }
+            else if (rx != ModP2PTransfer.ReceiveResult.Continue)
+            {
+                result.ErrorMessage = $"receive failed for {pending.Value.Chunk.ModId}: {rx}";
+                return result;
+            }
+        }
+
+        // Verify each persisted file matches its own expected hash. Cross-contamination
+        // would show as a hash mismatch (file contains bytes from a sibling transfer).
+        foreach (var (modId, expected) in expectedHashes)
+        {
+            if (!persistedByMod.TryGetValue(modId, out var path) || !File.Exists(path))
+            {
+                result.ErrorMessage = $"missing persisted file for {modId}";
+                return result;
+            }
+            var actual = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+            if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+            {
+                result.CrossContaminationDetected++;
+                result.ErrorMessage = $"hash mismatch for {modId} — possible chunk cross-talk";
+            }
+        }
+
+        result.Success = result.CompletedCount == transferCount && result.CrossContaminationDetected == 0;
+        return result;
+    }
+
     public sealed class DropPoolRoundtripResult
     {
         public bool Success;

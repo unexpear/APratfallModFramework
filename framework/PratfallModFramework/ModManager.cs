@@ -326,6 +326,19 @@ public class ModManager
 
         if (changed)
             _networkLayer.BroadcastManifest();
+
+        // After applying state, run a local compatibility check across the enabled set.
+        // We log warnings rather than refusing — the user toggled these on deliberately.
+        try
+        {
+            var enabledIds = _modEnabled.Where(kv => kv.Value).Select(kv => kv.Key).ToList();
+            var report = ModCompatibilityChecker.Check(_localMods, enabledIds, _loader.SnapshotLoadedAssemblies());
+            ModCompatibilityChecker.LogReport(report);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Compatibility check failed: {ex.Message}");
+        }
     }
 
     private void UnloadAllMods()

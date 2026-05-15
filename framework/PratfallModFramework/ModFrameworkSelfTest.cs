@@ -400,6 +400,80 @@ public static class ModFrameworkSelfTest
         return result;
     }
 
+    public sealed class CompatibilityCheckResult
+    {
+        public bool Success;
+        public string ErrorMessage = "";
+        public int CategoriesPassed;
+        public int CategoriesTotal;
+        public override string ToString() => $"compatibility {CategoriesPassed}/{CategoriesTotal} categories detected correctly err={ErrorMessage}";
+    }
+
+    // Verifies ModCompatibilityChecker fires on each known issue category against
+    // synthetic fixtures: declared conflict, missing dependency, duplicate id, duplicate
+    // assembly file, and a clean-set baseline (no false positives).
+    public static CompatibilityCheckResult RunCompatibilityCheckerTests()
+    {
+        var result = new CompatibilityCheckResult { CategoriesTotal = 5 };
+
+        // 1. Declared conflict between two enabled mods should produce a Conflict entry.
+        var declaredConflict = new List<ModManifest>
+        {
+            new() { Id = "modA", Name = "A", Version = "1.0.0", Multiplayer = new ModMultiplayer { ConflictsWith = new List<string> { "modB" } } },
+            new() { Id = "modB", Name = "B", Version = "1.0.0" },
+        };
+        foreach (var m in declaredConflict) m.Normalize();
+        var r1 = ModCompatibilityChecker.Check(declaredConflict, new[] { "modA", "modB" });
+        if (r1.Conflicts.Any(c => c.Reason.Contains("conflictsWith"))) result.CategoriesPassed++;
+        else { result.ErrorMessage = "declared conflict not detected"; return result; }
+
+        // 2. Missing dependency.
+        var missingDep = new List<ModManifest>
+        {
+            new() { Id = "modX", Name = "X", Version = "1.0.0", Multiplayer = new ModMultiplayer { Requires = new List<string> { "modY" } } },
+        };
+        foreach (var m in missingDep) m.Normalize();
+        var r2 = ModCompatibilityChecker.Check(missingDep, new[] { "modX" });
+        if (r2.MissingDependencies.Any(d => d.MissingDependencyId == "modY")) result.CategoriesPassed++;
+        else { result.ErrorMessage = "missing dependency not detected"; return result; }
+
+        // 3. Duplicate id (across installed, regardless of enabled state).
+        var dupId = new List<ModManifest>
+        {
+            new() { Id = "dupMod", Name = "First",  Version = "1.0.0" },
+            new() { Id = "dupMod", Name = "Second", Version = "1.0.0" },
+        };
+        foreach (var m in dupId) m.Normalize();
+        var r3 = ModCompatibilityChecker.Check(dupId, Array.Empty<string>());
+        if (r3.Conflicts.Any(c => c.Reason.Contains("duplicate mod id"))) result.CategoriesPassed++;
+        else { result.ErrorMessage = "duplicate id not detected"; return result; }
+
+        // 4. Duplicate assembly filename.
+        var dupAsm = new List<ModManifest>
+        {
+            new() { Id = "modP", Name = "P", Version = "1.0.0", AssemblyFile = "Shared.dll" },
+            new() { Id = "modQ", Name = "Q", Version = "1.0.0", AssemblyFile = "Shared.dll" },
+        };
+        foreach (var m in dupAsm) m.Normalize();
+        var r4 = ModCompatibilityChecker.Check(dupAsm, Array.Empty<string>());
+        if (r4.Conflicts.Any(c => c.Reason.Contains("share assembly file"))) result.CategoriesPassed++;
+        else { result.ErrorMessage = "duplicate assembly file not detected"; return result; }
+
+        // 5. Clean set: no issues should be reported.
+        var clean = new List<ModManifest>
+        {
+            new() { Id = "good1", Name = "Good 1", Version = "1.0.0" },
+            new() { Id = "good2", Name = "Good 2", Version = "1.0.0" },
+        };
+        foreach (var m in clean) m.Normalize();
+        var r5 = ModCompatibilityChecker.Check(clean, new[] { "good1", "good2" });
+        if (!r5.HasIssues) result.CategoriesPassed++;
+        else { result.ErrorMessage = $"false positives on clean set: {r5.Summarize()}"; return result; }
+
+        result.Success = result.CategoriesPassed == result.CategoriesTotal;
+        return result;
+    }
+
     public sealed class DropPoolRoundtripResult
     {
         public bool Success;

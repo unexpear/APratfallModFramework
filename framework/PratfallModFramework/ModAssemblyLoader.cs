@@ -217,6 +217,17 @@ public class ModAssemblyLoader
 
     public bool IsLoaded(string id) => _loaded.Any(e => e.Id == id);
 
+    // Snapshot of currently-loaded mod assemblies, keyed by mod id. Used by the
+    // compatibility checker to scan for Harmony patch overlaps without holding a
+    // strong reference to the loader's internal state.
+    public IReadOnlyDictionary<string, Assembly> SnapshotLoadedAssemblies()
+    {
+        var dict = new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in _loaded)
+            dict[entry.Id] = entry.Assembly;
+        return dict;
+    }
+
     private sealed class ModLoadContext : AssemblyLoadContext
     {
         private readonly AssemblyDependencyResolver _resolver;

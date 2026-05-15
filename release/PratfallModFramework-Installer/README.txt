@@ -1,12 +1,27 @@
-Pratfall Mod Framework — Installer
-===================================
+Pratfall Mod Framework — Installer (v1.1)
+=========================================
 
 Quick install
 -------------
 1. Quit Pratfall completely.
-2. Double-click PratfallModFramework.Installer.exe
-3. Click Install. The installer auto-detects your Pratfall folder via Steam.
-4. Launch Pratfall — a "Mods" button appears in the main menu next to Options.
+2. If you had v1.0 installed, run the v1.0 installer first and click Uninstall
+   (or use Steam Verify) so the framework state resets cleanly.
+3. Double-click PratfallModFramework.Installer.exe
+4. Click Install. The installer auto-detects your Pratfall folder via Steam.
+5. Launch Pratfall. The native Pratfall "Mod" button is hidden and the
+   framework's "Mods" button takes its slot in the main menu.
+
+What's new in v1.1
+------------------
+- Compatible with Pratfall 1.1.0.R2943 (the build with the native Mod button).
+- Mods stay disabled until you check them. Each card has two new buttons:
+    i  Info  — read-only manifest, file list, declared patches.
+    Q  Scan  — IL safety scanner (Mono.Cecil). Reports dangerous API calls
+              like Process.Start, raw network, registry, P/Invoke, file
+              deletion. Running it marks the mod as user-checked, releasing
+              the gate so it can load.
+- Toggle ON, Scan, or accepting a multiplayer Download all release the gate.
+- Updating a mod (any byte change in its DLL or PCK) re-locks the gate.
 
 Requirements
 ------------

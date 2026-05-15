@@ -8,9 +8,15 @@ Runtime mod framework for [Pratfall](https://store.steampowered.com/app/4244510/
 2. Download `PratfallModFramework-Installer.zip` from the **Releases** section of this repo and unzip it anywhere.
 3. Run `PratfallModFramework.Installer.exe`. It auto-detects your Pratfall install via Steam.
 4. Click **Install**. The installer backs up `Pratfall.dll` to `Pratfall.dll.original` before patching, so it's fully reversible — click **Uninstall** any time, or run Steam Verify and Steam will restore the original automatically.
-5. Launch Pratfall. A **Mods** button appears in the main menu next to Options.
+5. Launch Pratfall. The native Pratfall **Mod** button (added in Pratfall 1.1.0.R2943) is hidden, and the framework's **Mods** button takes its slot.
 
 To install a mod, drop its folder into `%APPDATA%\Pratfall\mods\<modid>\` (or wait for the Steam Workshop integration). It'll appear in the Mods dialog on next launch.
+
+**v1.1: Mods stay disabled until you check them.** Each mod card has two icons next to its toggle:
+- **ℹ Info** — opens the read-only manifest / file list / declared patches viewer.
+- **🔍 Scan** — runs the IL safety scanner (Mono.Cecil), reports calls to dangerous APIs (Process, raw network, registry, P/Invoke, code generation, file deletion), and marks the mod as user-checked.
+
+A mod is enabled when you flip its toggle ON, click 🔍, or accept Download in a multiplayer prompt. Updating a mod (any DLL or PCK byte change) re-locks the gate.
 
 ## Build from source (devs)
 
@@ -62,9 +68,9 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 - **No real multiplayer test yet.** All transfer / vote / member-join behavior is verified by solo loopback or debug peer, never by two real Steam clients. Audit cleared the wire format against `Pratfall.ByteBufferWriter`'s 32 KB cap (chunks sized to 14 KB raw → ~20 KB JSON envelope).
 - **`ModManager.EnableMod` returns false on second call within a session after `DisableMod`.** Confirmed game-side issue; Tim is shipping a fix that wraps the second call in try/catch. Workaround: restart Pratfall before re-enabling. The `tmp/stress-mods/` `StressHashGuardMod` and conflict-resolution flow surface this if exercised.
 - **Workshop integration is stubbed.** `WorkshopHook.NotifyItemInstalled(folder, publishedFileId)` is a public entry point waiting for Tim to wire Steam's `OnItemInstalled` callback to it. When invoked, the framework rescans `user://mods/` and surfaces the new mod in the dialog.
-- (was: PCK side-file transfer not implemented — *now shipped*. The host sends both `<modId>.dll` and `<modId>.pck` (when the manifest declares `pckFile`), and the receiver also writes `manifest.json` next to them from the cached peer snapshot, so the rescan finds the mod end-to-end.)
+- (was: PCK side-file transfer not implemented — *now shipped*. The host sends both `<modId>.dll` and `<modId>.pck` (when the manifest declares `pckFile`), and the receiver also writes `manifest.json` next to them from the cached peer snapshot, so the rescan finds the mod end-to-end. v1.1: PCK bytes now contribute to the user-approval fingerprint, and the receive flow waits for both files before marking-checked + enabling.)
 - **Stretch end-to-end** still needs a real multiplayer lobby to verify; the apply path is implemented and unit-clean.
-- **Optional malware scan before first enable** — listed in the safety roadmap but not implemented (the trust/quarantine/hash layers are).
+- (was: Optional malware scan before first enable — *now shipped in v1.1* as the **🔍 IL safety scanner**. Mono.Cecil walks the mod's DLL statically and reports calls to dangerous APIs — Process.Start, raw sockets, HttpClient, Registry, Reflection.Emit, P/Invoke, file deletion, environment probes. Findings show severity (Danger/Warning/Note), the API called, and the call-site method. Running 🔍 also marks the mod's fingerprint as user-checked, releasing the v1.1 user-check gate.)
 
 ### Resolved with the dev (Tim, Robert)
 

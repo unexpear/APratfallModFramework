@@ -346,7 +346,7 @@ public class MainForm : Form
             File.WriteAllText(manifestPath, @"{
   ""id"": ""PratfallModFramework"",
   ""name"": ""Pratfall Mod Framework"",
-  ""version"": ""1.0.0"",
+  ""version"": ""1.1.0"",
   ""author"": ""ModFramework"",
   ""description"": ""Base mod framework. Enables mod detection, voting, P2P transfer, and runtime loading."",
   ""type"": ""framework"",

@@ -1,20 +1,32 @@
-Pratfall Mod Framework — Installer (v1.1)
+Pratfall Mod Framework — Installer (v1.2)
 =========================================
 
 Quick install
 -------------
 1. Quit Pratfall completely.
-2. If you had v1.0 installed, run the v1.0 installer first and click Uninstall
-   (or use Steam Verify) so the framework state resets cleanly.
+2. If you had a previous version installed, run the older installer first
+   and click Uninstall (or use Steam Verify) so the framework state resets
+   cleanly.
 3. Double-click PratfallModFramework.Installer.exe
 4. Click Install. The installer auto-detects your Pratfall folder via Steam.
 5. Launch Pratfall. The native Pratfall "Mod" button is hidden and the
    framework's "Mods" button takes its slot in the main menu.
 
-What's new in v1.1
+What's new in v1.2
 ------------------
+- Mod-defined Godot Node / Resource types now register with the engine on
+  load (matches the official loader's behavior). Content mods that ship
+  .tscn files or instantiate custom scripts via PackedScene work properly
+  instead of silently failing on type lookup.
+- New manifest field: addAssemblyToGodot (default true). Opt out only if
+  you have a specific reason to skip script registration.
+- HelloWorldMod sample csproj uses $(MSBuildProgramFiles32) so the build
+  works on non-English Windows and 32-bit MSBuild without editing paths.
+
+What's still v1.1
+-----------------
 - Compatible with Pratfall 1.1.0.R2943 (the build with the native Mod button).
-- Mods stay disabled until you check them. Each card has two new buttons:
+- Mods stay disabled until you check them. Each card has two buttons:
     i  Info  — read-only manifest, file list, declared patches.
     Q  Scan  — IL safety scanner (Mono.Cecil). Reports dangerous API calls
               like Process.Start, raw network, registry, P/Invoke, file

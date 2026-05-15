@@ -20,6 +20,11 @@ public class ModManager
     // checker to evaluate the UNION of local + remote mod sets.
     private readonly Dictionary<string, ModPeerSnapshot> _peerSnapshots = new(StringComparer.OrdinalIgnoreCase);
     private ModCompatibilityChecker.Report? _latestCompatibilityReport;
+    // Pairs the user has already resolved (or deferred) this session, so we don't loop
+    // re-prompting the same conflict every state change. Key is "sortedA|sortedB".
+    private readonly HashSet<string> _conflictPairsHandled = new(StringComparer.OrdinalIgnoreCase);
+    private bool _conflictPromptOpen;
+    private SceneTree? _tree;
     private readonly Dictionary<string, ActiveVoteRequest> _activeVoteRequests = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _voteKeysByVoteId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<PendingVotePrompt> _voteQueue = new();
@@ -32,6 +37,7 @@ public class ModManager
     public void Initialize(SceneTree tree)
     {
         GD.Print("[ModFramework] ModManager.Initialize()");
+        _tree = tree;
         _trust = ModTrustConfig.LoadOrDefault();
         GD.Print($"[ModFramework] Trust mode: {_trust.Mode} ({_trust.TrustedSha256.Count} trusted hashes)");
         OfficialModBridge.Install();
@@ -405,6 +411,8 @@ public class ModManager
 
             if (_latestCompatibilityReport.HasIssues)
                 ModCompatibilityChecker.LogReport(_latestCompatibilityReport);
+
+            TryShowNextConflictPrompt();
         }
         catch (Exception ex)
         {
@@ -413,6 +421,51 @@ public class ModManager
     }
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
+
+    // Walks the latest report for actionable local conflicts (both mods enabled here)
+    // and pops the resolution prompt for the first one we haven't already handled. Only
+    // one prompt at a time; the next is offered after the current one resolves.
+    private void TryShowNextConflictPrompt()
+    {
+        if (_tree == null || _conflictPromptOpen) return;
+        var report = _latestCompatibilityReport;
+        if (report == null || report.Conflicts.Count == 0) return;
+
+        foreach (var c in report.Conflicts)
+        {
+            if (string.Equals(c.ModA, c.ModB, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!_modEnabled.GetValueOrDefault(c.ModA, false) || !_modEnabled.GetValueOrDefault(c.ModB, false)) continue;
+
+            var pairKey = string.CompareOrdinal(c.ModA, c.ModB) < 0
+                ? $"{c.ModA}|{c.ModB}" : $"{c.ModB}|{c.ModA}";
+            if (_conflictPairsHandled.Contains(pairKey)) continue;
+
+            var nameA = TryGetLocalManifest(c.ModA, out var ma) ? ma.Name : c.ModA;
+            var nameB = TryGetLocalManifest(c.ModB, out var mb) ? mb.Name : c.ModB;
+            var modAId = c.ModA;
+            var modBId = c.ModB;
+
+            _conflictPromptOpen = true;
+            MainMenuIntegration.ShowConflictPrompt(_tree, modAId, nameA, modBId, nameB, c.Reason, keepId =>
+            {
+                _conflictPromptOpen = false;
+                _conflictPairsHandled.Add(pairKey);
+                if (string.IsNullOrEmpty(keepId))
+                {
+                    GD.Print($"[ModFramework] Conflict deferred: {modAId} vs {modBId}");
+                }
+                else
+                {
+                    var disableId = string.Equals(keepId, modAId, StringComparison.OrdinalIgnoreCase) ? modBId : modAId;
+                    GD.Print($"[ModFramework] Conflict resolved: keep {keepId}, disable {disableId}");
+                    ToggleMod(disableId, false);
+                }
+                // After this prompt resolves, see if a sibling conflict needs prompting.
+                TryShowNextConflictPrompt();
+            });
+            return;
+        }
+    }
 
     private void OnVoteRequestReceived(string senderUserId, ModVoteRequest request)
     {

@@ -20,6 +20,8 @@ public static class MainMenuIntegration
     private static bool _frameDiagnosticsDone;
     private static bool _everInjected;
     private static bool _dumpedNotFound;
+    private static int _injectAttempts;
+    private static bool _liveTreeDumped;
     private static Action? _onModsButtonPressed;
     private static Action? _onApplySelectedMods;
     private static Func<List<ModManifest>>? _getMods;
@@ -28,8 +30,11 @@ public static class MainMenuIntegration
     // Returns null when the mod has no compatibility issues, otherwise a short
     // human-readable summary suitable for a tooltip ("conflicts with X; missing dep Y").
     private static Func<string, string?>? _getModIssueTooltip;
-    // Returns an inspection report for the mod id, or null if the mod is unknown.
+    // Read-only metadata view (manifest fields, file listing, declared patches). No side effects.
     private static Func<string, ModInspector.Report?>? _inspectMod;
+    // Static IL safety scan (Cecil-backed). Side effect: marks the mod's fingerprint as
+    // user-checked, since running the scan IS the user-consent action.
+    private static Func<string, ModScanner.Report?>? _scanMod;
 
     public static void Install(SceneTree tree,
         Action? onModsPressed = null,
@@ -38,7 +43,8 @@ public static class MainMenuIntegration
         Func<string, bool>? isModEnabled = null,
         Action<string, bool>? onToggleMod = null,
         Func<string, string?>? getModIssueTooltip = null,
-        Func<string, ModInspector.Report?>? inspectMod = null)
+        Func<string, ModInspector.Report?>? inspectMod = null,
+        Func<string, ModScanner.Report?>? scanMod = null)
     {
         _tree = tree;
         _onModsButtonPressed = onModsPressed;
@@ -48,6 +54,7 @@ public static class MainMenuIntegration
         _onToggleMod = onToggleMod;
         _getModIssueTooltip = getModIssueTooltip;
         _inspectMod = inspectMod;
+        _scanMod = scanMod;
         if (_installed) return;
         _installed = true;
         GD.Print("[ModFramework] MainMenuIntegration installed, waiting for main menu...");
@@ -58,61 +65,93 @@ public static class MainMenuIntegration
         if (_tree == null) return false;
         var root = _tree.Root;
 
-        // Find the MainMenuUI node (actual UI, not the 3D scene root)
-        Node? menuUi = root.GetNodeOrNull("MainMenuUI")
-                    ?? FindNodeByName(root, "MainMenuUI");
-        if (menuUi == null)
+        // Find the menu node + buttons container. Preferred path: locate the
+        // MainMenuUIViewController instance and read HostButton.GetParent() —
+        // HostButton is a [Export] field set from the .tscn, so its parent IS the
+        // buttons container, regardless of how the .tscn names things. Fallbacks
+        // remain for legacy builds and edge cases.
+        Node? menuUi = null;
+        Node? container = null;
+
+        var controllers = FindNodesOfType<global::MainMenuUIViewController>(root);
+        if (controllers.Count > 0)
         {
-            // Dump the tree once before the very first inject succeeds so the diagnostic
-            // is available when something is genuinely wrong. After the first success the
-            // menu may legitimately come and go (game enter/exit) — stay quiet then.
-            if (!_everInjected && !_dumpedNotFound)
+            menuUi = controllers[0];
+            var ctrl = controllers[0];
+            if (ctrl.HostButton != null && Godot.GodotObject.IsInstanceValid(ctrl.HostButton))
+                container = ctrl.HostButton.GetParent();
+        }
+
+        if (container == null)
+        {
+            menuUi ??= root.GetNodeOrNull("MainMenuUI") ?? FindNodeByName(root, "MainMenuUI");
+            container = menuUi != null
+                ? (FindNodeByName(menuUi, "ButtonsContainer") ?? FindButtonContainer(menuUi) ?? FindButtonContainer(root))
+                : FindButtonContainer(root);
+        }
+
+        if (container == null)
+        {
+            _injectAttempts++;
+            // Wait until 30 polls (~15s) so the main menu has definitely loaded
+            // (preloader, Steam login, etc. take ~10s on this hardware).
+            if (!_everInjected && !_liveTreeDumped && _injectAttempts >= 30)
             {
-                _dumpedNotFound = true;
-                GD.Print("[ModFramework] MainMenuUI not found, dumping tree.");
-                DumpTree(root, 0, "root");
+                _liveTreeDumped = true;
+                GD.Print($"[ModFramework] Live menu inject failed after {_injectAttempts} polls. menuUi found = {menuUi != null} ({menuUi?.GetType().Name ?? "null"})");
+                if (menuUi != null)
+                {
+                    GD.Print("[ModFramework] Menu controller children:");
+                    DumpTree(menuUi, 1, menuUi.Name);
+                }
+                else
+                {
+                    GD.Print("[ModFramework] All buttons in tree:");
+                    DumpButtonsRecursive(root, 0);
+                }
             }
             return false;
         }
 
-        // Find ButtonsContainer under MainMenuUI
-        Node? container = FindNodeByName(menuUi, "ButtonsContainer")
-            ?? FindButtonContainer(menuUi)
-            ?? FindButtonContainer(root);
-        if (container == null)
+        // Pick a style donor — controller's HostButton if available (most reliable),
+        // else any existing Button in the container.
+        Button? styleDonor = null;
+        global::MainMenuUIViewController? ctrlForFields = controllers.Count > 0 ? controllers[0] : null;
+        if (ctrlForFields?.HostButton != null && Godot.GodotObject.IsInstanceValid(ctrlForFields.HostButton))
+            styleDonor = ctrlForFields.HostButton;
+        else
+            foreach (var c in container.GetChildren())
+                if (c is Button b) { styleDonor = b; break; }
+
+        if (styleDonor == null) return false;
+
+        // Don't double-inject.
+        foreach (var c in container.GetChildren())
+            if (c is Button b && b.Name == "ModFrameworkModsButton") return true;
+
+        // Insert position: prefer right after the (hidden) native ModButton if present,
+        // else at the end. Hidden-and-still-in-tree means the visual order stays consistent.
+        int insertIdx = container.GetChildren().Count;
+        if (ctrlForFields?.ModButton != null && Godot.GodotObject.IsInstanceValid(ctrlForFields.ModButton))
         {
-            GD.Print("[ModFramework] Buttons container not found, dumping MainMenuUI tree:");
-            DumpTree(menuUi, 1, "MainMenuUI");
-            return false;
+            var idx = container.GetChildren().ToList().IndexOf(ctrlForFields.ModButton);
+            if (idx >= 0) insertIdx = idx + 1;
         }
 
-        var optionsBtn = FindChildByText(container, "Options");
-        var offlineBtn = FindChildByText(container, "Play Offline");
-        if (optionsBtn == null || offlineBtn == null) return false;
-
-        var existingModsBtn = FindChildByText(container, "Mods");
-        if (existingModsBtn != null)
-            return true;
-
-        // Find index: insert mods button after Play Offline, before Options
-        int offlineIdx = container.GetChildren().ToList().IndexOf(offlineBtn);
-        int insertIdx = offlineIdx + 1;
-
-        // Create mods button styled like the existing buttons
         var modsBtn = new Button
         {
+            Name = "ModFrameworkModsButton",
             Text = "  Mods  ",
-            SizeFlagsHorizontal = optionsBtn.SizeFlagsHorizontal,
-            SizeFlagsVertical = optionsBtn.SizeFlagsVertical,
+            SizeFlagsHorizontal = styleDonor.SizeFlagsHorizontal,
+            SizeFlagsVertical = styleDonor.SizeFlagsVertical,
         };
-        // Copy theme/style from one of the existing buttons
-        modsBtn.Theme = optionsBtn.Theme;
-        _buttonTheme = optionsBtn.Theme;
-        _buttonFont = optionsBtn.GetThemeFont("font");
-        _buttonFontSize = optionsBtn.GetThemeFontSize("font_size");
-        modsBtn.AddThemeStyleboxOverride("normal", optionsBtn.GetThemeStylebox("normal"));
-        modsBtn.AddThemeStyleboxOverride("hover", optionsBtn.GetThemeStylebox("hover"));
-        modsBtn.AddThemeStyleboxOverride("pressed", optionsBtn.GetThemeStylebox("pressed"));
+        modsBtn.Theme = styleDonor.Theme;
+        _buttonTheme = styleDonor.Theme;
+        _buttonFont = styleDonor.GetThemeFont("font");
+        _buttonFontSize = styleDonor.GetThemeFontSize("font_size");
+        modsBtn.AddThemeStyleboxOverride("normal", styleDonor.GetThemeStylebox("normal"));
+        modsBtn.AddThemeStyleboxOverride("hover", styleDonor.GetThemeStylebox("hover"));
+        modsBtn.AddThemeStyleboxOverride("pressed", styleDonor.GetThemeStylebox("pressed"));
         modsBtn.AddThemeFontOverride("font", _buttonFont);
         modsBtn.AddThemeFontSizeOverride("font_size", _buttonFontSize);
 
@@ -350,25 +389,51 @@ public static class MainMenuIntegration
                 authorLabel.AddThemeColorOverride("font_color", new Color(0.76f, 0.88f, 0.92f));
                 infoColumn.AddChild(authorLabel);
 
+                // ℹ️ — read-only metadata (manifest fields, file listing, declared patches).
+                // No side effects — just shows what the mod claims to be.
                 if (_inspectMod != null)
                 {
-                    var inspectBtn = new Button
+                    var infoBtn = new Button
+                    {
+                        Text = "ℹ",
+                        FocusMode = Control.FocusModeEnum.All,
+                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+                        TooltipText = "Mod info (manifest, files, hashes, declared patches)",
+                    };
+                    ApplyButtonTheme(infoBtn);
+                    infoBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
+                    var capturedIdInfo = mod.Id;
+                    infoBtn.Pressed += () =>
+                    {
+                        var report = _inspectMod(capturedIdInfo);
+                        if (report != null && _tree != null)
+                            ShowInspectionPanel(_tree, report);
+                    };
+                    topRow.AddChild(infoBtn);
+                }
+
+                // 🔍 — IL safety scanner. Walks the mod's DLL and reports concerning
+                // API usage. Running this counts as user verification → marks the mod's
+                // fingerprint as checked (releases the load gate).
+                if (_scanMod != null)
+                {
+                    var scanBtn = new Button
                     {
                         Text = "🔍",
                         FocusMode = Control.FocusModeEnum.All,
                         SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
-                        TooltipText = "Inspect this mod (manifest, files, hashes, declared patches)",
+                        TooltipText = "Scan this mod for dangerous API usage (Process, network, registry, P/Invoke, …)",
                     };
-                    ApplyButtonTheme(inspectBtn);
-                    inspectBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
-                    var capturedId = mod.Id;
-                    inspectBtn.Pressed += () =>
+                    ApplyButtonTheme(scanBtn);
+                    scanBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
+                    var capturedIdScan = mod.Id;
+                    scanBtn.Pressed += () =>
                     {
-                        var report = _inspectMod(capturedId);
+                        var report = _scanMod(capturedIdScan);
                         if (report != null && _tree != null)
-                            ShowInspectionPanel(_tree, report);
+                            ShowScanPanel(_tree, report);
                     };
-                    topRow.AddChild(inspectBtn);
+                    topRow.AddChild(scanBtn);
                 }
 
                 var toggle = new ToggleSwitch(_isModEnabled?.Invoke(mod.Id) ?? false);
@@ -551,6 +616,152 @@ public static class MainMenuIntegration
         };
 
         closeBtn.CallDeferred("grab_focus");
+    }
+
+    // Static IL safety scan panel — fired from the 🔍 button. Shows a finding list
+    // grouped by severity (Danger / Warning / Info), each with the dangerous API and
+    // the call-site method. If the mod's DLL is clean of concerning calls, shows a
+    // green "no findings" message. Layer 130 so it sits above the Mods dialog at 128.
+    public static void ShowScanPanel(SceneTree tree, ModScanner.Report report)
+    {
+        if (tree?.Root == null || report == null) return;
+        var existing = tree.Root.GetNodeOrNull("ModFrameworkScanLayer");
+        if (existing != null) existing.QueueFree();
+
+        var canvasLayer = new CanvasLayer { Name = "ModFrameworkScanLayer", Layer = 130 };
+        tree.Root.AddChild(canvasLayer);
+
+        var overlay = new Control { Name = "ModFrameworkScanDialog", MouseFilter = Control.MouseFilterEnum.Stop };
+        SetFullRect(overlay);
+        canvasLayer.AddChild(overlay);
+
+        _tree ??= tree;
+
+        var viewportSize = tree.Root.GetViewport().GetVisibleRect().Size;
+        var dialogSize = new Vector2(
+            Mathf.Clamp(viewportSize.X * 0.55f, 600f, 820f),
+            Mathf.Clamp(viewportSize.Y * 0.72f, 460f, 720f));
+        var panel = CreateFallbackDialogHost(overlay, dialogSize, compact: false);
+
+        var title = new Label
+        {
+            Text = $"Scan: {report.ModId}",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        ApplyFont(title, Math.Max(_buttonFontSize + 8, 24));
+        title.AddThemeColorOverride("font_color", new Color(0.99f, 0.86f, 0.42f));
+        panel.AddChild(title);
+
+        var scroll = new ScrollContainer
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+        };
+        panel.AddChild(scroll);
+
+        var body = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        body.AddThemeConstantOverride("separation", 10);
+        scroll.AddChild(body);
+
+        // Top summary
+        if (!report.ScannedSuccessfully && report.ScanErrors.Count > 0)
+        {
+            AddInspectHeader(body, "Scan could not run");
+            foreach (var err in report.ScanErrors)
+                AddScanLine(body, "  " + err, new Color(0.95f, 0.55f, 0.45f));
+        }
+        else if (report.Findings.Count == 0)
+        {
+            AddInspectHeader(body, "Result");
+            AddScanLine(body,
+                $"✓ Clean — scanned {report.MethodsScanned} methods, no concerning API usage found.",
+                new Color(0.55f, 0.9f, 0.55f));
+            AddInspectMuted(body,
+                "This is a static check on what the mod CAN call. It does not prove safety — a mod can still be subtly malicious. Treat as one signal among others.");
+        }
+        else
+        {
+            var dangers = report.CountOf(ModScanner.Severity.Danger);
+            var warnings = report.CountOf(ModScanner.Severity.Warning);
+            var infos = report.CountOf(ModScanner.Severity.Info);
+            AddInspectHeader(body, "Summary");
+            if (dangers > 0)
+                AddScanLine(body, $"  ⛔ {dangers} danger{(dangers == 1 ? "" : "s")}", new Color(0.95f, 0.45f, 0.45f));
+            if (warnings > 0)
+                AddScanLine(body, $"  ⚠ {warnings} warning{(warnings == 1 ? "" : "s")}", new Color(1f, 0.78f, 0.25f));
+            if (infos > 0)
+                AddScanLine(body, $"  ℹ {infos} note{(infos == 1 ? "" : "s")}", new Color(0.7f, 0.85f, 0.95f));
+            AddInspectMuted(body, $"Scanned {report.MethodsScanned} methods.");
+        }
+
+        // Group + render findings
+        AddScanGroup(body, report, ModScanner.Severity.Danger,  "Dangers",  new Color(0.95f, 0.45f, 0.45f));
+        AddScanGroup(body, report, ModScanner.Severity.Warning, "Warnings", new Color(1f, 0.78f, 0.25f));
+        AddScanGroup(body, report, ModScanner.Severity.Info,    "Notes",    new Color(0.7f, 0.85f, 0.95f));
+
+        if (report.ScannedSuccessfully && report.ScanErrors.Count > 0)
+        {
+            AddInspectHeader(body, "Scan errors (partial results)");
+            foreach (var err in report.ScanErrors)
+                AddInspectMuted(body, err);
+        }
+
+        var closeBtn = new Button
+        {
+            Text = "Close",
+            FocusMode = Control.FocusModeEnum.All,
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
+            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
+        };
+        ApplyButtonTheme(closeBtn);
+        closeBtn.Pressed += () => canvasLayer.QueueFree();
+        panel.AddChild(closeBtn);
+
+        overlay.GuiInput += (InputEvent ev) =>
+        {
+            if (!IsActionPressed(ev, "ui_cancel")) return;
+            canvasLayer.QueueFree();
+            overlay.AcceptEvent();
+        };
+
+        closeBtn.CallDeferred("grab_focus");
+    }
+
+    private static void AddScanGroup(VBoxContainer body, ModScanner.Report report, ModScanner.Severity sev, string headerText, Color color)
+    {
+        var hits = report.Findings.Where(f => f.Sev == sev).ToList();
+        if (hits.Count == 0) return;
+
+        AddInspectHeader(body, $"{headerText} ({hits.Count})");
+
+        // Sub-group by Category so duplicate API hits roll up
+        foreach (var grp in hits.GroupBy(f => f.Category).OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            // Category header line
+            AddScanLine(body, $"  • {grp.Key} — {grp.First().Note}", color);
+
+            // First few call sites under each category (cap to keep panel readable)
+            const int callSiteCap = 6;
+            var sites = grp.Select(f => $"      {f.ApiCalled}  ←  {f.CallSite}").Distinct().ToList();
+            foreach (var site in sites.Take(callSiteCap))
+                AddInspectMuted(body, site);
+            if (sites.Count > callSiteCap)
+                AddInspectMuted(body, $"      … and {sites.Count - callSiteCap} more call site{(sites.Count - callSiteCap == 1 ? "" : "s")}");
+        }
+    }
+
+    private static void AddScanLine(VBoxContainer body, string text, Color color)
+    {
+        var lbl = new Label
+        {
+            Text = text,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        ApplyFont(lbl, Math.Max(_buttonFontSize, 14));
+        lbl.AddThemeColorOverride("font_color", color);
+        body.AddChild(lbl);
     }
 
     private static void AddInspectHeader(VBoxContainer body, string text)
@@ -921,6 +1132,17 @@ public static class MainMenuIntegration
                 return c;
         }
         return null;
+    }
+
+    private static void DumpButtonsRecursive(Node node, int depth)
+    {
+        if (node is Button btn)
+        {
+            var indent = new string(' ', depth * 2);
+            GD.Print($"[ModFramework] {indent}Button name='{btn.Name}' text='{btn.Text}' parent='{btn.GetParent()?.Name}' ({btn.GetParent()?.GetType().Name})");
+        }
+        foreach (var child in node.GetChildren())
+            DumpButtonsRecursive(child, depth + 1);
     }
 
     private static Button? FindChildByText(Node parent, string text)

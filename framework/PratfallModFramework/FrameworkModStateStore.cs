@@ -7,21 +7,40 @@ internal static class FrameworkModStateStore
 {
     private const string StatePath = "user://modframework-state.json";
 
-    public static HashSet<string> LoadEnabledIds(IReadOnlyCollection<ModManifest> manifests)
+    public sealed class LoadedState
     {
-        var enabledIds = TryLoadPersistedState(manifests);
-        if (enabledIds == null)
-            enabledIds = SeedInitialEnabledIds(manifests);
-
-        return enabledIds;
+        public HashSet<string> EnabledIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // SHA-256 hex fingerprints of mod-states the user has explicitly approved
+        // (toggled on, inspected, or accepted via Download). The fingerprint covers
+        // every executable file in the mod (DLL + PCK if any), so any byte change in
+        // either re-locks the gate. Hash-based — a mod update forces a re-check.
+        public HashSet<string> CheckedModFingerprints { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    public static void SaveState(IEnumerable<string> knownModIds, IEnumerable<string> enabledIds)
+    public static LoadedState LoadState(IReadOnlyCollection<ModManifest> manifests)
+    {
+        var loaded = TryLoadPersistedState();
+        if (loaded != null)
+            return loaded;
+
+        // First-run / no prior state: seed enabled set from physical official-loader
+        // state only. Framework-loaded mods stay disabled until the user explicitly
+        // checks or toggles them on.
+        return new LoadedState { EnabledIds = SeedInitialEnabledIds(manifests) };
+    }
+
+    public static void SaveState(IEnumerable<string> knownModIds, IEnumerable<string> enabledIds, IEnumerable<string> checkedModFingerprints)
     {
         var payload = new PersistedState
         {
             KnownModIds = ModManifestJson.NormalizeIdentifiers(knownModIds),
-            EnabledModIds = ModManifestJson.NormalizeIdentifiers(enabledIds)
+            EnabledModIds = ModManifestJson.NormalizeIdentifiers(enabledIds),
+            CheckedModFingerprints = checkedModFingerprints
+                .Where(h => !string.IsNullOrWhiteSpace(h))
+                .Select(h => h.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
+                .ToList()
         };
 
         var path = ProjectSettings.GlobalizePath(StatePath);
@@ -32,7 +51,7 @@ internal static class FrameworkModStateStore
         File.WriteAllText(path, JsonSerializer.Serialize(payload, ModStateJson.Options));
     }
 
-    private static HashSet<string>? TryLoadPersistedState(IReadOnlyCollection<ModManifest> manifests)
+    private static LoadedState? TryLoadPersistedState()
     {
         var path = ProjectSettings.GlobalizePath(StatePath);
         if (!File.Exists(path))
@@ -45,17 +64,13 @@ internal static class FrameworkModStateStore
             var enabled = new HashSet<string>(
                 ModManifestJson.NormalizeIdentifiers(payload.EnabledModIds),
                 StringComparer.OrdinalIgnoreCase);
-            var known = new HashSet<string>(
-                ModManifestJson.NormalizeIdentifiers(payload.KnownModIds),
+            var checkedHashes = new HashSet<string>(
+                (payload.CheckedModFingerprints ?? new List<string>())
+                    .Where(h => !string.IsNullOrWhiteSpace(h))
+                    .Select(h => h.Trim().ToUpperInvariant()),
                 StringComparer.OrdinalIgnoreCase);
 
-            foreach (var manifest in manifests.Where(manifest => !manifest.UsesOfficialLoader()))
-            {
-                if (!known.Contains(manifest.Id))
-                    enabled.Add(manifest.Id);
-            }
-
-            return enabled;
+            return new LoadedState { EnabledIds = enabled, CheckedModFingerprints = checkedHashes };
         }
         catch (Exception ex)
         {
@@ -67,12 +82,6 @@ internal static class FrameworkModStateStore
     private static HashSet<string> SeedInitialEnabledIds(IReadOnlyCollection<ModManifest> manifests)
     {
         var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var manifest in manifests)
-        {
-            if (!manifest.UsesOfficialLoader())
-                enabled.Add(manifest.Id);
-        }
 
         var officialEnabledDirectories = OfficialModBridge.ReadPhysicalEnabledDirectories();
         foreach (var manifest in manifests.Where(manifest => manifest.UsesOfficialLoader()))
@@ -88,6 +97,7 @@ internal static class FrameworkModStateStore
     {
         public List<string> KnownModIds { get; set; } = new();
         public List<string> EnabledModIds { get; set; } = new();
+        public List<string> CheckedModFingerprints { get; set; } = new();
     }
 
     private static class ModStateJson

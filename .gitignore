@@ -35,3 +35,7 @@ data_Pratfall_windows_x86_64/
 
 # Release zips — uploaded as GitHub Release assets, no need to keep in repo
 release/*.zip
+
+# Process I/O captures from local game-launch debugging
+pratfall_stdout.txt
+pratfall_stderr.txt

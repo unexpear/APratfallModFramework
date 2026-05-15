@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Godot;
 
 namespace PratfallModFramework;
@@ -15,6 +16,14 @@ public class ModManager
     private readonly Dictionary<string, string> _modDllPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _modSessionAvailable = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _modsWithMountedPck = new(StringComparer.OrdinalIgnoreCase);
+    // SHA-256 fingerprints the user has explicitly approved (toggled on, inspected,
+    // or accepted via Download prompt). The fingerprint covers DLL + PCK together,
+    // so tampering with either voids the check. Framework-loaded mods whose current
+    // fingerprint isn't here won't auto-load.
+    private readonly HashSet<string> _checkedFingerprints = new(StringComparer.OrdinalIgnoreCase);
+    // Cached current fingerprint per mod id, computed lazily; cleared when files
+    // change on disk (transfer, workshop install).
+    private readonly Dictionary<string, string> _modCurrentFingerprint = new(StringComparer.OrdinalIgnoreCase);
     // Most-recent manifest snapshot per peer, keyed by user id. Used by the compatibility
     // checker to evaluate the UNION of local + remote mod sets.
     private readonly Dictionary<string, ModPeerSnapshot> _peerSnapshots = new(StringComparer.OrdinalIgnoreCase);
@@ -37,6 +46,9 @@ public class ModManager
     {
         GD.Print("[ModFramework] ModManager.Initialize()");
         _tree = tree;
+        // Hide the game's native ModButton (added 2026-05-15) — our framework dialog
+        // supersedes it. Apply early so the menu picks it up on first _EnterTree.
+        NativeModUiSuppressor.Apply();
         OfficialModBridge.Install();
         SessionStartHooks.Install(kind =>
         {
@@ -45,13 +57,17 @@ public class ModManager
         });
         _localMods = ManifestManager.ScanLocalMods();
         GD.Print($"[ModFramework] Found {_localMods.Count} local mods");
-        var desiredEnabledIds = FrameworkModStateStore.LoadEnabledIds(_localMods);
+        var loadedState = FrameworkModStateStore.LoadState(_localMods);
+        foreach (var fp in loadedState.CheckedModFingerprints)
+            _checkedFingerprints.Add(fp);
 
         foreach (var mod in _localMods)
         {
             mod.Normalize();
-            _desiredEnabled[mod.Id] = desiredEnabledIds.Contains(mod.Id);
+            _desiredEnabled[mod.Id] = loadedState.EnabledIds.Contains(mod.Id);
             _modEnabled[mod.Id] = mod.UsesOfficialLoader() && OfficialModBridge.IsEnabled(mod);
+            // Framework-loaded DLL mods start as session-unavailable until they pass
+            // the user-check gate; LoadLocalAssemblyMods flips that on after verifying.
             _modSessionAvailable[mod.Id] = !UsesFrameworkAssemblyLoader(mod);
             ModExceptionFilter.RegisterKnownModAssembly(mod.Id);
             if (!string.IsNullOrWhiteSpace(mod.AssemblyFile))
@@ -65,10 +81,13 @@ public class ModManager
             onModsPressed: () => GD.Print("[ModFramework] Mods dialog opened"),
             onApplySelectedMods: ApplyDesiredModsForSession,
             getMods: () => _localMods,
-            isModEnabled: id => IsModDesiredEnabled(id),
+            // Dialog reflects ACTUAL loaded state, so unchecked-but-desired mods show OFF
+            // (matching reality) until the user checks them.
+            isModEnabled: id => IsModEnabled(id),
             onToggleMod: (id, enabled) => ToggleMod(id, enabled),
             getModIssueTooltip: BuildModIssueTooltip,
-            inspectMod: id => InspectMod(id));
+            inspectMod: id => InspectMod(id),
+            scanMod: id => ScanMod(id));
 
         try { ModExceptionFilter.Install(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] Exception filter failed: {ex.Message}"); }
@@ -115,9 +134,17 @@ public class ModManager
     public void ToggleMod(string id, bool enable)
     {
         _desiredEnabled[id] = enable;
+
+        if (TryGetLocalManifest(id, out var manifest) && enable && UsesFrameworkAssemblyLoader(manifest))
+        {
+            // Manually flipping the toggle ON counts as user verification — mark the
+            // current DLL hash as checked so future sessions can auto-load it.
+            MarkFingerprintChecked(id);
+        }
+
         PersistDesiredEnabledState();
 
-        if (!TryGetLocalManifest(id, out var manifest))
+        if (!TryGetLocalManifest(id, out manifest))
             return;
 
         if (manifest.UsesOfficialLoader())
@@ -169,6 +196,17 @@ public class ModManager
             if (!_modDllPaths.TryGetValue(id, out var dllPath) || !File.Exists(dllPath))
             {
                 GD.PrintErr($"[ModFramework] Cannot enable mod {id}: DLL path is missing");
+                _modSessionAvailable[id] = false;
+                _modEnabled[id] = false;
+                return false;
+            }
+
+            // Defense in depth: refuse to load a framework DLL whose current bytes
+            // haven't been user-approved. ToggleMod/Inspect/Download are the paths
+            // that should have already marked it checked before reaching here.
+            if (!IsModChecked(id))
+            {
+                GD.Print($"[ModFramework] Refusing to load {id} — DLL hasn't been checked yet (click 🔍 in Mods dialog or toggle on)");
                 _modSessionAvailable[id] = false;
                 _modEnabled[id] = false;
                 return false;
@@ -295,16 +333,41 @@ public class ModManager
                 continue;
             }
 
+            // Record the DLL path BEFORE the check gate so IsModChecked can hash it.
+            _modDllPaths[mod.Id] = dllPath;
+
+            // User-check gate: never auto-load a framework DLL whose hash isn't on the
+            // approved list. The mod still appears in the dialog; the user clicks 🔍 or
+            // toggles it on (both mark the hash as checked) to actually run its OnLoad.
+            //
+            // Session-available stays TRUE so peers still see we have the bits (avoids
+            // redundant downloads when a vote passes). The vote-enable path marks-and-
+            // enables on consent — see ApplyVoteResult.
+            if (UsesFrameworkAssemblyLoader(mod) && !IsModChecked(mod.Id))
+            {
+                _modSessionAvailable[mod.Id] = true;
+                _modEnabled[mod.Id] = false;
+                GD.Print($"[ModFramework] {mod.Id} is unchecked — will stay disabled until you click 🔍 or toggle it on");
+                continue;
+            }
+
+            // Honor desired-disabled by skipping load entirely (don't run OnLoad just
+            // to immediately unload).
+            if (!_desiredEnabled.GetValueOrDefault(mod.Id, false))
+            {
+                _modSessionAvailable[mod.Id] = true;
+                _modEnabled[mod.Id] = false;
+                GD.Print($"[ModFramework] {mod.Id} present but desired-disabled; not loaded");
+                continue;
+            }
+
             try
             {
-                _modDllPaths[mod.Id] = dllPath;
                 _loader.LoadMod(mod.Id, dllPath, mod.AssemblySha256);
                 MountModPckIfAny(mod);
                 _modSessionAvailable[mod.Id] = true;
                 _modEnabled[mod.Id] = true;
                 GD.Print($"[ModFramework] Loaded assembly mod: {mod.Id}");
-                if (!_desiredEnabled.GetValueOrDefault(mod.Id, false))
-                    DisableMod(mod.Id, broadcast: false);
             }
             catch (Exception ex)
             {
@@ -361,7 +424,70 @@ public class ModManager
             _desiredEnabled.Keys,
             _desiredEnabled
                 .Where(entry => entry.Value)
-                .Select(entry => entry.Key));
+                .Select(entry => entry.Key),
+            _checkedFingerprints);
+    }
+
+    // Composite fingerprint of every executable file in the mod (DLL + PCK if
+    // declared). Computed as SHA-256 over the concatenation of per-file SHA-256s in
+    // a fixed order, so any byte change in either file produces a new fingerprint.
+    // Returns null for non-DLL mods or when the DLL file can't be read.
+    private string? GetCurrentModFingerprint(string modId)
+    {
+        if (_modCurrentFingerprint.TryGetValue(modId, out var cached))
+            return cached;
+        if (!_modDllPaths.TryGetValue(modId, out var dllPath) || !File.Exists(dllPath))
+            return null;
+        if (!TryGetLocalManifest(modId, out var manifest))
+            return null;
+        try
+        {
+            var dllHash = HashFile(dllPath);
+            var pckHash = "";
+            if (!string.IsNullOrWhiteSpace(manifest.PckFile) && !string.IsNullOrWhiteSpace(manifest.DirectoryPath))
+            {
+                var pckPath = Path.Combine(manifest.DirectoryPath, manifest.PckFile);
+                if (File.Exists(pckPath))
+                    pckHash = HashFile(pckPath);
+            }
+
+            using var sha = SHA256.Create();
+            var fp = Convert.ToHexString(sha.ComputeHash(System.Text.Encoding.ASCII.GetBytes($"dll:{dllHash}|pck:{pckHash}")));
+            _modCurrentFingerprint[modId] = fp;
+            return fp;
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Failed to fingerprint {modId}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string HashFile(string path)
+    {
+        using var sha = SHA256.Create();
+        using var fs = File.OpenRead(path);
+        return Convert.ToHexString(sha.ComputeHash(fs));
+    }
+
+    // True when the mod doesn't need the gate (official-loader / manifest-only) or
+    // when its current DLL+PCK bytes are on the approved list.
+    public bool IsModChecked(string modId)
+    {
+        if (!TryGetLocalManifest(modId, out var manifest)) return false;
+        if (!UsesFrameworkAssemblyLoader(manifest)) return true;
+        var fp = GetCurrentModFingerprint(modId);
+        return fp != null && _checkedFingerprints.Contains(fp);
+    }
+
+    // Adds the mod's current fingerprint to the in-memory checked set. Caller is
+    // responsible for persistence (usually via PersistDesiredEnabledState).
+    private void MarkFingerprintChecked(string modId)
+    {
+        var fp = GetCurrentModFingerprint(modId);
+        if (fp == null) return;
+        if (_checkedFingerprints.Add(fp))
+            GD.Print($"[ModFramework] Marked {modId} as user-checked (fingerprint {fp[..Math.Min(12, fp.Length)]}…)");
     }
 
     private void OnPeerManifestReceived(ModPeerSnapshot peerSnapshot)
@@ -421,9 +547,8 @@ public class ModManager
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
 
-    // Build an inspection report for a mod by id. If the mod is currently loaded, its
-    // assembly is reflected to find [ModPatch] declarations. Otherwise the report still
-    // includes manifest + file listing + hashes — enough to vet a community download.
+    // Pure read-only manifest + file listing + declared-patch info. No side effects.
+    // For the user-consent "I've reviewed this mod" gate, see ScanMod below.
     public ModInspector.Report? InspectMod(string modId)
     {
         if (!TryGetLocalManifest(modId, out var manifest)) return null;
@@ -431,6 +556,34 @@ public class ModManager
         if (_loader.SnapshotLoadedAssemblies().TryGetValue(modId, out var asm))
             loaded = asm;
         return ModInspector.Inspect(manifest, loaded);
+    }
+
+    // Static IL safety scan via Mono.Cecil. Walks the mod's DLL and reports calls
+    // to dangerous APIs (Process, raw networking, registry, P/Invoke, code gen,
+    // file deletion, etc). This is the user-consent action — running it counts as
+    // "I've reviewed this mod" and marks the current fingerprint as checked.
+    public ModScanner.Report? ScanMod(string modId)
+    {
+        if (!TryGetLocalManifest(modId, out var manifest)) return null;
+
+        var report = ModScanner.Scan(manifest);
+
+        if (UsesFrameworkAssemblyLoader(manifest))
+        {
+            var wasChecked = IsModChecked(modId);
+            MarkFingerprintChecked(modId);
+            if (!wasChecked)
+            {
+                PersistDesiredEnabledState();
+                if (_desiredEnabled.GetValueOrDefault(modId, false) && !_modEnabled.GetValueOrDefault(modId, false))
+                {
+                    if (EnableMod(modId))
+                        MainMenuIntegration.SyncDialogToggle(modId, true);
+                }
+            }
+        }
+
+        return report;
     }
 
     // Used by the Mods dialog to decide whether to show a ⚠ badge next to a mod card.
@@ -607,22 +760,14 @@ public class ModManager
 
         try
         {
-            var isDll = string.Equals(chunk.FileSuffix, ".dll", StringComparison.OrdinalIgnoreCase);
-
-            // PCK arrived — write it out (already persisted by ModP2PTransfer) and stop.
-            // Enable only fires when the DLL has been received and the manifest exists.
-            if (!isDll)
-            {
-                GD.Print($"[ModFramework] Side-file persisted: {chunk.ModId}{chunk.FileSuffix}");
-                return;
-            }
-
-            // DLL arrived. Before re-scanning, write a manifest.json next to it so the
-            // scan picks the mod up. We pull the manifest from the cached peer snapshot
-            // — it travels in the manifest broadcast, never as a transfer chunk.
+            // Each completed file (DLL or PCK) lands in user://mods/<id>/. Write the
+            // peer's manifest into the same folder if not already present so the scan
+            // can find the mod, then attempt to finalize. Finalize is a no-op until
+            // every declared file (DLL + PCK if any) is on disk — that way the
+            // fingerprint we mark-checked covers the whole mod, not just the first
+            // file to land.
             EnsureTransferredManifestOnDisk(sourceUserId, chunk.ModId, persistedPath);
 
-            // Re-scan to pick up the newly-arrived manifest + DLL, then enable.
             _localMods = ManifestManager.ScanLocalMods();
             foreach (var mod in _localMods)
             {
@@ -634,12 +779,11 @@ public class ModManager
                 ModExceptionFilter.RegisterKnownModAssembly(mod.Id);
             }
 
-            if (TryGetLocalManifest(chunk.ModId, out var manifest) && UsesFrameworkAssemblyLoader(manifest))
-            {
-                _modDllPaths[manifest.Id] = persistedPath;
-                _modSessionAvailable[manifest.Id] = true;
-                EnableMod(manifest.Id, broadcast: true);
-            }
+            // Invalidate any cached fingerprint for this mod since its file set just
+            // changed. Recomputed lazily on next IsModChecked / GetCurrentModFingerprint.
+            _modCurrentFingerprint.Remove(chunk.ModId);
+
+            TryFinalizeTransferredMod(chunk.ModId);
         }
         catch (Exception ex)
         {
@@ -647,10 +791,51 @@ public class ModManager
         }
     }
 
+    // Called after each transferred file lands. Idempotent — does nothing until all
+    // declared files (DLL plus PCK when manifested) are present, and short-circuits
+    // once the mod is enabled. Marks the composite fingerprint and enables exactly
+    // once when the mod is fully on disk.
+    private void TryFinalizeTransferredMod(string modId)
+    {
+        if (!TryGetLocalManifest(modId, out var manifest)) return;
+        if (!UsesFrameworkAssemblyLoader(manifest)) return;
+        if (_modEnabled.GetValueOrDefault(modId, false)) return;
+
+        var dllPath = TryFindModDll(manifest);
+        if (dllPath == null || !File.Exists(dllPath))
+        {
+            GD.Print($"[ModFramework] {modId}: waiting for DLL before finalizing");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(manifest.PckFile))
+        {
+            if (string.IsNullOrWhiteSpace(manifest.DirectoryPath)) return;
+            var pckPath = Path.Combine(manifest.DirectoryPath, manifest.PckFile);
+            if (!File.Exists(pckPath))
+            {
+                GD.Print($"[ModFramework] {modId}: DLL on disk, waiting for declared PCK before finalizing");
+                return;
+            }
+        }
+
+        _modDllPaths[modId] = dllPath;
+        _modCurrentFingerprint.Remove(modId);
+        _modSessionAvailable[modId] = true;
+        // The user explicitly chose Download in the acquisition prompt — verified
+        // consent for these exact bytes. Mark the composite fingerprint so the gate
+        // lets EnableMod through.
+        MarkFingerprintChecked(modId);
+        _desiredEnabled[modId] = true;
+        PersistDesiredEnabledState();
+        EnableMod(modId, broadcast: true);
+        GD.Print($"[ModFramework] Finalized transferred mod {modId}");
+    }
+
     // The manifest doesn't travel as a transfer chunk — it's already in the peer's
-    // broadcast snapshot. Write it to disk next to the freshly-arrived DLL so the
-    // local scan can find the mod.
-    private void EnsureTransferredManifestOnDisk(string sourceUserId, string modId, string persistedDllPath)
+    // broadcast snapshot. Write it to disk next to the freshly-arrived file (DLL or
+    // PCK; both live in the same mod folder) so the local scan can find the mod.
+    private void EnsureTransferredManifestOnDisk(string sourceUserId, string modId, string persistedFilePath)
     {
         if (!_peerSnapshots.TryGetValue(sourceUserId, out var snapshot)) return;
         var manifest = snapshot.InstalledManifests
@@ -659,7 +844,7 @@ public class ModManager
 
         try
         {
-            var dir = Path.GetDirectoryName(persistedDllPath);
+            var dir = Path.GetDirectoryName(persistedFilePath);
             if (string.IsNullOrEmpty(dir)) return;
             var manifestPath = Path.Combine(dir, "manifest.json");
             if (File.Exists(manifestPath)) return; // don't overwrite a local manifest
@@ -685,16 +870,50 @@ public class ModManager
             }
 
             // Re-scan mods so a Workshop drop is picked up without a restart. We do not
-            // auto-enable — the user toggles in the Mods dialog as with any other mod.
+            // auto-enable — the user toggles in the Mods dialog as with any other mod,
+            // and the user-check gate still applies to any framework-loader DLL.
             _localMods = ManifestManager.ScanLocalMods();
             foreach (var mod in _localMods)
             {
                 mod.Normalize();
                 if (!_desiredEnabled.ContainsKey(mod.Id))
                     _desiredEnabled[mod.Id] = false;
-                if (!_modSessionAvailable.ContainsKey(mod.Id))
-                    _modSessionAvailable[mod.Id] = !UsesFrameworkAssemblyLoader(mod);
                 ModExceptionFilter.RegisterKnownModAssembly(mod.Id);
+
+                // Resolve and record the DLL path for any framework-loader mod that
+                // doesn't have one yet, OR re-resolve when the path moved (mod folder
+                // changed). Without this, the user can toggle the new mod ON in the
+                // dialog but EnableMod has no DLL path to load. They'd be forced to
+                // restart.
+                if (UsesFrameworkAssemblyLoader(mod))
+                {
+                    var dllPath = TryFindModDll(mod);
+                    if (dllPath != null)
+                    {
+                        if (!_modDllPaths.TryGetValue(mod.Id, out var existing) || existing != dllPath)
+                        {
+                            _modDllPaths[mod.Id] = dllPath;
+                            // Path or bytes may have changed under us; force re-fingerprint.
+                            _modCurrentFingerprint.Remove(mod.Id);
+                        }
+                        else
+                        {
+                            // Same path — bytes may still have changed if Workshop overwrote
+                            // an existing mod in place. Cheap to invalidate; recomputed lazily.
+                            _modCurrentFingerprint.Remove(mod.Id);
+                        }
+                        _modSessionAvailable[mod.Id] = true;
+                    }
+                    else
+                    {
+                        if (!_modSessionAvailable.ContainsKey(mod.Id))
+                            _modSessionAvailable[mod.Id] = false;
+                    }
+                }
+                else if (!_modSessionAvailable.ContainsKey(mod.Id))
+                {
+                    _modSessionAvailable[mod.Id] = true;
+                }
             }
             GD.Print($"[ModFramework] Workshop install integrated; {_localMods.Count} local mods after rescan");
         }
@@ -763,7 +982,19 @@ public class ModManager
         if (TryGetCompatibleInstalledManifest(result.Manifest, out var localMatch))
         {
             if (RequiresAssembly(localMatch))
+            {
+                // A YES vote is explicit consent for this mod. If the local copy is
+                // sitting unchecked, voting passes the gate — otherwise we'd be stuck
+                // in a half-state where the lobby thinks we have it loaded but we
+                // refused to actually load it.
+                if (UsesFrameworkAssemblyLoader(localMatch) && !IsModChecked(localMatch.Id))
+                {
+                    MarkFingerprintChecked(localMatch.Id);
+                    PersistDesiredEnabledState();
+                }
+                _desiredEnabled[localMatch.Id] = true;
                 enabledLocalMatch = EnableMod(localMatch.Id, broadcast: false);
+            }
             else
             {
                 _modEnabled[localMatch.Id] = true;

@@ -20,6 +20,11 @@ public class ModManifest
     // Optional .pck file to mount onto `res://` when the mod is enabled. Mounted PCKs
     // cannot be unmounted in Godot 4 — disabling such a mod takes effect on next restart.
     public string PckFile { get; set; } = "";
+    // Whether to register the mod assembly with Godot's script bridge after loading.
+    // True (default, matching the official loader's schema) lets mod-defined Node /
+    // Resource types be instantiated from .tscn files or PackedScene.Instantiate.
+    // Set to false only if you have a specific reason to skip script registration.
+    public bool AddAssemblyToGodot { get; set; } = true;
     public string DirectoryPath { get; set; } = "";
     public string DirectoryName { get; set; } = "";
     public string LoadPolicy { get; set; } = ModLoadPolicies.Auto;
@@ -51,6 +56,9 @@ public class ModManifest
             AssemblyFile = dict.GetValueOrDefault("Assembly", "").AsString(),
             AssemblySha256 = dict.GetValueOrDefault("assemblySha256", dict.GetValueOrDefault("AssemblySha256", "")).AsString(),
             PckFile = dict.GetValueOrDefault("pckFile", dict.GetValueOrDefault("PckFile", "")).AsString(),
+            AddAssemblyToGodot = dict.ContainsKey("addAssemblyToGodot")
+                ? dict["addAssemblyToGodot"].AsBool()
+                : (dict.ContainsKey("AddAssemblyToGodot") ? dict["AddAssemblyToGodot"].AsBool() : true),
             DirectoryPath = directoryPath ?? "",
             DirectoryName = directoryName ?? "",
             LoadPolicy = dict.GetValueOrDefault("loadPolicy", dict.GetValueOrDefault("LoadPolicy", hasOfficialFields && !hasFrameworkFields ? ModLoadPolicies.Official : ModLoadPolicies.Auto)).AsString(),

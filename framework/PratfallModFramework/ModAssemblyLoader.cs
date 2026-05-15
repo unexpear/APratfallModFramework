@@ -24,7 +24,7 @@ public class ModAssemblyLoader
         EnsureHarmonyLoaded();
     }
 
-    public Assembly LoadMod(string id, string assemblyPath, string? expectedSha256Hex = null)
+    public Assembly LoadMod(string id, string assemblyPath, string? expectedSha256Hex = null, bool addAssemblyToGodot = true)
     {
         UnloadMod(id);
         EnsureHarmonyLoaded();
@@ -44,6 +44,18 @@ public class ModAssemblyLoader
 
         var alc = new ModLoadContext(assemblyPath);
         var asm = alc.LoadFromAssemblyPath(assemblyPath);
+
+        // Register the assembly with Godot's script bridge so mod-defined Node /
+        // Resource types are usable from .tscn / PackedScene.Instantiate. Matches
+        // the official loader's behavior; opt-out via manifest.AddAssemblyToGodot=false.
+        // Wrapped because a registration failure shouldn't take the whole mod down —
+        // patches and OnLoad may still work.
+        if (addAssemblyToGodot)
+        {
+            try { Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(asm); }
+            catch (Exception ex) { LogError($"[ModFramework] Failed to register {id} scripts with Godot: {ex.Message}"); }
+        }
+
         var harmony = new Harmony(id);
         int patchesApplied = ApplyDeclaredPatches(id, asm, harmony);
         var unloadCallbacks = InvokeLoadCallbacks(id, asm);

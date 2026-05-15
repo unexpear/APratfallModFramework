@@ -214,7 +214,7 @@ public class ModManager
 
             try
             {
-                _loader.LoadMod(id, dllPath, manifest.AssemblySha256);
+                _loader.LoadMod(id, dllPath, manifest.AssemblySha256, manifest.AddAssemblyToGodot);
                 MountModPckIfAny(manifest);
                 _modSessionAvailable[id] = true;
                 _modEnabled[id] = true;
@@ -363,7 +363,7 @@ public class ModManager
 
             try
             {
-                _loader.LoadMod(mod.Id, dllPath, mod.AssemblySha256);
+                _loader.LoadMod(mod.Id, dllPath, mod.AssemblySha256, mod.AddAssemblyToGodot);
                 MountModPckIfAny(mod);
                 _modSessionAvailable[mod.Id] = true;
                 _modEnabled[mod.Id] = true;

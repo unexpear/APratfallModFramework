@@ -19,7 +19,6 @@ public static class MainMenuIntegration
     private static bool _themeDumpDone;
     private static bool _frameDiagnosticsDone;
     private static bool _everInjected;
-    private static bool _dumpedNotFound;
     private static int _injectAttempts;
     private static bool _liveTreeDumped;
     private static Action? _onModsButtonPressed;

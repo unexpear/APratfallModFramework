@@ -316,7 +316,7 @@ public sealed class ModNetworkLayer : IDisposable
     // declines an acquisition prompt for a vote-passed mod they don't have — the
     // session can't continue with state divergence, so the framework opts the player
     // out cleanly rather than forcing a download.
-    public bool LeaveLobby()
+    public static bool LeaveLobby()
     {
         var lobby = TryGetLobbyManager();
         if (lobby == null)
@@ -337,7 +337,7 @@ public sealed class ModNetworkLayer : IDisposable
         }
     }
 
-    public bool IsUserInLobby(string userId)
+    public static bool IsUserInLobby(string userId)
     {
         if (string.IsNullOrWhiteSpace(userId)) return false;
         var lobby = TryGetLobbyManager();

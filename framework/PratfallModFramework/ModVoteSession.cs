@@ -58,7 +58,7 @@ public class ModVoteSession
         _activeVotes.Clear();
     }
 
-    private class VoteState
+    private sealed class VoteState
     {
         public string VoteId = "";
         public ModManifest Manifest = new();

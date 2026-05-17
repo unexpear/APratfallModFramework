@@ -1045,7 +1045,7 @@ public class ModManager : IDisposable
         if (_tree == null)
         {
             GD.PrintErr($"[ModFramework] No SceneTree to host acquisition prompt for {result.Manifest.Id}; falling back to leave-lobby");
-            _networkLayer.LeaveLobby();
+            ModNetworkLayer.LeaveLobby();
             return;
         }
 
@@ -1081,7 +1081,7 @@ public class ModManager : IDisposable
             onDecline: () =>
             {
                 GD.Print($"[ModFramework] Player declined {modId}; leaving lobby");
-                _networkLayer.LeaveLobby();
+                ModNetworkLayer.LeaveLobby();
             });
     }
 
@@ -1258,7 +1258,7 @@ public class ModManager : IDisposable
         return ModManifestJson.NormalizeIdentifiers(conflicts);
     }
 
-    private List<string> GetUnavailableDependencies(ModManifest manifest, IReadOnlyDictionary<string, ModManifest> installedById)
+    private static List<string> GetUnavailableDependencies(ModManifest manifest, IReadOnlyDictionary<string, ModManifest> installedById)
     {
         return manifest.Multiplayer.Requires
             .Where(id => !installedById.ContainsKey(id))

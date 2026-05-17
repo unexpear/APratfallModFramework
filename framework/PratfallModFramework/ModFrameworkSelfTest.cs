@@ -413,6 +413,13 @@ public static class ModFrameworkSelfTest
         public override string ToString() => $"compatibility {CategoriesPassed}/{CategoriesTotal} categories detected correctly err={ErrorMessage}";
     }
 
+    // Test-fixture enabled-mod-id arrays. Hoisted to static readonly fields per CA1861
+    // (the analyzer dislikes constant array literals as method arguments; pre-allocating
+    // once is the recommended pattern even for one-shot test fixtures).
+    private static readonly string[] s_enabledIdsAB = ["modA", "modB"];
+    private static readonly string[] s_enabledIdsX = ["modX"];
+    private static readonly string[] s_enabledIdsGood = ["good1", "good2"];
+
     // Verifies ModCompatibilityChecker fires on each known issue category against
     // synthetic fixtures: declared conflict, missing dependency, duplicate id, duplicate
     // assembly file, and a clean-set baseline (no false positives).
@@ -427,7 +434,7 @@ public static class ModFrameworkSelfTest
             new() { Id = "modB", Name = "B", Version = "1.0.0" },
         };
         foreach (var m in declaredConflict) m.Normalize();
-        var r1 = ModCompatibilityChecker.Check(declaredConflict, new[] { "modA", "modB" });
+        var r1 = ModCompatibilityChecker.Check(declaredConflict, s_enabledIdsAB);
         if (r1.Conflicts.Any(c => c.Reason.Contains("conflictsWith"))) result.CategoriesPassed++;
         else { result.ErrorMessage = "declared conflict not detected"; return result; }
 
@@ -437,7 +444,7 @@ public static class ModFrameworkSelfTest
             new() { Id = "modX", Name = "X", Version = "1.0.0", Multiplayer = new ModMultiplayer { Requires = new List<string> { "modY" } } },
         };
         foreach (var m in missingDep) m.Normalize();
-        var r2 = ModCompatibilityChecker.Check(missingDep, new[] { "modX" });
+        var r2 = ModCompatibilityChecker.Check(missingDep, s_enabledIdsX);
         if (r2.MissingDependencies.Any(d => d.MissingDependencyId == "modY")) result.CategoriesPassed++;
         else { result.ErrorMessage = "missing dependency not detected"; return result; }
 
@@ -470,7 +477,7 @@ public static class ModFrameworkSelfTest
             new() { Id = "good2", Name = "Good 2", Version = "1.0.0" },
         };
         foreach (var m in clean) m.Normalize();
-        var r5 = ModCompatibilityChecker.Check(clean, new[] { "good1", "good2" });
+        var r5 = ModCompatibilityChecker.Check(clean, s_enabledIdsGood);
         if (!r5.HasIssues) result.CategoriesPassed++;
         else { result.ErrorMessage = $"false positives on clean set: {r5.Summarize()}"; return result; }
 

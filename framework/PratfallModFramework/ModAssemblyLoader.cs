@@ -271,7 +271,7 @@ public class ModAssemblyLoader
         }
     }
 
-    private record LoadedMod(
+    private sealed record LoadedMod(
         string Id,
         AssemblyLoadContext Context,
         Harmony Harmony,

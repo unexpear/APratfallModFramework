@@ -170,7 +170,7 @@ public class ModEffects
     public List<string> Patches { get; set; } = new();
     public List<string> Nodes { get; set; } = new();
     public List<string> Assets { get; set; } = new();
-    public bool NeedsRestart { get; set; } = false;
+    public bool NeedsRestart { get; set; }
     public string FixedSeedString { get; set; } = "";
 
     public static ModEffects FromJson(Godot.Collections.Dictionary dict)

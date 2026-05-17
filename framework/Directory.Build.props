@@ -1,0 +1,41 @@
+<Project>
+
+  <!--
+    Shared build settings for every PratfallModFramework project under framework/.
+    Auto-imported by MSBuild before each csproj. Per-project values in a csproj
+    override these (last-write-wins).
+
+    Companion: Directory.Packages.props (central package versions).
+  -->
+
+  <PropertyGroup>
+    <!--
+      Language: opt into the latest C# the SDK supports (currently C# 12 with
+      .NET 8 SDK; C# 13 with .NET 9 SDK installed). Pure compiler feature —
+      no runtime change, no behavior risk. Lets us use `field` keyword,
+      collection expressions, primary constructors, etc. where useful.
+    -->
+    <LangVersion>latest</LangVersion>
+
+    <!--
+      Analyzers: broader rule set than the SDK default. Produces warnings, not
+      errors (TreatWarningsAsErrors stays off until the baseline is triaged).
+      EnforceCodeStyleInBuild makes IDE* style rules show up at build time too,
+      not just inside an IDE.
+    -->
+    <AnalysisMode>Recommended</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!--
+      Build-time vulnerable-package audit. NuGet checks the GitHub Advisory
+      Database during restore and warns on any known-vulnerable transitive
+      package. Setting NuGetAuditMode=all includes the transitive closure
+      (default is direct-only). NuGetAuditLevel=moderate means low-severity
+      advisories are ignored.
+    -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>moderate</NuGetAuditLevel>
+  </PropertyGroup>
+
+</Project>

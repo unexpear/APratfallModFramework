@@ -57,12 +57,15 @@ public static class ModLocalizationHelper
             throw new ArgumentException("modId is required", nameof(modId));
         if (string.IsNullOrWhiteSpace(localeCode))
             throw new ArgumentException("localeCode is required", nameof(localeCode));
-        if (translations == null)
-            throw new ArgumentNullException(nameof(translations));
+        ArgumentNullException.ThrowIfNull(translations);
 
-        var json = JsonSerializer.Serialize(translations, new JsonSerializerOptions { WriteIndented = true });
+        var json = JsonSerializer.Serialize(translations, s_indentedJsonOptions);
         return RegisterRaw(modId, localeCode, json);
     }
+
+    // Cached per CA1869 — JsonSerializerOptions is expensive to construct and
+    // safe to share across threads when not mutated after construction.
+    private static readonly JsonSerializerOptions s_indentedJsonOptions = new() { WriteIndented = true };
 
     // Same as Register, but takes the JSON string the mod already built. Useful when
     // the mod prefers to author its locale data in a known schema (e.g. shipping a
@@ -73,8 +76,7 @@ public static class ModLocalizationHelper
             throw new ArgumentException("modId is required", nameof(modId));
         if (string.IsNullOrWhiteSpace(localeCode))
             throw new ArgumentException("localeCode is required", nameof(localeCode));
-        if (jsonContent == null)
-            throw new ArgumentNullException(nameof(jsonContent));
+        ArgumentNullException.ThrowIfNull(jsonContent);
 
         var dir = GetUserLocaleFolder();
         if (dir == null)

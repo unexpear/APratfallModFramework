@@ -41,10 +41,8 @@ public static class ModDropPoolHelper
         int weightAdvantage = 0, int weightDisadvantage = 0, bool canDropSingleplayer = true,
         string label = "<in-memory>")
     {
-        if (pool == null)
-            throw new ArgumentNullException(nameof(pool));
-        if (scene == null)
-            throw new ArgumentNullException(nameof(scene));
+        ArgumentNullException.ThrowIfNull(pool);
+        ArgumentNullException.ThrowIfNull(scene);
 
         var entry = new RandomWeightedScene
         {

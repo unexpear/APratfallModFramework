@@ -1,0 +1,27 @@
+<Project>
+
+  <!--
+    Central Package Management — one place to pin NuGet versions across every
+    project under framework/. Per-project <PackageReference> tags must NOT
+    have a Version= attribute; the version comes from the <PackageVersion>
+    entry below. MSBuild fails the restore if either side drifts.
+
+    When bumping a package version here, ALSO update any embedded-resource
+    paths in csproj files that hardcode the version string in
+    $(NuGetPackageRoot)<package>\<version>\... — those won't auto-update.
+    Today that's only PratfallModFramework.csproj (Lib.Harmony + Mono.Cecil
+    embedded for runtime extraction).
+
+    Companion: Directory.Build.props (analyzer + audit settings).
+  -->
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="Lib.Harmony" Version="2.4.2" />
+    <PackageVersion Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+
+</Project>

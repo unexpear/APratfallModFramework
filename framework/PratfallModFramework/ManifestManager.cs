@@ -74,7 +74,7 @@ public static class ManifestManager
                     directoryName: entry,
                     directoryPath: ProjectSettings.GlobalizePath($"{basePath}{entry}"));
                 // Prefer user:// version if same mod exists in res://
-                if (!allMods.ContainsKey(manifest.Id) || basePath.StartsWith("user://"))
+                if (!allMods.ContainsKey(manifest.Id) || basePath.StartsWith("user://", StringComparison.Ordinal))
                     allMods[manifest.Id] = manifest;
             }
             catch (System.Exception e)

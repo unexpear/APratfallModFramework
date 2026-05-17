@@ -9,7 +9,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+    <!-- Version pinned in framework/Directory.Packages.props (CPM). -->
+    <PackageReference Include="Mono.Cecil" />
   </ItemGroup>
 
 </Project>

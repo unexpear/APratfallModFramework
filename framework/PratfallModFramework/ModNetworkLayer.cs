@@ -2,7 +2,7 @@ using Godot;
 
 namespace PratfallModFramework;
 
-public sealed class ModNetworkLayer
+public sealed class ModNetworkLayer : IDisposable
 {
     // Reserve a high private range until the game exposes an official mod event hook.
     // TODO(coord-with-tim): Negotiate an officially-allocated range with the game devs so
@@ -76,6 +76,12 @@ public sealed class ModNetworkLayer
 
         _snapshotProvider = null;
     }
+
+    // IDisposable contract delegates to Shutdown — the Godot.Timer's true owner is the
+    // scene tree (it's added via AddChild and freed via QueueFree). Dispose exists so
+    // callers from a standard .NET context (tests, programmatic teardown) have a
+    // familiar cleanup entry point. Safe to call multiple times.
+    public void Dispose() => Shutdown();
 
     public void BroadcastManifest()
     {

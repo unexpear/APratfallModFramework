@@ -42,8 +42,7 @@ public static class ModSaveDataHelper
     {
         if (string.IsNullOrWhiteSpace(modId))
             throw new ArgumentException("modId is required", nameof(modId));
-        if (serialize == null)
-            throw new ArgumentNullException(nameof(serialize));
+        ArgumentNullException.ThrowIfNull(serialize);
 
         var path = GetModSaveFilePath(modId);
         if (path == null)

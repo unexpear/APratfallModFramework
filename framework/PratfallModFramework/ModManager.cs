@@ -3,8 +3,13 @@ using Godot;
 
 namespace PratfallModFramework;
 
-public class ModManager
+public class ModManager : IDisposable
 {
+    // Cached per CA1869 — JsonSerializerOptions is expensive to construct and
+    // safe to share across threads when not mutated after construction.
+    private static readonly System.Text.Json.JsonSerializerOptions s_indentedJsonOptions =
+        new() { WriteIndented = true };
+
     private readonly ModAssemblyLoader _loader = new();
     private readonly ModNetworkLayer _networkLayer = new();
     private readonly ModVoteSession _voteSession = new();
@@ -451,8 +456,7 @@ public class ModManager
                     pckHash = HashFile(pckPath);
             }
 
-            using var sha = SHA256.Create();
-            var fp = Convert.ToHexString(sha.ComputeHash(System.Text.Encoding.ASCII.GetBytes($"dll:{dllHash}|pck:{pckHash}")));
+            var fp = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes($"dll:{dllHash}|pck:{pckHash}")));
             _modCurrentFingerprint[modId] = fp;
             return fp;
         }
@@ -849,7 +853,7 @@ public class ModManager
             var manifestPath = Path.Combine(dir, "manifest.json");
             if (File.Exists(manifestPath)) return; // don't overwrite a local manifest
 
-            var json = System.Text.Json.JsonSerializer.Serialize(manifest, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            var json = System.Text.Json.JsonSerializer.Serialize(manifest, s_indentedJsonOptions);
             File.WriteAllText(manifestPath, json);
             GD.Print($"[ModFramework] Wrote transferred manifest for {modId} to {manifestPath}");
         }
@@ -1507,5 +1511,19 @@ public class ModManager
         _voteQueue.Clear();
         _activeVoteId = null;
         _voteUI?.DismissVote();
+    }
+
+    // IDisposable: detach the Godot-tree-owned VoteUI control and tear down the
+    // network layer. Godot owns the real lifetime of _voteUI (added via AddChild),
+    // so we use QueueFree rather than .Dispose() on it. Safe to call multiple times.
+    public void Dispose()
+    {
+        if (_voteUI != null)
+        {
+            _voteUI.QueueFree();
+            _voteUI = null;
+        }
+        _networkLayer.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

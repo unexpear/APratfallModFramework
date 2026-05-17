@@ -34,7 +34,7 @@ public static class ModGameEventHelper
     // mods should prefer SubscribeToTag for the obvious cost reason.
     public static IDisposable SubscribeAll(Action<global::GameplayTag, global::IGameEvent> handler)
     {
-        if (handler == null) throw new ArgumentNullException(nameof(handler));
+        ArgumentNullException.ThrowIfNull(handler);
 
         global::GameEventReceived callback = (tag, ev) =>
         {
@@ -53,7 +53,7 @@ public static class ModGameEventHelper
     public static IDisposable SubscribeToTag(string tagString, Action<global::GameplayTag, global::IGameEvent> handler)
     {
         if (string.IsNullOrWhiteSpace(tagString)) throw new ArgumentException("tagString is required", nameof(tagString));
-        if (handler == null) throw new ArgumentNullException(nameof(handler));
+        ArgumentNullException.ThrowIfNull(handler);
 
         global::GameEventReceived callback = (tag, ev) =>
         {
@@ -78,8 +78,8 @@ public static class ModGameEventHelper
     //       (tag, ev) => GD.Print("a player died"));
     public static IDisposable Subscribe(global::GameplayTag tag, Action<global::GameplayTag, global::IGameEvent> handler)
     {
-        if (tag == null) throw new ArgumentNullException(nameof(tag));
-        if (handler == null) throw new ArgumentNullException(nameof(handler));
+        ArgumentNullException.ThrowIfNull(tag);
+        ArgumentNullException.ThrowIfNull(handler);
 
         global::GameEventReceived callback = (incomingTag, ev) =>
         {

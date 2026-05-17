@@ -289,7 +289,9 @@ public static class ModEntry
 
 ## Recipe: Listen to game events
 
-Pratfall publishes events via `GameEventBus.SendEvent<T>(GameplayTag tag, T eventData)` where `T` implements `IGameEvent`. Subscribers can filter by tag string.
+Pratfall publishes events via `GameEventBus.SendEvent<T>(GameplayTag tag, T eventData)` where `T` implements `IGameEvent`. The bus doesn't filter — every subscriber sees every event. Filter inside your handler.
+
+**Use the pre-defined `GameplayTags` static class for the tag reference** — Pratfall ships ~40 named `GameplayTag` constants (loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor). `GameplayTag.Equals` compares by `.Tag` string, so an Equals check against `GameplayTags.X` always works.
 
 ```csharp
 using Godot;
@@ -302,7 +304,11 @@ public static class ModEntry
     {
         _sub = (tag, ev) =>
         {
-            if (tag?.Tag != "Player.Death") return;   // filter manually
+            // Reference Pratfall's pre-defined GameplayTag instead of a made-up
+            // string. `GameplayTag.Equals` is value-equality on the underlying
+            // `Tag` property, so comparing against the static constant works
+            // even though the runtime instance comes from a different code path.
+            if (tag == null || !tag.Equals(GameplayTags.Stats_Gameplay_Player_Death)) return;
             GD.Print($"a player died: {ev}");
         };
         GameEventBus.OnGameEventReceived += _sub;
@@ -316,7 +322,18 @@ public static class ModEntry
 }
 ```
 
-The bus doesn't filter — every subscriber sees every event. Do the tag check inside your handler.
+Available tags include (this is the full inventory at the time of writing — see decoded surface section):
+- `Stats_Gameplay_Player_Death`, `Stats_Gameplay_Player_Damage`, `Stats_Gameplay_Fall_Damage`, `Stats_Gameplay_Heal`
+- `Stats_Gameplay_Ate`, `Stats_Gameplay_Ate_Freeze_Pop`, `Stats_Gameplay_Ate_Grape_Juice`
+- `Stats_Gameplay_Caught_Player`, `Stats_Gameplay_Threw_Flare`, `Stats_Gameplay_Bat_Hit`, `Stats_Gameplay_Worm_Hit`
+- `Stats_Gameplay_Open_Package`, `Stats_Gameplay_Ball_For_Dog`, `Stats_Gameplay_Unconscious`
+- `Stats_Gameplay_Stick_Chameleon_Grenade`, `Stats_Gameplay_Stuck_Sticky_Bomb`
+- `Stats_Gameplay_Depth_Reached`, `Stats_Gameplay_New_Depth`, `Stats_Gameplay_Finish_Game`, `Stats_Gameplay_Win`
+- `Stats_Gameplay_Revived_Player_Direct`, `Stats_Gameplay_Revived_Player_Statue`, `Stats_Gameplay_Died_By_Explosion`
+- `Stats_Unlocked`, `Challenge_Win`, `Demo_Win`, `Game_Restart`
+- `Curse_Lollypop`, `Debug_Godmode`, `Collision_Ignore_Player`
+- `Material_Wood`, `Material_Stone`, `Material_Metal`, `Material_Glass`, `Material_Organic`, `Material_Sand`, `Material_None`
+- `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
 
 ## Recipe: Show HUD button hints
 
@@ -353,10 +370,11 @@ There's no per-prompt remove API — only `ClearButtonPrompts(context)` which cl
 
 ## Recipe: Extend a drop pool
 
-Add an entry to a `RandomWeightedDropPool` resource — Robert's recommended pattern for content mods.
+Add an entry to a `RandomWeightedDropPool` resource — Robert's recommended pattern for content mods. The pool resources are wired up in scene files (`.tscn`/`.tres`), not loaded by code at known paths, so the practical access pattern is to iterate `DebugMappingManager.Instance.DropPools` at runtime and identify the pool you want by its `ResourceName` (Godot's resource-identifier inherited from `Godot.Resource`).
 
 ```csharp
 using Godot;
+using System.Linq;
 
 public static class ModEntry
 {
@@ -365,8 +383,23 @@ public static class ModEntry
 
     public static void ModInit()
     {
-        _pool = ResourceLoader.Load<RandomWeightedDropPool>("res://path/to/FoodDropPool.tres");
-        if (_pool == null) return;
+        // DebugMappingManager.Instance.DropPools is the array Pratfall populates
+        // from the active scene's drop-pool wiring. Iterate to find yours.
+        // Identifying by ResourceName works when the .tres-author set one;
+        // otherwise fall back to ResourcePath or index.
+        var pools = DebugMappingManager.Instance?.DropPools;
+        if (pools == null || pools.Length == 0)
+        {
+            GD.PrintErr("[MyMod] no DropPools array on DebugMappingManager — wrong scene context?");
+            return;
+        }
+        _pool = pools.FirstOrDefault(p => p?.ResourceName == "FoodDropPool");
+        if (_pool == null)
+        {
+            // List what IS available to help mod authors find the right name.
+            GD.PrintErr($"[MyMod] FoodDropPool not found. Available: {string.Join(", ", pools.Where(p => p != null).Select(p => p.ResourceName))}");
+            return;
+        }
 
         _entry = new RandomWeightedScene
         {
@@ -400,6 +433,10 @@ public static class ModEntry
     }
 }
 ```
+
+Gotchas:
+- `DebugMappingManager.Instance` is null until the level/scene that wires it up has loaded — register your drop-pool extension from a scene-load hook, not at framework init / main-menu time, or guard with a null-check.
+- `ResourceName` is set by the .tres / scene author. If `FoodDropPool` isn't the exact identifier in your target scene, the error branch above logs what IS available so you can iterate. Pratfall has zero `res://...DropPool*` paths in its IL (Cecil-confirmed) — pool identity is scene-data, not code-data.
 
 ## Recipe: Custom Godot types
 
@@ -437,10 +474,14 @@ Counted as a public type with a static `Instance` field or static-getter propert
 
 ### Events you can subscribe to
 - `SavegameManager.OnGameWillSave / OnGameDidSave` (`SaveDataCallback`)
-- `GameEventBus.OnGameEventReceived` (`GameEventReceived (GameplayTag, IGameEvent)`)
+- `GameEventBus.OnGameEventReceived` (`GameEventReceived (GameplayTag, IGameEvent)`) — see [recipe](#recipe-listen-to-game-events) for the canonical `GameplayTags.X` reference pattern
 - `LocalizationManager.OnLocalChanged` (`LocaleChanged`)
 - `NetworkEventManager.OnNetworkEventReceived`
 - `NetworkComponentManager.OnGetNetworkSpawnParent`
+
+### Tag taxonomies (two separate systems — easy to confuse)
+- **`GameplayTags.*`** — static class of pre-loaded `GameplayTag` resources (~40 of them) for the high-level `GameEventBus` pub/sub. Use `GameplayTags.<Name>` directly. Tags include `Stats_Gameplay_*` for stat-tracking events, `Material_*` for surface types, `Harvestable_*` for ground resources, plus `Challenge_Win`, `Demo_Win`, `Game_Restart`, `Curse_Lollypop`, `Debug_Godmode`, etc. All instances are loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor.
+- **`Constants.EventId*`** — static class of `string` constants whose VALUES are numeric IDs (e.g. `Constants.EventIdJump = "129"`, `Constants.EventIdGameOver = "115"`, 56 total). Used by the low-level `NetworkEventManager.SendEvent(UInt16 eventId, ...)` for network messages, NOT by `GameEventBus`. Don't confuse the two — they're parallel systems.
 
 ### Native extension APIs (game already supports — use directly)
 - `LocalizationManager.LoadUserLocalizations()` → drop a file in `<userData>/localization/_*.json`
@@ -464,6 +505,8 @@ These arrays are referenced by save-game data via **index**. Adding entries shif
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
 - **Don't mutate save-coupled arrays.** `PlayerColorsConfig.Colors`, `GameModeManager.Modes`, `LevelManager.LevelPrefabs` are all indexed by save-game data — mutating them invalidates existing player saves.
 - **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `NetworkEventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
+- **`Game.Config` is a value-type struct with `init`-only setters.** Mods cannot mutate config flags at runtime — not even via reflection (the `modreq(IsExternalInit)` modifier enforces this at the C# language level, and even reflection-based hacks would write to a copy because `Game.Config` returns the struct by value). If `Game.Config.AllowUserLocalization == false` on the shipped build, your mod can't flip it; either ship a JSON-only locale that side-loads via `TranslationServer.AddTranslation` directly, or wait for the dev to enable the flag.
+- **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub). `Constants.EventId*` strings (values like `"129"`, `"115"`) are for `NetworkEventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel). Don't mix them — subscribing to a `GameEventBus` handler with a `Constants.EventId*` string will match nothing.
 - **`ModEntry` class name is exact.** Pratfall uses `assembly.GetType("ModEntry")` — case-sensitive, no namespace.
 - **`ModInit` / `ModDestroy` reentrance.** Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent: every subscription paired with an unsubscribe, every array growth paired with a shrink.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's `ModEntry` — the GC needs to collect your assembly's load context.

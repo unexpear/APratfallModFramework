@@ -267,10 +267,13 @@ Use `ModSaveDataHelper.Delete(modId)` to reset state explicitly (e.g. a "Reset M
 
 ## Recipe: GameEvents
 
-`ModGameEventHelper.SubscribeToTag` and `SubscribeAll` wrap `GameEventBus.OnGameEventReceived` with built-in tag filtering and exception isolation.
+`ModGameEventHelper.Subscribe(GameplayTag, handler)`, `SubscribeToTag(string, handler)`, and `SubscribeAll(handler)` wrap `GameEventBus.OnGameEventReceived` with built-in tag filtering and exception isolation.
+
+**Use the `Subscribe(GameplayTag, ...)` overload with Pratfall's pre-defined `GameplayTags.X` constants** — typos become compile errors instead of never-fires-handler:
 
 ```csharp
 using PratfallModFramework;
+using Godot;
 
 public static class MyMod
 {
@@ -278,15 +281,17 @@ public static class MyMod
 
     public static void OnLoad()
     {
-        _sub = ModGameEventHelper.SubscribeToTag("Player.Death",
-            (tag, ev) => Godot.GD.Print($"a player died: {ev}"));
+        _sub = ModGameEventHelper.Subscribe(GameplayTags.Stats_Gameplay_Player_Death,
+            (tag, ev) => GD.Print($"a player died: {ev}"));
     }
 
     public static void OnUnload() => _sub?.Dispose();
 }
 ```
 
-`SubscribeAll(handler)` fires for every event regardless of tag — use for logging, analytics, replay capture. `SubscribeToTag(tagString, handler)` only fires when the event's tag string matches (ordinal comparison, case-sensitive).
+`SubscribeAll(handler)` fires for every event regardless of tag — use for logging, analytics, replay capture. `SubscribeToTag(tagString, handler)` is the string-keyed legacy overload — prefer the `Subscribe(GameplayTag, ...)` form unless you need to dynamically construct a tag string at runtime.
+
+Pratfall ships ~40 named `GameplayTag` resources in `GameplayTags.*` — `Stats_Gameplay_Player_Death`, `Stats_Gameplay_Heal`, `Stats_Gameplay_Threw_Flare`, `Material_Wood`, `Challenge_Win`, `Demo_Win`, `Game_Restart`, etc. See the [vanilla guide's inventory](MOD_AUTHORS_GUIDE_VANILLA.md#tag-taxonomies-two-separate-systems--easy-to-confuse) for the full list. Don't confuse `GameplayTags.X` (high-level `GameEventBus` tags) with `Constants.EventId*` strings (low-level `NetworkEventManager` event IDs) — they're parallel systems.
 
 The helper handles:
 - Tag-string comparison so your handler doesn't need to do it.
@@ -320,7 +325,7 @@ The helper handles:
 
 ## Recipe: DropPools
 
-`ModDropPoolHelper.Register` wraps the array-mutation pattern Robert recommended for `RandomWeightedDropPool` content mods. Returns an `IDisposable` that removes the specific entry you added (by reference, not by content — two mods can legitimately add the same scene at the same weight).
+`ModDropPoolHelper.Register(poolResPath, scene, weight, ...)` wraps the array-mutation pattern Robert recommended for `RandomWeightedDropPool` content mods. Returns an `IDisposable` that removes the specific entry you added (by reference, not by content — two mods can legitimately add the same scene at the same weight).
 
 ```csharp
 using Godot;
@@ -332,6 +337,10 @@ public static class MyMod
 
     public static void OnLoad()
     {
+        // poolResPath is a res:// path to a .tres pool resource you've already
+        // discovered (Pratfall doesn't expose pool .tres paths in code — they
+        // live in scene files). For pool resources you haven't pre-identified,
+        // see ModDropPoolHelper.RegisterIn below for the discovery alternative.
         _registration = ModDropPoolHelper.Register(
             poolResPath: "res://path/to/FoodDropPool.tres",
             scene: GD.Load<PackedScene>("res://my_mod/MyFood.tscn"),
@@ -342,7 +351,16 @@ public static class MyMod
 }
 ```
 
-For tests or in-memory pools, use `ModDropPoolHelper.RegisterIn(pool, scene, weight, ...)` to skip the resource-load step.
+**For pools you can find at runtime via `DebugMappingManager.Instance.DropPools`** (the array Pratfall populates from the active scene), use `RegisterIn`:
+
+```csharp
+var pools = DebugMappingManager.Instance?.DropPools;
+var pool = pools?.FirstOrDefault(p => p?.ResourceName == "FoodDropPool");
+if (pool != null)
+    _registration = ModDropPoolHelper.RegisterIn(pool, scene, weight: 5);
+```
+
+`RegisterIn` is also what the framework's own self-test uses against an in-memory pool — skips the `ResourceLoader.Load` step entirely.
 
 The helper handles:
 - Allocating a grown array, copying old entries, appending yours.

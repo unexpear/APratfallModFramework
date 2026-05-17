@@ -66,6 +66,32 @@ public static class ModGameEventHelper
         return new EventSubscription(callback, tagString);
     }
 
+    // Reference-based subscription using one of Pratfall's pre-defined
+    // `GameplayTags.X` constants. Preferred over the string overload — mod
+    // authors get IntelliSense, the comparison goes through
+    // `GameplayTag.Equals` (which compares the underlying `.Tag` string,
+    // tolerant of separate-instance gotchas), and a typo turns into a
+    // compile error instead of a never-fires-handler.
+    //
+    // Example:
+    //   ModGameEventHelper.Subscribe(GameplayTags.Stats_Gameplay_Player_Death,
+    //       (tag, ev) => GD.Print("a player died"));
+    public static IDisposable Subscribe(global::GameplayTag tag, Action<global::GameplayTag, global::IGameEvent> handler)
+    {
+        if (tag == null) throw new ArgumentNullException(nameof(tag));
+        if (handler == null) throw new ArgumentNullException(nameof(handler));
+
+        global::GameEventReceived callback = (incomingTag, ev) =>
+        {
+            if (incomingTag == null || !incomingTag.Equals(tag)) return;
+            try { handler(incomingTag, ev); }
+            catch (Exception ex) { GD.PrintErr($"[ModFramework] GameEventBus handler for {tag.Tag} threw: {ex.GetType().Name}: {ex.Message}"); }
+        };
+
+        global::GameEventBus.OnGameEventReceived += callback;
+        return new EventSubscription(callback, tag.Tag ?? "<unknown>");
+    }
+
     private sealed class EventSubscription : IDisposable
     {
         private global::GameEventReceived? _callback;

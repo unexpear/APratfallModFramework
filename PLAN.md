@@ -121,6 +121,45 @@ The framework is a negotiation layer, not a promise that arbitrary mods are mutu
   - explicitly configured Pratfall profile roots
 - DLL mods are arbitrary code. The framework can add trust checks and warnings, but not a real in-process sandbox.
 
+## Backlog from comparable mod ecosystems (research 2026-05-17)
+
+Gaps identified by surveying BepInEx, GDWeave, Godot Mod Loader, Lethal Company API stack, Thunderstore, MelonLoader, r2modman, and REPO modding scene. Ordered roughly by value-per-effort. None of these are blocking the v1 framework — they're force multipliers for the mod-author ecosystem.
+
+### Low effort
+
+- [ ] **Per-mod logging** — `ModLogger.For(modId)` writing `<userData>/logs/<modid>.log` plus tee'd into Godot's console with `[modid]` prefix. Unblocks structured crash diagnosis. (~1 day)
+- [ ] **Crash log per mod** — when a `[ModPatch]` or `ModInit` throws, write `<userData>/crash_reports/<modid>_<timestamp>.txt` with manifest + stack + recent log lines from the per-mod logger above. Authors can ask users for the file. (~1 day)
+- [ ] **Zip-drop install** — detect `.zip` in the mods folder on launch, unpack to a same-named folder, delete the zip. Unblocks any future Thunderstore / r2modman integration with near-zero work. (~half day)
+- [ ] **Cross-mod message bus** — `ModMessageBus.Publish("modid.event", obj)` / `.Subscribe(...)` that's framework-internal (NOT routed through `GameEventBus`). Lets mod A pass typed events to mod B without a hard reference. (~1 day)
+- [ ] **Save-data versioning** — add `SaveDataVersion` int + `Migrate(int from, JsonNode data)` callback to `ModSaveDataHelper`. Authors that change their save format get a clean upgrade path. (~half day)
+- [ ] **Thunderstore manifest convention support** — accept `manifest.json` with snake_case keys (`name`, `version_number`, `description`, `dependencies` as `{team}-{package}-{version}` strings) alongside our current PascalCase. Authors copying conventions from neighbor games (REPO, Lethal Company) write Pratfall mods faster, and a future Thunderstore listing is near-zero work. (~half day)
+- [ ] **Accidental Harmony patch conflict detection** — hook our Harmony lifecycle to log "Mod A and Mod B both patch `Player.Jump`; declared deps: none" when two mods land on the same `MethodInfo` without declaring a conflict. Feeds into the existing Conflict prompt. (~1 day)
+- [ ] **Debug env vars** — `PRATFALL_MODS_DEBUG=1` bumps log verbosity; `PRATFALL_MODS_CONSOLE=1` allocates a stdout console on Windows. GDWeave-style. (~few hours)
+- [ ] **Verify dependency semantics** — confirm our manifest deps support soft-vs-hard and version-range (`>=2.1.0`) like BepInDependency does. Add if missing. (~half day to audit, 1 day to fix)
+
+### Medium effort
+
+- [ ] **Config system: `ConfigEntry<T>`** — `ModConfig.Bind<T>("Section", "Key", default, description, AcceptableValueRange/List)` + JSON file at `<userData>/modframework-config/<modid>.json` + `OnChange` event. No UI yet, just the data layer. Authors that want settings get a persistent typed key/value with change events. (~3 days)
+- [ ] **In-game config editor** — per-mod "Settings" tab in the existing Mods dialog that reflects over registered `ConfigEntry` objects and auto-generates sliders / dropdowns / toggles from `AcceptableValue*`. Every existing mod gets a UI for free. **The single biggest author-facing quality jump available** — every comparable framework has this (BepInEx ConfigurationManager, MelonPreferences, LethalConfig, REPOConfig). Depends on the config system landing first. (~3-5 days)
+- [ ] **Host-config-pushed-to-clients (CSync pattern)** — mark a `ConfigEntry` as `Synced = true`; framework auto-sends host's value on join and on change. Critical for physics co-op — "host turned floor friction to 0.1, all clients use 0.1." Depends on config system + existing `ModNetworkLayer`. (~2 days)
+- [ ] **Mod profiles** — loadout presets in the Mods dialog: `<userData>/profiles/<name>.json` listing enabled mod IDs + per-mod config snapshot. UI: Profiles tab with [+ New], [Activate], [Export Modpack]. Players running 20+ mods will demand this. Our enable/disable persistence does 80% of the work. (~2-3 days)
+- [ ] **Keybind registration with rebind UI** — `ModInputHelper.RegisterAction("modid.action", InputEventKey)` persisted per-user, surfaced in a unified keybind list. Every gameplay mod wants this. (~2-3 days)
+- [ ] **Typed network sync helpers** — `ModNetMessage<T>` and `ModNetVar<T>` wrappers over `ModNetworkLayer` (a la LethalNetworkAPI). Removes the per-mod boilerplate of "pack args → send → unpack". (~2-3 days)
+- [ ] **`IModContext` injected into `ModInit(ctx)` overload** — give mods a service container (Logger, Config, UserDataPath, ModId, NetworkLayer) instead of static globals. Makes mods testable without spinning up the framework. Keeps the parameterless `ModInit()` overload for backward compat. (~1-2 days)
+- [ ] **Resource override helper** — `ModAssetHelper.OverrideTexture(path, Texture2D)` / `OverrideSound(...)` / `OverrideScene(...)` hooking `ResourceLoader` to return the mod's resource when the game requests the vanilla path. Effort depends on whether Godot's `ResourceLoader` has a clean override extension point. (~2-3 days, scope risk)
+- [ ] **Per-mod locale files** — verify `ModLocalizationHelper` cleanly handles `<modfolder>/locales/en.json`, `de.json`, etc. with multi-mod no-collision + fallback to en. May already work — needs audit. (~1 day audit + ~1 day fix if needed)
+- [ ] **In-game dev console** — backtick-toggled overlay accepting `<modid> <command> <args>` dispatched to mod-registered commands. Pays for itself in dev iteration speed alone. (~3-5 days)
+- [ ] **Content registration helpers beyond drop pools** — props, characters, whatever Pratfall's content surface offers. Depends on game internals; size unknown. Co-design with Tim. (sizing TBD)
+
+### Explicitly NOT doing
+
+Researched and deprioritized:
+- Hot reload — low user demand; nobody in the comparable ecosystems ships this as first-class
+- Preloader IL patching (BepInEx-style Cecil patches before JIT) — Harmony covers 95% of our cases; rare to need field-add or static-cctor rewrite
+- Telemetry / Sentry-style crash uploads — privacy concerns + low value; structured local crash logs (above) cover the same diagnostic need
+- In-house UI-builder lib (`ModUI.AddSettingsTab(...)`) — let the community converge first; ship config editor + Mods dialog and see what mod authors actually want before standardizing
+- Steam Workshop — already on the roadmap below; no change in priority
+
 ## External Updates
 
 - [x] May 12, 2026: Tim said package encryption was removed and confirmed the game is Godot `4.6.1` with C#.

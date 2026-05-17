@@ -2,7 +2,21 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!--
+      Standalone WinForms installer; NOT loaded into Pratfall's process so we are
+      not pinned to the game's runtime. net10.0-windows is the current LTS
+      (supported through 2028-11) and gives us .NET 10 WinForms improvements
+      (DarkMode, ShowDialogAsync) for the Installer UI.
+
+      `dotnet build` produces a framework-dependent dev build under bin\Release\
+      that requires .NET 10 Desktop Runtime on the host.
+
+      For end-user distribution, publish self-contained via the PublishProfile:
+        dotnet publish -c Release -p:PublishProfile=SelfContained-Win-x64
+      Output: bin\Release\publish\PratfallModFramework.Installer.exe (~60-70 MB,
+      bundles the entire .NET 10 runtime so the end user needs nothing pre-installed).
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>

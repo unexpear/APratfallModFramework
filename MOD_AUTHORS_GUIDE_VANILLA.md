@@ -65,7 +65,15 @@ MyMod/
     <RootNamespace>MyMod</RootNamespace>
     <ModId>MyMod</ModId>
     <GameDir Condition="'$(GameDir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Pratfall</GameDir>
-    <UserModsDir>$(APPDATA)\Pratfall\mods</UserModsDir>
+    <!--
+      Install target is the official loader's mods folder, NEXT TO Pratfall.exe.
+      Cecil-verified from ModManager.CreateModDirectory: shipped Pratfall computes
+      Path.GetDirectoryName(OS.GetExecutablePath()) + "/mods". The `<userData>/mods`
+      path (under %APPDATA%\Pratfall\mods) is ONLY used when running from the Godot
+      editor — shipped Pratfall ignores it. If your dev environment uses a non-
+      Steam install, override GameDir on the dotnet build command line.
+    -->
+    <GameModsDir>$(GameDir)\mods</GameModsDir>
     <OutputPath>bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
@@ -82,12 +90,14 @@ MyMod/
   </ItemGroup>
 
   <Target Name="InstallMod" AfterTargets="Build">
-    <MakeDir Directories="$(UserModsDir)\$(ModId)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(UserModsDir)\$(ModId)" />
-    <Copy SourceFiles="manifest.json" DestinationFolder="$(UserModsDir)\$(ModId)" />
+    <MakeDir Directories="$(GameModsDir)\$(ModId)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameModsDir)\$(ModId)" />
+    <Copy SourceFiles="manifest.json" DestinationFolder="$(GameModsDir)\$(ModId)" />
   </Target>
 </Project>
 ```
+
+**Heads up on the install path.** Pratfall's official `ModManager` looks for mods under `<Pratfall install folder>\mods\` in shipped builds (verified against `ModManager.CreateModDirectory` IL — it calls `OS.GetExecutablePath()` and appends `mods`). The `<userData>/mods` path (under `%APPDATA%\Pratfall\mods`) is **only used when running from the Godot editor** — shipped Pratfall ignores it. If you've seen guides or framework helpers point at AppData, those are framework-specific conventions, not the vanilla loader.
 
 **`manifest.json`** — Pratfall's loader expects PascalCase keys:
 
@@ -112,6 +122,18 @@ Key fields:
 
 The mod folder name must be **unique** across all installed mods — it's the namespace for any assets in your `.pck` (Pratfall mounts them at `res://<DirectoryName>/...`).
 
+### `enabled_mods.json`
+
+Inside the official `<GameDir>\mods\` directory, the loader keeps an `enabled_mods.json` file — a JSON array of **mod folder names**, NOT display names:
+
+```json
+["Author.SomeMod", "Author.AnotherMod"]
+```
+
+Cecil-verified from `ModManager.IsModEnabled(manifest)` IL: each string is compared against `manifest.DirectoryName` (the folder name). So if your mod folder is `Author.MyMod`, the entry in `enabled_mods.json` must be exactly `Author.MyMod` — the `Name` field from your manifest is for display only and does NOT gate loading.
+
+For manual testing, you can edit `enabled_mods.json` directly with a text editor, or use Pratfall's in-game Mods button which writes it for you on each toggle. If the file is absent or empty (`[]`), no mods are enabled at launch (unless they have `AutoLoad: true` in their manifest).
+
 ## Lifecycle
 
 Pratfall's `ModManager.LoadAssembly` reflects for a type literally named **`ModEntry`** in your loaded assembly, then calls a static **`ModInit`** method:
@@ -135,7 +157,19 @@ public static class ModEntry
 
 - Class name MUST be exactly `ModEntry` (any namespace).
 - Methods MUST be `public static`, no parameters.
-- After `ModDestroy` is called, the loader calls `AssemblyLoadContext.Unload()` and forces a GC — don't leak references to your assembly from static fields outside the mod.
+- After `ModDestroy` is called, the loader calls `AssemblyLoadContext.Unload()` and forces a GC.
+
+**Unload is cooperative, not forced.** Disabling a mod runs your `ModDestroy` and asks the runtime to unload the `AssemblyLoadContext`, but the runtime CANNOT actually free the assembly while anything still references it. Things that will silently keep your mod alive in memory after disable:
+
+- **Static event subscriptions you didn't unsubscribe** — `GameEventBus.OnGameEventReceived += handler` without a matching `-=` (also `SavegameManager.OnGameWillSave`, `Network.Instance.EventManager.OnNetworkEventReceived`, etc.)
+- **Background threads / `Task.Run` that's still running** — pinned to your assembly via captured `this`
+- **Harmony patches you didn't `UnpatchAll`** — patched MethodInfo objects retain references to your patch methods
+- **Cached `Type` / `MethodInfo` / `Delegate` references** held by game-side dictionaries (e.g. type caches in `Newtonsoft.Json` / `System.Text.Json`)
+- **Native libraries loaded with `LoadFromUnmanagedDll`** — never unloaded by the runtime
+- **Godot nodes you `AddChild`ed but never `QueueFree`d** — the scene tree still owns them
+- **`MainThreadDispatcher.Instance.Enqueue` callbacks queued for after-unload** — captured `this` keeps your context alive
+
+If you see your mod's log messages still firing after you toggled it off, one of the above is the culprit. The mod's assembly will stay in memory until the entire game process exits.
 
 ## CLI flags
 
@@ -145,6 +179,7 @@ Pratfall reads these from its command line at startup:
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
 | `--qh-skip-mods` | Skips loading any mods at launch. (`ModManager.ShouldLoadMods` returns false.) Debug / recovery use. |
+| `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder (handy for dev iteration against a non-Steam install location). Cecil-confirmed in `ModManager.CreateModDirectory`. |
 
 To pass these via Steam: right-click Pratfall → Properties → Launch options → add the flag.
 
@@ -571,6 +606,8 @@ Gotchas:
 - The `NetworkFrameEvent` payload exposes `EventId`, `TargetId`, and `Data` (the raw bytes). For loaded-level you don't need the payload; for other events, call `ev.GetEvent<YourEventType>()` to deserialize.
 
 ## Recipe: Multiplayer patterns
+
+> **These are basic patterns, not a complete sync protocol.** A host check and a late-join hook do NOT by themselves make a mod multiplayer-safe. Pratfall has a two-layer network stack (low-level frame messages + high-level tagged events) and the safer path for any mod that changes gameplay rules, saved state, inventory, drops, or authority is to build explicit per-mod sync via `Network.Instance.EventManager.SendEvent` with a custom event id and sender identity embedded in the payload. If you haven't built that, treat your mod as **"all players need this mod installed and enabled"** and say so in your README — don't rely on host-only logic working invisibly for clients. The decoded protocol map (local research notes) covers the full stack; the recipes below cover only the entry-level patterns.
 
 Vanilla Pratfall doesn't have a single `IsHost` shortcut — host/client identity lives on `Network.Instance.LobbyManager`. The patterns below cover the four things multiplayer mods always need to do.
 
@@ -1159,9 +1196,10 @@ If your mod works alone but breaks alongside Mod X:
 ### Smoke test before sharing
 
 Before posting a mod for others:
-- Load it alongside the **3 most-installed mods** in the Pratfall community (whatever those are at the time). Conflicts you don't expect show up in 3 minutes of play.
+- **Use Tim's [`quad-head/pratfall-example-mod`](https://github.com/quad-head/pratfall-example-mod) as the known-good baseline**, not your own first attempt. If the example mod loads cleanly on a fresh machine but yours doesn't, the problem is in YOUR mod, not the loader. (Mods from this repo's `sample-mods/` folder work for framework development but should NOT be the only proof that the vanilla loader path works — they share too much surface with the framework codebase.)
+- Load your mod alongside the **3 most-installed mods** in the Pratfall community (whatever those are at the time). Conflicts you don't expect show up in 3 minutes of play.
 - Test on **both Steam-installed paths** if you have a friend who installs Pratfall to `D:\` instead of `C:\Program Files (x86)\Steam`. Hard-coded paths are a classic break.
-- Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.Instance.LobbyManager` properly.
+- Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.Instance.LobbyManager` properly — and per the [multiplayer-patterns disclaimer](#recipe-multiplayer-patterns), if you don't have explicit per-mod state sync, the lobby is your only way to know whether host-vs-client divergence ships.
 
 ## Distribution conventions
 

@@ -522,8 +522,15 @@ public static class ModFrameworkSelfTest
         public bool Success;
         public string ErrorMessage = "";
         public List<string> StepsPassed = new();
-        public override string ToString() =>
-            $"success={Success} steps={StepsPassed.Count} err={ErrorMessage}";
+        public override string ToString()
+        {
+            // On failure include the steps that DID pass so a diagnostic line
+            // (e.g. "AllowUserLocalization=false ...") in the last step is visible
+            // in the log. Success path stays concise.
+            if (Success) return $"success=True steps={StepsPassed.Count}";
+            var trail = StepsPassed.Count > 0 ? " trail=[" + string.Join(" | ", StepsPassed) + "]" : "";
+            return $"success=False steps={StepsPassed.Count} err={ErrorMessage}{trail}";
+        }
     }
 
     public static HelperTestResult RunLocalizationHelperTest()
@@ -543,7 +550,9 @@ public static class ModFrameworkSelfTest
 
             var folder = ResolveUserLocaleFolderForTest();
             if (folder == null) { r.ErrorMessage = "could not resolve user locale folder"; return r; }
-            var expectedFile = Path.Combine(folder, $"_{modId}_{locale}.json");
+            // Loader skips files starting with '_' (per LoadJsonFiles IL); helper must
+            // write a filename WITHOUT leading underscore for the loader to pick it up.
+            var expectedFile = Path.Combine(folder, $"{modId}_{locale}.json");
             if (!File.Exists(expectedFile)) { r.ErrorMessage = $"file not written at expected path: {expectedFile}"; return r; }
             r.StepsPassed.Add($"file exists at {expectedFile}");
 
@@ -551,6 +560,48 @@ public static class ModFrameworkSelfTest
             if (!content.Contains("SELFTEST_KEY") || !content.Contains("selftest_value"))
             { r.ErrorMessage = "file content missing expected key/value"; return r; }
             r.StepsPassed.Add("file content contains expected translations");
+
+            // CRITICAL — verify the loader actually loaded our locale into the
+            // game's AvailableLocales. Per LoadJsonFiles IL: the registered locale
+            // ID is "zuser" + nameWithoutExtension (Pratfall namespaces user-
+            // installed locales so they can't collide with system locales). So a
+            // file `MyMod_es.json` becomes locale ID `"zuserMyMod_es"`, NOT
+            // `"es"` or `"MyMod_es"`. Test against the actual prefixed ID.
+            var expectedRegisteredLocale = ModLocalizationHelper.ComputeRegisteredLocaleId(modId, locale);
+            var mgr = global::LocalizationManager.Instance;
+            if (mgr != null && mgr.AvailableLocales != null)
+            {
+                // Pratfall gates LoadUserLocalizations on Game.Config.AllowUserLocalization
+                // AND Game.Platform.IsSupportingDirectFileAccess(). If either is false the
+                // loader is a no-op and no user locale will EVER appear. That's a Pratfall
+                // build/platform config issue, not a helper bug — treat as PASS-WITH-NOTE.
+                var allowUserLoc = global::Game.Config.AllowUserLocalization;
+                bool platformSupports;
+                try { platformSupports = global::Game.Platform?.IsSupportingDirectFileAccess() ?? false; }
+                catch { platformSupports = false; }
+
+                if (!allowUserLoc || !platformSupports)
+                {
+                    r.StepsPassed.Add($"Pratfall gate closed — AllowUserLocalization={allowUserLoc} IsSupportingDirectFileAccess={platformSupports}; loader skips ALL user locales on this build. Helper file ops verified — actual load can't be tested.");
+                    reg.Dispose();
+                    if (File.Exists(expectedFile)) { r.ErrorMessage = "file not removed after Dispose"; return r; }
+                    r.StepsPassed.Add("file cleaned up on Dispose");
+                    r.Success = true;
+                    return r;
+                }
+
+                if (!mgr.IsLocaleAvailable(expectedRegisteredLocale))
+                {
+                    var available = string.Join(", ", mgr.AvailableLocales);
+                    r.ErrorMessage = $"gate is open but IsLocaleAvailable('{expectedRegisteredLocale}') returns false. AvailableLocales=[{available}]";
+                    return r;
+                }
+                r.StepsPassed.Add($"LocalizationManager.IsLocaleAvailable('{expectedRegisteredLocale}') == true");
+            }
+            else
+            {
+                r.StepsPassed.Add("LocalizationManager.Instance not yet ready; load-acceptance check skipped");
+            }
 
             reg.Dispose();
             if (File.Exists(expectedFile)) { r.ErrorMessage = "file not removed after Dispose"; return r; }

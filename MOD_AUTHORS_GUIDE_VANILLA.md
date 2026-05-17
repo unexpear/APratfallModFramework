@@ -130,45 +130,47 @@ To pass these via Steam: right-click Pratfall → Properties → Launch options 
 
 ## Recipe: Harmony patches
 
-The most common mod pattern. Patch an existing Pratfall method to add or change behavior. Pratfall ships HarmonyLib alongside the game, so you can reference it directly.
+**Heads up — Pratfall does not ship HarmonyLib.** Vanilla mods that want Harmony-style method patches have to bring their own. The two practical options:
+
+1. **Ship `0Harmony.dll` alongside your mod's DLL.** Add `<PackageReference Include="Lib.Harmony" Version="2.3.3" />` to your csproj and copy `0Harmony.dll` into your mod folder at build time. Whether the runtime resolves it cleanly depends on AssemblyLoadContext probe order — works in most cases on .NET 8 but has been known to be fragile across game updates.
+
+2. **Use direct property/field mutation** (no Harmony). For many mod ideas this is enough. Example pattern from `123DMWM` in #mod-dev:
 
 ```csharp
-using HarmonyLib;
 using Godot;
 
 public static class ModEntry
 {
-    private static readonly Harmony _harmony = new("com.you.mymod");
-
     public static void ModInit()
     {
-        var target = AccessTools.Method(typeof(PlayerPickaxeComponent), "TriggerPrimaryAction");
-        var postfix = new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(OnPickaxe),
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic));
-        _harmony.Patch(target, postfix: postfix);
+        var flare = Player.LocalPlayer?.ThrowFlareComponent;
+        if (flare == null) return;
+        flare.MaxFlares = 50;
+        flare.FlareRecoverySeconds = 0.01f;
     }
 
     public static void ModDestroy()
     {
-        _harmony.UnpatchAll(_harmony.Id);
-    }
-
-    private static void OnPickaxe(PlayerPickaxeComponent __instance)
-    {
-        GD.Print("swung!");
+        var flare = Player.LocalPlayer?.ThrowFlareComponent;
+        if (flare == null) return;
+        flare.MaxFlares = 3;                  // restore your guess at the defaults
+        flare.FlareRecoverySeconds = 5.0f;
     }
 }
 ```
 
-Add HarmonyLib to your csproj if not already referenced via Pratfall:
+Caveats with the direct-mutation pattern:
+- The IL safety scanner shipped by the Pratfall Mod Framework won't flag this (it's just `stfld` on a game type — not a dangerous API). That's intentional: cheat-style mods are out of scope for the malware scanner.
+- You need to remember the original values yourself to restore them on `ModDestroy`. Pratfall doesn't expose "the defaults" as a snapshot.
+- Mutations apply to whatever instance exists at the moment — instances created later (respawned players, new sessions) get the unmodified defaults unless you re-apply.
 
-```xml
-<PackageReference Include="Lib.Harmony" Version="2.3.3" />
-```
+If you genuinely need Harmony patches (transpilers, prefix-with-skip, advanced argument injection), the cleanest path on vanilla is option 1 above. Mods targeting the **Pratfall Mod Framework** instead get a `[ModPatch]` attribute that handles Harmony loading, attribute scanning, and unpatch-on-disable — see [MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md) for that pattern.
 
 ## Recipe: Add a language
 
-Pratfall's `LocalizationManager` has native support for user-installed locales. It scans `<userData>/localization/_*.json` and registers anything it finds in `AvailableLocales` — the same list the in-game language selector reads.
+> **Current Pratfall release (1.1.0.R2943) gates this.** `LocalizationManager.LoadUserLocalizations` checks `Game.Config.AllowUserLocalization` first — and on the public release that flag is **false**, so the loader silently skips every user-installed locale regardless of filename or content. Wait for the dev to flip the flag, or load translations via `TranslationServer.AddTranslation` directly (advanced; bypasses the manager's bookkeeping). The recipe below is the *intended* path; verify on your target build before shipping by checking `Game.Config.AllowUserLocalization`.
+
+Pratfall's `LocalizationManager` has native support for user-installed locales. It scans `<userData>/localization/*.json` (skipping any file whose name starts with `_`) and registers anything it finds in `AvailableLocales` — the same list the in-game language selector reads.
 
 ```csharp
 using System.Text.Json;
@@ -186,8 +188,9 @@ public static class ModEntry
         if (string.IsNullOrEmpty(raw)) return "";
         var folder = Path.Combine(ProjectSettings.GlobalizePath(raw), "localization");
         Directory.CreateDirectory(folder);
-        // Filename MUST start with `_` and end with `.json` (loader's filter).
-        return Path.Combine(folder, "_MyMod_es_419.json");
+        // Filename MUST end with `.json` AND MUST NOT start with `_` — leading-
+        // underscore files are reserved/skipped by Pratfall's LoadJsonFiles filter.
+        return Path.Combine(folder, "MyMod_es_419.json");
     }
 
     public static void ModInit()
@@ -211,9 +214,12 @@ public static class ModEntry
 ```
 
 Gotchas:
-- File MUST start with `_` and end with `.json` — Pratfall's `LoadJsonFiles` filters by this.
+- File MUST end with `.json` AND MUST NOT start with `_`. Pratfall's `LoadJsonFiles` skips leading-underscore files (probably reserved for templates/disabled). Naming pattern that works: `<modId>_<localeCode>.json`.
+- **The registered locale ID is `"zuser" + filename-without-extension`.** Pratfall namespaces user locales away from system locales ("en", "de", "fr", ...) so they can't collide. So a file `MyMod_es_419.json` registers as locale ID `"zuserMyMod_es_419"`, NOT `"es_419"`. If you want to programmatically switch to your locale via `TranslationServer.SetLocale(...)` or check `LocalizationManager.IsLocaleAvailable(...)`, use the prefixed ID.
+- The in-game language selector displays user locales by their filename basename (`MyMod_es_419` in the example above). If you want a friendlier display name, pick a friendlier filename.
 - The game gates on `GameConfig.AllowUserLocalization` — if a future build flips that flag off, `LoadUserLocalizations` becomes a no-op.
-- Pratfall reads JSON, not CSV.
+- Pratfall reads JSON, not CSV. Expected shape: a flat `Dictionary<string, string>` of translation key → translated string (Pratfall uses source-gen `JsonSerializer.Deserialize<Dictionary<string,string>>`).
+- Verify it loaded by calling `LocalizationManager.Instance.IsLocaleAvailable("zuser<modId>_<localeCode>")` after `LoadUserLocalizations` — returns false if the file was silently skipped.
 
 ## Recipe: Persist mod data
 
@@ -350,6 +356,10 @@ public static class ModEntry
         {
             Scene = GD.Load<PackedScene>("res://my_mod/MyFood.tscn"),
             Weight = 5,
+            // WeightAdvantage / WeightDisadvantage default to 0 — set them if your
+            // entry should drop more or less often based on the player's situation.
+            // SettingsType is also a field (CustomGameSettings); leave default for
+            // entries that don't tie into the custom-game settings system.
             CanDropSingleplayer = true,
         };
         var existing = _pool.Pool ?? Array.Empty<RandomWeightedScene>();

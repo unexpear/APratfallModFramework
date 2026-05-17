@@ -191,7 +191,9 @@ Multiple patches per mod: declare multiple `[ModPatch]` types in your assembly. 
 
 ## Recipe: Localization
 
-`ModLocalizationHelper.Register` wraps `LocalizationManager.LoadUserLocalizations` — writes your translations to `<userData>/localization/_<modId>_<locale>.json` with the right naming convention, triggers the rescan, and returns an `IDisposable` that cleans up the file on dispose.
+> **Heads up on the current Pratfall release (1.1.0.R2943):** `LoadUserLocalizations` is gated by `Game.Config.AllowUserLocalization`, which is **false** on the shipped public build. The helper writes the file correctly and calls the loader, but the game silently refuses to actually load user locales until the dev flips the flag. The helper detects this case and prints a clear error to the console; your file is still on disk and will load automatically the moment the flag goes true.
+
+`ModLocalizationHelper.Register` wraps `LocalizationManager.LoadUserLocalizations` — writes your translations to `<userData>/localization/<modId>_<locale>.json` with the right naming convention (Pratfall's loader skips files starting with `_` so the helper does NOT prefix one), triggers the rescan, and returns an `IDisposable` that cleans up the file on dispose.
 
 ```csharp
 using PratfallModFramework;
@@ -220,9 +222,11 @@ If your mod ships pre-built JSON content (e.g. a `.json` next to the DLL), use `
 
 The helper handles:
 - Filesystem URI conversion (`Game.Platform.GetUserDataPath()` returns a `user://` URI — `System.IO` can't write to that without `ProjectSettings.GlobalizePath` first).
-- The mandatory leading-underscore filename convention.
+- The filename rule (ends with `.json`, does NOT start with `_` — Pratfall's `LoadJsonFiles` skips leading-underscore files).
 - Mod-id-based filename uniqueness so two mods don't collide.
 - Rescan via `LocalizationManager.Instance.LoadUserLocalizations()` after write and after delete.
+
+**The registered locale ID is `"zuser" + filename-without-extension`** — Pratfall namespaces user locales away from system locales. So `Register(modId: "MyMod", localeCode: "es_419", ...)` produces locale ID `"zuserMyMod_es_419"`. Call `ModLocalizationHelper.ComputeRegisteredLocaleId(modId, localeCode)` to get the exact string if you need to call `TranslationServer.SetLocale(...)` or `LocalizationManager.IsLocaleAvailable(...)` from your mod. The in-game language selector displays user locales by their filename basename.
 
 ## Recipe: SaveData
 

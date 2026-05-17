@@ -11,11 +11,20 @@ namespace PratfallModFramework;
 // helper writes the mod's JSON to the right folder with the right naming convention
 // and triggers the rescan.
 //
-// Per audit of Pratfall.dll (2026-05-16):
+// Per re-audit of Pratfall.dll (2026-05-17):
 //   - User-locale folder: `<Game.Platform.GetUserDataPath()>/localization`
-//   - File-name convention: must start with `_` and end with `.json`
-//   - Loader gates on `GameConfig.AllowUserLocalization` — if the game build has
-//     this disabled, LoadUserLocalizations is a no-op (we log a warning).
+//   - File-name filter: must end with `.json` AND MUST NOT start with `_`
+//     (`LoadJsonFiles`: EndsWith(".json") AND NOT StartsWith("_")). Leading
+//     `_` is reserved by Pratfall — probably for templates/disabled files.
+//   - Registered locale ID: `"zuser" + filename-without-extension`. So a file
+//     `MyMod_es.json` registers as locale ID `"zuserMyMod_es"`. This namespaces
+//     user locales away from system locales ("en", "de", etc.) so they can't
+//     collide. The in-game selector's display name is the filename basename.
+//   - Use `ComputeRegisteredLocaleId(modId, localeCode)` to get the string a
+//     mod would pass to `LocalizationManager.IsLocaleAvailable` or to
+//     `TranslationServer.SetLocale`.
+//   - Loader gates on `GameConfig.AllowUserLocalization` — if the game build
+//     has this disabled, LoadUserLocalizations is a no-op.
 //
 // Typical mod usage:
 //
@@ -76,9 +85,10 @@ public static class ModLocalizationHelper
         if (!Directory.Exists(dir))
             Directory.CreateDirectory(dir);
 
-        // Loader requires files to start with `_` and end with `.json`. Mod id +
-        // locale code together keep two mods from colliding on the same filename.
-        var fileName = $"_{Sanitize(modId)}_{Sanitize(localeCode)}.json";
+        // Loader requires files to end with `.json` and NOT start with `_`
+        // (leading-underscore files are reserved/skipped). Mod id + locale code
+        // together keep two mods from colliding on the same filename.
+        var fileName = $"{Sanitize(modId)}_{Sanitize(localeCode)}.json";
         var path = Path.Combine(dir, fileName);
 
         try
@@ -106,6 +116,26 @@ public static class ModLocalizationHelper
                 GD.Print("[ModFramework] LocalizationManager.Instance is null — locale will load on next game start");
                 return;
             }
+
+            // Pre-check the gates LoadUserLocalizations enforces — if either is
+            // false the call is a no-op and the mod author won't see their locale
+            // even with a correctly-named file. Surface a clear warning instead
+            // of leaving them to wonder why nothing happens.
+            try
+            {
+                if (!global::Game.Config.AllowUserLocalization)
+                {
+                    GD.PrintErr("[ModFramework] LocalizationManager.LoadUserLocalizations is gated by Game.Config.AllowUserLocalization=false on this Pratfall build. The user-locale file was written, but the game won't load it. Wait for Pratfall to enable AllowUserLocalization, or load translations via TranslationServer.AddTranslation directly.");
+                    return;
+                }
+                if (global::Game.Platform != null && !global::Game.Platform.IsSupportingDirectFileAccess())
+                {
+                    GD.PrintErr("[ModFramework] LocalizationManager.LoadUserLocalizations is gated by Game.Platform.IsSupportingDirectFileAccess()=false on this platform (likely console / EOS-only). User locales won't load.");
+                    return;
+                }
+            }
+            catch { /* gate-introspection failure shouldn't block the legitimate call */ }
+
             mgr.LoadUserLocalizations();
         }
         catch (Exception ex)
@@ -138,6 +168,13 @@ public static class ModLocalizationHelper
             return null;
         }
     }
+
+    // Returns the locale ID that Pratfall actually registers for a given
+    // (modId, localeCode) pair. Use this when calling
+    // `LocalizationManager.IsLocaleAvailable(...)` or
+    // `TranslationServer.SetLocale(...)` to refer back to your mod's locale.
+    public static string ComputeRegisteredLocaleId(string modId, string localeCode)
+        => $"zuser{Sanitize(modId)}_{Sanitize(localeCode)}";
 
     private static string Sanitize(string s)
     {

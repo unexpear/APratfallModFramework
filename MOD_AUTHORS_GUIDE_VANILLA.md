@@ -14,11 +14,31 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 6. [Recipe: Persist mod data alongside the save](#recipe-persist-mod-data)
 7. [Recipe: Listen to game events](#recipe-listen-to-game-events)
 8. [Recipe: Show HUD button hints](#recipe-show-hud-button-hints)
-9. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
-10. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
-11. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
-12. [Pitfalls + things to know](#pitfalls)
-13. [Resources](#resources)
+9. [Recipe: Show a toast notification](#recipe-show-a-toast)
+10. [Recipe: Play a sound](#recipe-play-a-sound)
+11. [Recipe: Spawn an entity into the world](#recipe-spawn-an-entity)
+12. [Recipe: React to a level loading](#recipe-react-to-level-load)
+13. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
+14. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
+15. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
+16. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
+    - [16.1 "How do I ...?" quick-reference](#how-do-i-)
+    - [16.2 Singletons (73)](#singletons-73)
+    - [16.3 Static helper classes (22)](#static-helper-classes-22)
+    - [16.4 Configs & Settings (26)](#configs--settings-26)
+    - [16.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
+    - [16.6 `GameplayTags.*` (40)](#gameplaytags-40)
+    - [16.7 `Constants.EventId*` (56)](#constantseventid-56)
+    - [16.8 Entity hierarchy & `IEntity` (23 entities, 184 component-accessors)](#entity-hierarchy--ientity)
+    - [16.9 `IComponent` implementors (184)](#icomponent-implementors-184)
+    - [16.10 Public interfaces (13)](#public-interfaces-13)
+    - [16.11 `res://` path conventions](#res-path-conventions)
+    - [16.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
+17. [Debugging & dev iteration](#debugging--dev-iteration)
+18. [Distribution conventions](#distribution-conventions)
+19. [Godot 4 concepts mod authors should know](#godot-4-concepts)
+20. [Pitfalls + things to know](#pitfalls)
+21. [Resources](#resources)
 
 ---
 
@@ -237,6 +257,25 @@ Gotchas:
 - Pratfall reads JSON, not CSV. Expected shape: a flat `Dictionary<string, string>` of translation key → translated string (Pratfall uses source-gen `JsonSerializer.Deserialize<Dictionary<string,string>>`).
 - Verify it loaded by calling `LocalizationManager.Instance.IsLocaleAvailable("zuser<modId>_<localeCode>")` after `LoadUserLocalizations` — returns false if the file was silently skipped.
 
+### Workaround when the gate is closed
+
+On builds where `Game.Config.AllowUserLocalization` is **false** (including the current 1.1.0.R2943 release), the JSON-file path above is a no-op. To patch translations *into an existing locale* you can bypass `LocalizationManager` entirely and call Godot's `TranslationServer` directly:
+
+```csharp
+using Godot;
+
+public static void ModInit()
+{
+    var t = new Translation();
+    t.Locale = "en";  // patch English; pick any locale Godot knows
+    t.AddMessage("MYMOD_HELLO", "Hello");
+    t.AddMessage("MYMOD_BUTTON_LABEL", "Equip");
+    TranslationServer.AddTranslation(t);
+}
+```
+
+This works on every Pratfall build regardless of the gate, but it has a hard limitation: you can **only add or override translation keys inside locales the game already knows about**. You can't add a brand-new selectable language with this approach — the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is the JSON-file path's output. For "add a new selectable language", the JSON recipe is the only path; wait for the dev to flip `AllowUserLocalization`.
+
 ## Recipe: Persist mod data
 
 `SavegameManager` fires `OnGameWillSave` whenever the player triggers a save. Subscribe to that and flush your data to a file alongside the game's save.
@@ -322,18 +361,7 @@ public static class ModEntry
 }
 ```
 
-Available tags include (this is the full inventory at the time of writing — see decoded surface section):
-- `Stats_Gameplay_Player_Death`, `Stats_Gameplay_Player_Damage`, `Stats_Gameplay_Fall_Damage`, `Stats_Gameplay_Heal`
-- `Stats_Gameplay_Ate`, `Stats_Gameplay_Ate_Freeze_Pop`, `Stats_Gameplay_Ate_Grape_Juice`
-- `Stats_Gameplay_Caught_Player`, `Stats_Gameplay_Threw_Flare`, `Stats_Gameplay_Bat_Hit`, `Stats_Gameplay_Worm_Hit`
-- `Stats_Gameplay_Open_Package`, `Stats_Gameplay_Ball_For_Dog`, `Stats_Gameplay_Unconscious`
-- `Stats_Gameplay_Stick_Chameleon_Grenade`, `Stats_Gameplay_Stuck_Sticky_Bomb`
-- `Stats_Gameplay_Depth_Reached`, `Stats_Gameplay_New_Depth`, `Stats_Gameplay_Finish_Game`, `Stats_Gameplay_Win`
-- `Stats_Gameplay_Revived_Player_Direct`, `Stats_Gameplay_Revived_Player_Statue`, `Stats_Gameplay_Died_By_Explosion`
-- `Stats_Unlocked`, `Challenge_Win`, `Demo_Win`, `Game_Restart`
-- `Curse_Lollypop`, `Debug_Godmode`, `Collision_Ignore_Player`
-- `Material_Wood`, `Material_Stone`, `Material_Metal`, `Material_Glass`, `Material_Organic`, `Material_Sand`, `Material_None`
-- `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
+All 40 available tags are listed in [GameplayTags.* (40)](#gameplaytags-40) below, grouped by category (stats, win conditions, status effects, materials, harvestables).
 
 ## Recipe: Show HUD button hints
 
@@ -367,6 +395,250 @@ public static class ModEntry
 ```
 
 There's no per-prompt remove API — only `ClearButtonPrompts(context)` which clears every prompt registered under that context string. Pick a unique-per-mod context string so cleanup doesn't affect other mods' prompts.
+
+## Recipe: Show a toast
+
+Pop a transient notification on the HUD ("Item picked up", "Mod loaded", etc.). `ToastUIController.Instance` is a HUD-attached singleton — null on the main menu, null between levels.
+
+```csharp
+using Godot;
+
+public static class ModEntry
+{
+    public static void ModInit()
+    {
+        var toaster = ToastUIController.Instance;
+        if (toaster == null)
+        {
+            GD.Print("[MyMod] no HUD yet — toast deferred to next level load");
+            return;
+        }
+        // Real signature: Show(string message, double durationSeconds, bool playSound)
+        toaster.Show("MyMod loaded!", 3.0, playSound: true);
+    }
+}
+```
+
+For a toast that all players in a multiplayer lobby see, wrap the call in a `Network.Instance.EventManager.SendEvent(...)` broadcast on `Constants.EventIdShowToast = 138` instead — the game already handles that event-id and pops the toast on every receiver.
+
+Gotchas:
+- Queued internally — calling `Show` rapidly queues messages; they play in order, not simultaneously.
+- `Show(..., playSound: false)` skips the audio cue; use it for low-priority chatter.
+- If you want this to fire only once per level, gate on a `_hasShownThisLevel` flag and reset in your scene-load hook (see [React to level loading](#recipe-react-to-level-load)).
+
+## Recipe: Play a sound
+
+`AudioManager` exposes two flavors: 3D-positional (`PlaySound`) and 2D/UI (`PlaySound1D`). Both take a `Godot.AudioStream` you load from a packaged asset.
+
+```csharp
+using Godot;
+
+public static class ModEntry
+{
+    private static AudioStream? _ding;
+
+    public static void ModInit()
+    {
+        // Asset lives at res://<YourModFolder>/sounds/ding.ogg — shipped via your .pck.
+        _ding = GD.Load<AudioStream>("res://MyMod/sounds/ding.ogg");
+    }
+
+    public static void PlayAt(Vector3 worldPosition)
+    {
+        if (_ding == null) return;
+        var audio = AudioManager.Instance;
+        if (audio == null) return;
+        // 3D-positional — falls off with distance, attenuated by AudioManagerPlayOptions defaults.
+        audio.PlaySound(_ding, worldPosition);
+    }
+
+    public static void PlayUiBeep()
+    {
+        if (_ding == null) return;
+        AudioManager.Instance?.PlaySound1D(_ding, new AudioManagerPlayOptions());
+    }
+}
+```
+
+Gotchas:
+- `AudioManager.Instance` is non-null during gameplay; it may be null in the very-early boot window.
+- For 3D sound, the player only hears it if their listener (camera) is in range — `AudioManagerPlayOptions` lets you override volume / pitch / bus.
+- This plays the sound **locally only**. Other players won't hear it. For multiplayer-replicated audio, send a network event and have all clients call `PlaySound` on receive.
+- Audio files inside your `.pck` need to be imported as Godot AudioStream resources (`.ogg` and `.wav` work out of the box; see [Setup](#setup) for PCK packaging).
+
+## Recipe: Spawn an entity
+
+Drop a new `PackedScene` instance into the world. Two paths depending on whether you want the spawn replicated to other players.
+
+```csharp
+using Godot;
+
+public static class ModEntry
+{
+    private static PackedScene? _propScene;
+    private static Node? _spawned;
+
+    public static void ModInit()
+    {
+        _propScene = GD.Load<PackedScene>("res://MyMod/MyProp.tscn");
+    }
+
+    public static void SpawnLocal()
+    {
+        if (_propScene == null) return;
+
+        // Local-only spawn (only this player sees it). Returns a Godot.Node.
+        // ScenePoolManager pools the result if the scene's root implements IPooledObject;
+        // otherwise it does a regular Instantiate + AddChild under the parent you pass.
+        _spawned = ScenePoolManager.Instance?.Instantiate(_propScene, Game.RootNode);
+    }
+
+    public static void SpawnReplicated()
+    {
+        if (_propScene == null) return;
+
+        // Replicated spawn — every player in the lobby sees it spawn.
+        // The prefab MUST be registered in NetworkPrefabsConfig first; if it isn't,
+        // SpawnNetworkPrefab returns a failure result. Pratfall doesn't currently
+        // expose a mod-friendly NetworkPrefabsConfig registration API — content
+        // mods that need replicated spawn need framework-helper support.
+        var componentMgr = Network.Instance?.ComponentManager;
+        if (componentMgr == null) return;
+        var result = componentMgr.SpawnNetworkPrefab(_propScene, Game.RootNode);
+        // result.Node is the spawned root, result.Status indicates success/failure.
+    }
+
+    public static void ModDestroy()
+    {
+        // Free what you spawned if it should not outlive your mod.
+        _spawned?.QueueFree();
+        _spawned = null;
+    }
+}
+```
+
+Gotchas:
+- **Replicated spawn requires prefab registration.** `NetworkPrefabsConfig` is loaded from game data and not mod-author-extensible from vanilla today — practically you can only replicate prefabs the game already knows about. Local-only spawn has no such restriction.
+- `Game.RootNode` is the right parent for "persists across the session"; for "lives for one level", parent under a scene-specific node (e.g. via `SceneManager.Instance.GetLoadedScenes()`).
+- `ScenePoolManager.Instance` is null very early in boot; defer spawning until at least one scene has loaded.
+- `Game.RootNode` is null in the very-early bootstrap window too — your `ModInit` runs after it's set, but be aware.
+
+## Recipe: React to level load
+
+Pratfall has no public `OnSceneLoaded` event on `SceneManager`. The way to react to "a level just finished loading" from vanilla is to subscribe to `Network.Instance.EventManager.OnNetworkEventReceived` and filter for the loaded-level event id.
+
+```csharp
+using Godot;
+
+public static class ModEntry
+{
+    private static NetworkEventReceived? _sub;
+
+    public static void ModInit()
+    {
+        var mgr = Network.Instance?.EventManager;
+        if (mgr == null)
+        {
+            GD.PrintErr("[MyMod] Network.EventManager not ready");
+            return;
+        }
+
+        _sub = (ushort eventId, NetworkFrameEvent ev) =>
+        {
+            // Constants.EventIdLoadedLevel is a `const ushort` (value 119) — reference it directly.
+            if (eventId != Constants.EventIdLoadedLevel) return;
+            // A level just finished loading. HUD-attached singletons are now safe to query:
+            //   ButtonPrompBarController.Instance, ToastUIController.Instance,
+            //   DebugMappingManager.Instance.DropPools, etc.
+            ToastUIController.Instance?.Show("MyMod is active in this level", 2.0, false);
+        };
+        mgr.OnNetworkEventReceived += _sub;
+    }
+
+    public static void ModDestroy()
+    {
+        var mgr = Network.Instance?.EventManager;
+        if (_sub != null && mgr != null)
+            mgr.OnNetworkEventReceived -= _sub;
+        _sub = null;
+    }
+}
+```
+
+Gotchas:
+- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-56) table.
+- `Network.Instance.EventManager` is **the** subscription target — not a static `NetworkEventManager` class. The events fire whether you're host, client, or singleplayer.
+- The `NetworkFrameEvent` payload exposes `EventId`, `TargetId`, and `Data` (the raw bytes). For loaded-level you don't need the payload; for other events, call `ev.GetEvent<YourEventType>()` to deserialize.
+
+## Recipe: Multiplayer patterns
+
+Vanilla Pratfall doesn't have a single `IsHost` shortcut — host/client identity lives on `Network.Instance.LobbyManager`. The patterns below cover the four things multiplayer mods always need to do.
+
+```csharp
+using Godot;
+
+public static class ModEntry
+{
+    public static void ModInit()
+    {
+        var lobby = Network.Instance?.LobbyManager;
+        if (lobby == null)
+        {
+            // Singleplayer or pre-lobby — Network isn't up. No-op.
+            return;
+        }
+
+        // Subscribe to join/leave for late-join handling.
+        lobby.OnMemberJoined += OnMemberJoined;
+        lobby.OnMemberLeft   += OnMemberLeft;
+    }
+
+    private static bool IsHost()
+        => Network.Instance?.LobbyManager?.IsLobbyOwner ?? false;
+
+    private static bool IsSingleplayer()
+        => Network.Instance?.LobbyManager?.IsSingleplayerLobby ?? true;
+
+    private static void OnMemberJoined(INetworkLobbyMember member)
+    {
+        if (!IsHost()) return;  // only the host replays state to new joiners
+        // Send mod state to the joiner via Network.Instance.EventManager.SendEvent
+        // with a custom eventId outside 100–153 and 230–231 to avoid collisions
+        // (see the Constants.EventId* table for the used range).
+        // const ushort MyModStateSyncId = 50000;
+        // Network.Instance.EventManager.SendEvent(MyModStateSyncId, mySnapshot,
+        //     NetworkMessageSendOption.Reliable, "MyMod.StateSync");
+        GD.Print($"[MyMod] new member joined (index={member.Index}); replaying state");
+    }
+
+    private static void OnMemberLeft(INetworkLobbyMember member)
+    {
+        GD.Print($"[MyMod] member left (index={member.Index}); cleaning up per-member state");
+    }
+
+    public static void ModDestroy()
+    {
+        var lobby = Network.Instance?.LobbyManager;
+        if (lobby == null) return;
+        lobby.OnMemberJoined -= OnMemberJoined;
+        lobby.OnMemberLeft   -= OnMemberLeft;
+    }
+}
+```
+
+Key facts:
+- **Host check:** `Network.Instance.LobbyManager.IsLobbyOwner` (bool property on `NetworkLobbyManagerBase`). There is **no** `Network.IsHost` shortcut — that's invented and doesn't exist.
+- **Singleplayer check:** `Network.Instance.LobbyManager.IsSingleplayerLobby`. Always true for offline play even though `Network` itself is still up.
+- **Local member identity:** `Network.Instance.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
+- **All members:** `Network.Instance.LobbyManager.LobbyMembers` (List).
+- **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<INetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
+- **Custom network event ids:** pick anything outside `100–153` (gameplay events) and `230–231` (stats events) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
+- **README compatibility tag:** mod authors in comparable communities (Risk of Rain 2, Lethal Company, REPO) self-tag mods as one of:
+  - **Client-side only** — visual / UI only; the host doesn't need your mod, lobby members with or without it are compatible
+  - **Host-only** — only the host runs the logic; clients are unaffected
+  - **All players need this** — protocol-level changes; mismatched lobbies break in subtle ways
+
+  Pratfall's mod framework can negotiate this automatically when both sides have it, but vanilla mods should at least *declare* it in their README so players know what to expect.
 
 ## Recipe: Extend a drop pool
 
@@ -452,65 +724,551 @@ Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(myAssembly);
 
 ## Decoded Pratfall surface inventory
 
-Audit of `Pratfall.dll` (2026-05-17, re-verified post-helper-bugfix) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System namespaces). The most mod-relevant ones:
+Audit of `Pratfall.dll` (2026-05-17 — Pratfall 1.1.0.R2943) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
 
-### Singleton managers (74 total — key ones for modding)
+This section is a **reference map**, not a tutorial. The goal: when you're mid-mod and you need to know "is there a manager for X?" or "what events fire when a player dies?", you should be able to find the answer here instead of disassembling `Pratfall.dll` yourself.
 
-Counted as a public type with a static `Instance` field or static-getter property. Some additional types have `*Manager` in their name but aren't strict singletons (state-only static classes like `SavegameManager` / `SettingsManager` are listed below with a `(static)` note).
-- `AudioManager.Instance` — sound playback
-- `MusicManager.Instance` — music tracks
-- `InputManager.Instance` — cursor + input source
-- `LocalizationManager.Instance` — language + locales (see recipe above)
-- `SavegameManager` (static) — save lifecycle (see recipe above)
-- `GameEventBus.Instance` — game-wide pub/sub (see recipe above)
-- `ButtonPrompBarController.Instance` — HUD prompts (see recipe above)
-- `GameController.Instance` — top-level game state, level loading
-- `Network.Instance` — multiplayer root
-- `GameModeManager.Instance` — game modes (Modes array is index-coupled to saves, see Pitfalls)
-- `CustomGameManager.Instance` — custom game presets
-- `LevelManager.Instance` — level prefab list (same indexing concern)
-- `Loader.Instance` — resource loading
-- `SettingsManager` (static) — settings load/save
+### "How do I ...?"
 
-### Events you can subscribe to
-- `SavegameManager.OnGameWillSave / OnGameDidSave` (`SaveDataCallback`)
-- `GameEventBus.OnGameEventReceived` (`GameEventReceived (GameplayTag, IGameEvent)`) — see [recipe](#recipe-listen-to-game-events) for the canonical `GameplayTags.X` reference pattern
-- `LocalizationManager.OnLocalChanged` (`LocaleChanged`)
-- `NetworkEventManager.OnNetworkEventReceived`
-- `NetworkComponentManager.OnGetNetworkSpawnParent`
+| Goal | Look at |
+|---|---|
+| Play a sound | `AudioManager.Instance` (SFX), `MusicManager.Instance` (music), `UISoundManager.Instance` (UI clicks) |
+| Read which player is me | `Player.LocalPlayer` (static field on `Player`) |
+| Find the local player's components | `Player.LocalPlayer.<ComponentName>Component` — every component on `IEntity` is a property (see [Entity hierarchy](#entity-hierarchy--ientity)) |
+| React to a save | `SavegameManager.OnGameWillSave` / `OnGameDidSave` ([recipe](#recipe-persist-mod-data)) |
+| React to a player dying | Subscribe `GameEventBus.OnGameEventReceived` and compare `tag.Equals(GameplayTags.Stats_Gameplay_Player_Death)` ([recipe](#recipe-listen-to-game-events)) |
+| Send a custom network message | `Network.Instance.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-56). `Network.Instance.EventManager` is an instance, not a static class |
+| Add a HUD prompt ("Press [A]") | `ButtonPrompBarController.Instance.AddButtonPrompt(...)` ([recipe](#recipe-show-hud-button-hints)) |
+| Add an in-game language | Drop a JSON in `<userData>/localization/` ([recipe](#recipe-add-a-language)) |
+| Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
+| Add a custom `Node` / `Resource` type | Set `AddAssemblyToGodot: true` in manifest ([recipe](#recipe-custom-godot-types)) |
+| Change a game mode / level / color | **DON'T** — those arrays are save-coupled by index. See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
+| Spawn an entity from code | `EcsHelper.Spawn(...)` / `ScenePoolManager.Instance` for pooled instances |
+| Hook game ticks | Override `_Process` / `_PhysicsProcess` on a `Node` you parent under `Game.RootNode`, or use `MainThreadDispatcher.Instance.Enqueue(Action)` for one-shot off-thread → main-thread dispatch |
+| Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
+| Know which config is "the game settings" | `Game.Config` — but it's a struct with `init`-only setters, you can read but not mutate |
 
-### Tag taxonomies (two separate systems — easy to confuse)
-- **`GameplayTags.*`** — static class of pre-loaded `GameplayTag` resources (~40 of them) for the high-level `GameEventBus` pub/sub. Use `GameplayTags.<Name>` directly. Tags include `Stats_Gameplay_*` for stat-tracking events, `Material_*` for surface types, `Harvestable_*` for ground resources, plus `Challenge_Win`, `Demo_Win`, `Game_Restart`, `Curse_Lollypop`, `Debug_Godmode`, etc. All instances are loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor.
-- **`Constants.EventId*`** — static class of `string` constants whose VALUES are numeric IDs (e.g. `Constants.EventIdJump = "129"`, `Constants.EventIdGameOver = "115"`, 56 total). Used by the low-level `NetworkEventManager.SendEvent(UInt16 eventId, ...)` for network messages, NOT by `GameEventBus`. Don't confuse the two — they're parallel systems.
+### Singletons (73)
 
-### Native extension APIs (game already supports — use directly)
-- `LocalizationManager.LoadUserLocalizations()` → drop a file in `<userData>/localization/_*.json`
-- `ButtonPrompBarController.AddButtonPrompt(ButtonPromptOptions, string context)` + `ClearButtonPrompts(context)`
-- `DebugMappingManager.DropPools: RandomWeightedDropPool[]` → mutate the array (see drop pool recipe)
+A *singleton* here is a public class with a static `Instance` field or static-getter property. Access via `<Name>.Instance.<Member>`. Many are HUD/UI controllers that are **null on the main menu** — they only exist while a gameplay scene is loaded.
 
-### Arrays you might be tempted to mutate (but shouldn't)
-These arrays are referenced by save-game data via **index**. Adding entries shifts every existing player's saved choice:
-- `PlayerColorsConfig.Colors: Color[]`
-- `GameModeManager.Modes: GameModeBaseConfig[]`
-- `LevelManager.LevelPrefabs: PackedScene[]`
+**Game state & flow**
+- `GameController` — top-level game state, level loading orchestration
+- `GameModeManager` — game-mode list + active mode (`Modes` array is save-coupled, see [pitfalls](#save-coupled-arrays--dont-mutate))
+- `CustomGameManager` — custom-game preset state
+- `LevelManager` — level prefab list (`LevelPrefabs` array is save-coupled)
+- `LifecycleManager` — drives `_Ready` / `_Process` / `_PhysicsProcess` ordering for `ILifecycleHandler`s
+- `SceneManager` — scene transition queue
+- `Loader` / `Preloader` / `LoadingScreenManager` — resource + scene loading pipeline
+- `ScenePoolManager` — pooled scene instances (for `IPooledObject` reuse)
+- `DebugMappingManager` — game's drop-pool registry (`DropPools` array). Populated by the active scene, not by code
+
+**Audio**
+- `AudioManager` — SFX
+- `MusicManager` — music tracks
+- `UISoundManager` — UI clicks
+- `WaterAudioManager` — water-surface ambience
+- `CollisionSoundManager` — physics-impact audio
+- `MainMenuAmbienceAudio` — main-menu loop
+
+**Visual / rendering**
+- `DynamicParticleManager` — particle pool
+- `DynamicResolutionManager` — auto-resolution scaling
+- `ExplosionManager` — explosion pooling
+- `InstanceDrawManager` — instanced-mesh draw batching
+- `FreeFlyCamera` — debug-camera (toggled by F-key)
+
+**Input**
+- `InputManager` — cursor + input source
+- `InputButtonMappingManager` — keybind/gamepad-mapping registry
+
+**Network**
+- `Network` — multiplayer root
+- `NetworkGroupManager` — replicated-group registry
+- `LateJoinManager` — mid-game-join state sync
+
+**Players**
+- `PlayerManager` — connected-player registry
+- `PlayerSpawnManager` — respawn logic
+- `PlayerHudController` — HUD root for the local player
+- `PlayerCompassHudController` — off-screen player markers
+- `PlayerEmoteUIController` — emote wheel
+- `ChaosTricksManager` — random-event ("chaos trick") scheduler
+
+**UI controllers** (most are null until the relevant screen is open)
+- `ButtonPrompBarController` — HUD prompt bar (null on main menu)
+- `PauseMenuUIViewController`
+- `InventoryUIController`
+- `GameOverUIController` / `GameOverGifCaptureUIController`
+- `DemoEndScreenUIController`
+- `DepthMeterUIController`
+- `DialogUIViewController`
+- `HudMarkerUIController`
+- `StoryPanelUIController`
+- `ToastUIController` — popup notifications
+- `UIViewControllerManager` — view-controller stack
+- `CharacterEditorUIController`
+- `GameCustomizerUIController`
+- `CustomGameModeUIController`
+- `ListenInputUIViewController` — keybind-capture overlay
+- `AchievementSummaryUIController`
+- `MenuDogAnimationsComponent` — main-menu dog (cosmetic)
+- `PerformanceMonitorUIController` — fps overlay
+- `SpeedrunUIController`
+
+**Localization & saves**
+- `LocalizationManager` — language + user-locale loader ([recipe](#recipe-add-a-language))
+
+**Events**
+- `GameEventBus` — game-wide tagged pub/sub ([recipe](#recipe-listen-to-game-events))
+
+**Speedrun / instrumentation**
+- `SpeedrunManager` — splits + PB tracking
+- `LiveSplitManager` — LiveSplit integration
+- `TestRunner` — internal test harness
+
+**Performance / threading**
+- `BudgetWorker` — frame-budgeted background work
+- `JobManager` — job-system root
+- `MainThreadDispatcher` — `Enqueue(System.Action)` queues a one-shot delegate for execution on the main thread next `_Process`
+- `DeferredManager` — end-of-frame callbacks
+- `GcManager` — `ListenForGcEvents()` etc. for GC instrumentation
+
+**Steam / DLC**
+- `SteamUpdater` — Steam SDK tick
+- `SteamVoiceSettingsHelper` — voice-chat settings shim
+
+**Misc / world**
+- `WorldEntity` — root world entity
+- `WorldTextManager` — floating-text labels
+- `YarnBallEntity` — main-menu yarn ball (cosmetic)
+- `ProceduralCaveComponent` — procedural cave generation singleton (also referenced via save-coupled `BiomeGenerationConfigs`)
+- `NodeInstanceRegistry` — scene-node lookup by ID
+- `NodeCounter<T>` — debug-only generic node counter
+- `ImGuiGodot.ImGuiController` — Dear ImGui integration (debug builds)
+
+### Static helper classes (22)
+
+C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`). The line between "helper" and "manager" is fuzzy in Pratfall; what these all share is no instance state.
+
+- `BuildHelper` — build-info constants
+- `DialogHelper` — modal-dialog helpers (`ShowDialog(...)`, `ShowConfirm(...)`)
+- `DlcHelper` — DLC ownership checks
+- `EcsHelper` — entity/component helpers (`Spawn`, `Despawn`, `GetComponentRef<T>`, etc.)
+- `EosHelper` / `EosManager` / `EosP2PManager` — Epic Online Services wrappers
+- `FileHelper` — JSON + binary file IO conveniences
+- `GodotHelper` — `Node` / `Resource` helpers
+- `Helper` — math/string grab-bag
+- `InputSettingsHelper` — keybind/gamepad-mapping IO
+- `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
+- `LifecycleHelper` — lifecycle-handler registration helpers
+- **`ModManager`** — Pratfall's native mod loader. Public API: `ShouldLoadMods`, `ShouldHideModLoaderUi`, `EnableMod(modId)`, `DisableMod(modId)`, `LoadAssembly(...)`, etc. ([lifecycle recipe](#lifecycle))
+- `NetworkHelper` — common multiplayer helpers
+- `PerformanceHelper` — perf-counter conveniences
+- `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
+- `SavegameManager` — save lifecycle + events (the orchestration half — see [recipe](#recipe-persist-mod-data))
+- `SentryHelper` — Sentry crash-reporter integration
+- `SettingsManager` — settings load/save (read `GeneralSettings`, `AudioSettings`, `VideoSettings`, `InputSettings`)
+- `SteamLeaderboardHelper` — Steam leaderboard wrappers
+- `TimeFormatHelper` — duration formatting
+
+### Configs & Settings (26)
+
+`*Config` and `*Settings` types — game-tuning data. Most are read via `Manager.Instance.Config` or `Game.Config`. **Don't mutate at runtime** — they're either struct-by-value (changes don't stick) or save-coupled (mutating breaks other players' saves).
+
+| Type | Where you read it | Notes |
+|---|---|---|
+| `GameConfig` | `Game.Config` | Top-level — `AllowUserLocalization`, `BuildId`, … `init`-only setters, struct semantics |
+| `NetworkConfig` | game internals | network-tuning |
+| `NetworkPrefabsConfig` | `NetworkComponentManager` | networked-prefab registry |
+| `GameModeBaseConfig` + `GameModeCustomConfig` / `GameModeSpeedrunConfig` / `GameModeStoryConfig` | `GameModeManager.Modes[i]` | per-mode config — save-coupled |
+| `AudioStreamsPreloadConfig` | `AudioManager` | audio preload list |
+| `BiomeConfig` + `BiomeGenerationConfig` | `ProceduralCaveComponent` | biome tuning — multiplayer-deterministic, don't mutate |
+| `MaterialConfig` | physics + audio | per-material physics/sound rules |
+| `PlayerColorsConfig` | `Player.SetupNetwork` | color list — save-coupled by index, don't mutate |
+| `PotGenerationConfig` | pot spawning | item-pot tuning |
+| `StatsConfig` | stat tracking | which stats are tracked |
+| `AvatarCosmeticConfig` + `CosmeticConfig` | character editor | unlockable cosmetics |
+| `DlcConfig` | DLC manifest | per-DLC content map |
+| `EosConfig` / `SteamConfig` | platform helpers | platform credentials |
+| `AnalyticsConfig` | analytics | event-pipeline config |
+| `SceneLoadSettings` | `SceneManager` | scene-load defaults |
+| `CustomGameSettings` | `CustomGameManager` | custom-game rule set (also used by `RandomWeightedScene.SettingsType`) |
+| `GeneralSettings` / `AudioSettings` / `VideoSettings` / `InputSettings` | `SettingsManager` | user-tweakable settings — these DO get mutated by the in-game settings menu |
+
+### Events you can subscribe to (11)
+
+Mod-relevant public events (filtered to public `add_*` methods on Pratfall's own types):
+
+| Event | Where | Delegate | Notes |
+|---|---|---|---|
+| `OnGameWillSave` | `SavegameManager` (static) | `SaveDataCallback ()` | Fires before save — flush your mod state here |
+| `OnGameDidSave` | `SavegameManager` (static) | `SaveDataCallback ()` | Fires after save |
+| `OnLocalChanged` | `LocalizationManager` (static) | `LocaleChanged (string locale)` | Active language changed — refresh any cached translated strings |
+| `OnGameEventReceived` | `GameEventBus` (static) | `GameEventReceived (GameplayTag, IGameEvent)` | Game-wide pub/sub ([recipe](#recipe-listen-to-game-events)) |
+| `OnNetworkEventReceived` | `Network.Instance.EventManager` (instance) | `NetworkEventReceived (...)` | Low-level network event — `Constants.EventId*` IDs. `Network.Instance` is null until the Network singleton is `_Ready`; gate subscription on a non-null check |
+| `OnGetNetworkSpawnParent` | `NetworkComponentManager` | `NetworkSpawnParentCallback` | Override the parent node for spawned networked objects |
+| `OnGcTiming` | `GcTimingListener` | `Action<GcTiming>` | GC-pause measurements (perf instrumentation) |
+| `OnValueChanged` / `OnRemoteValueChanged` | `NetworkVar<T>` / `NetworkVarNode<T>` | `Action<T>` | Per-instance — fires when a replicated value changes |
+
+There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLoad` callback that only the game itself subscribes to. For mods, load your state in `ModInit` by reading your file directly.
+
+### `GameplayTags.*` (40)
+
+`GameplayTag` resources pre-loaded from `res://data/gameplay_tags/*.tres` by the `GameplayTags` static class. Use these for `GameEventBus` filtering — compare with `incomingTag.Equals(GameplayTags.X)` (value equality on `.Tag` string, so the static-vs-runtime instance gotcha doesn't bite you).
+
+**Stats / gameplay events** (fired by the game when these things happen — subscribe to track player actions)
+- `Stats_Gameplay_Player_Death`, `Stats_Gameplay_Player_Damage`, `Stats_Gameplay_Fall_Damage`, `Stats_Gameplay_Heal`
+- `Stats_Gameplay_Caught_Player`, `Stats_Gameplay_Threw_Flare`, `Stats_Gameplay_Bat_Hit`, `Stats_Gameplay_Worm_Hit`
+- `Stats_Gameplay_Open_Package`, `Stats_Gameplay_Ball_For_Dog`, `Stats_Gameplay_Unconscious`
+- `Stats_Gameplay_Ate`, `Stats_Gameplay_Ate_Freeze_Pop`, `Stats_Gameplay_Ate_Grape_Juice`
+- `Stats_Gameplay_Stick_Chameleon_Grenade`, `Stats_Gameplay_Stuck_Sticky_Bomb`
+- `Stats_Gameplay_Depth_Reached`, `Stats_Gameplay_New_Depth`, `Stats_Gameplay_Finish_Game`, `Stats_Gameplay_Win`
+- `Stats_Gameplay_Revived_Player_Direct`, `Stats_Gameplay_Revived_Player_Statue`
+- `Stats_Gameplay_Died_By_Explosion`
+- `Stats_Unlocked`
+
+**Win conditions / game state**
+- `Challenge_Win`, `Demo_Win`, `Game_Restart`
+
+**Status effects & debug**
+- `Curse_Lollypop`, `Debug_Godmode`, `Collision_Ignore_Player`
+
+**Surface materials** (used by physics/audio for impact rules)
+- `Material_Wood`, `Material_Stone`, `Material_Metal`, `Material_Glass`, `Material_Organic`, `Material_Sand`, `Material_None`
+
+**Harvestables** (ground-resource categories)
+- `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
+
+### `Constants.EventId*` (56)
+
+`ushort` (System.UInt16) constants holding numeric event IDs (`Constants.EventIdJump = 129`). Used by `Network.Instance.EventManager.SendEvent(UInt16 eventId, T evt, NetworkMessageSendOption opt, string eventIdName)` for **low-level network messages** — the `eventIdName` parameter is a separate human-readable debug-name string, NOT the event id itself. Different system from `GameEventBus` / `GameplayTags` — don't mix them.
+
+Sorted by numeric ID:
+
+| ID | EventId | ID | EventId |
+|---|---|---|---|
+| 100 | `EventIdInteraction` | 128 | `EventIdContactDamage` |
+| 101 | `EventIdEmote` | 129 | `EventIdJump` |
+| 102 | `EventIdCameraShake` | 130 | `EventIdBootApply` |
+| 103 | `EventIdRequestLevelLoad` | 131 | `EventIdPlayHungrySound` |
+| 104 | `EventIdStartMission` | 132 | `EventIdDigPlayerFree` |
+| 105 | `EventIdEndMission` | 133 | `EventIdChangeMaterialAt` |
+| 106 | `EventIdDebugShowItemTray` | 134 | `EventIdChangeFloorAt` |
+| 107 | `EventIdTakeDamage` | 135 | `EventIdSetUnconscious` |
+| 108 | `EventIdApplyImpulse` | 136 | `EventIdDropInventory` |
+| 109 | `EventIdShootCannon` | 137 | `EventIdBootApplyStart` |
+| 110 | `EventIdShovelPosition` | 138 | `EventIdShowToast` |
+| 111 | `EventIdRequestRevive` | 139 | `EventIdPlayEmote` |
+| 112 | `EventIdTookDamage` | 140 | `EventIdBatEat` |
+| 113 | `EventIdExplode` | 141 | `EventIdTriggerContact` |
+| 114 | `EventIdNetworkGroupUnregistered` | 142 | `EventIdTeleport` |
+| 115 | `EventIdGameOver` | 143 | `EventIdKnockBat` |
+| 116 | `EventIdCloseGameOverUI` | 144 | `EventIdRequestStartTeleportEffect` |
+| 117 | `EventIdGameRestart` | 145 | `EventIdTriggerGameEnd` |
+| 118 | `EventIdCaughtPlayer` | 146 | `EventIdTriggerExtractor` |
+| 119 | `EventIdLoadedLevel` | 147 | `EventIdQuickRestart` |
+| 120 | `EventIdUnloadLevel` | 148 | `EventIdSetLevelActive` |
+| 121 | `EventIdUnloadLevelAck` | 149 | `EventIdNotifyFlareStick` |
+| 122 | `EventIdEquipCosmetic` | 150 | `EventIdBatHitWithObject` |
+| 123 | `EventIdHonk` | 151 | `EventIdUpdateCustomGameSettings` |
+| 124 | `EventIdLaserBeamSpawn` | 152 | `EventIdResetRagdoll` |
+| 125 | `EventIdPickaxeAction` | 153 | `EventIdRequestMarkLateJoin` |
+| 126 | `EventIdEnemySpit` | 230 | `EventIdGameModeChanged` |
+| 127 | `EventIdGenerateBranch` | 231 | `EventIdSubmitSpeedrunTime` |
+
+Used range: 100–153 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
+
+### Entity hierarchy & `IEntity`
+
+Pratfall's game objects extend Godot nodes but also implement `IEntity` (and often `ILifecycleHandler` for ordered `_Process` ticks). The hierarchy looks like:
+
+```
+Godot.Node                          Godot.Node3D                  Godot.RigidBody3D / StaticBody3D
+   |                                    |                              |
+NodeEntity : IEntity              Node3DEntity : IEntity        RigidBody3DEntity : IEntity   StaticBody3DEntity : IEntity
+   |                                    |                              |                              |
+managers (LevelManager,           managers (WorldEntity,        Player                        YarnBallEntity
+GameModeManager, etc.)            DynamicParticleManager,
+                                  CharacterEditorCamera, etc.)
+```
+
+Concrete entities (23 total, Cecil-counted):
+- `NodeEntity`, `Node3DEntity`, `RigidBody3DEntity`, `StaticBody3DEntity` — base classes
+- `Player` (extends `RigidBody3DEntity`) — **the main thing mods care about**
+- `WorldEntity`, `YarnBallEntity` — world-root entities
+- Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `HangDebuggerNode`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
+- Cameras: `CharacterEditorCamera`, `SpectatorCamera`
+
+**`IEntity` exposes 185 properties** — 184 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<Type, IComponent>` for dynamic access. This is the killer feature for mods:
+
+```csharp
+// Instead of GetComponent<PlayerHealthComponent>() everywhere, you just write:
+var hp = Player.LocalPlayer?.PlayerHealthComponent;
+if (hp != null) hp.CurrentHealth = hp.MaxHealth;
+
+// Same pattern for any component on any entity:
+var flare = Player.LocalPlayer?.ThrowFlareComponent;
+var inv   = Player.LocalPlayer?.InventoryComponent;
+var cam   = Player.LocalPlayer?.PlayerCameraComponent;
+```
+
+**Each property returns `null` when the entity doesn't have that component.** This is the IEntity contract — accessing `ThrowFlareComponent` doesn't throw, it just returns null if no flare-throwing instance is attached. **Always null-check the return.**
+
+Lower-level access if you need the dictionary lookup:
+
+```csharp
+var comp = EcsHelper.GetComponentRef<PlayerHealthComponent>(player);
+// or
+player.Components.TryGetValue(typeof(PlayerHealthComponent), out var comp);
+```
+
+### `IComponent` implementors (184)
+
+The components you might want to read/mutate on a `Player` or other entity. Categorized by name prefix:
+
+**Player components (33)** — extension points for player behavior. `Player.LocalPlayer.<Name>` accessor is available for each via `IEntity`.
+
+`PlayerAdvancedModeComponent`, `PlayerAmbientParticleComponent`, `PlayerAnimationComponent`, `PlayerCameraComponent`, `PlayerCatchComponent`, `PlayerCheckpointComponent`, `PlayerCollisionComponent`, `PlayerContactDamageComponent`, `PlayerCosmeticsComponent`, `PlayerCrownComponent`, `PlayerDamageAreaComponent`, `PlayerDropAdvantageComponent`, `PlayerEmoteComponent`, `PlayerFallDamageComponent`, `PlayerHandSlotComponent`, **`PlayerHealthComponent`**, `PlayerHealthDrainComponent`, `PlayerHonkComponent`, `PlayerJourneyRecordComponent`, `PlayerLateJoinComponent`, `PlayerMaterialBootComponent`, `PlayerMeshComponent`, `PlayerMonitorComponent`, `PlayerMovementSoundComponent`, `PlayerPickaxeComponent`, `PlayerPingingComponent`, `PlayerReviveComponent`, `PlayerSkeletonComponent`, `PlayerSlideEffectComponent`, `PlayerSpectateOnDeathComponent`, `PlayerTeleportEffectComponent`, `PlayerToastComponent`, `PlayerUnconsciousComponent`.
+
+**Interactable / item components (43)** — things the player can pick up or interact with. The `Interactable*` prefix is consistent.
+
+`InteractableActivateFreezeBootComponent`, `InteractableAudioPlayerComponent`, `InteractableBatteryComponent`, `InteractableBounceComponent`, `InteractableCameraComponent`, `InteractableChameleonBranchComponent`, `InteractableColliderTrackingComponent`, **`InteractableComponent`** (base), `InteractableCrownComponent`, `InteractableDrillerComponent`, `InteractableDrillLauncherComponent`, `InteractableEmissionEnergyCurveComponent`, `InteractableExplosionComponent`, `InteractableExtractorComponent`, `InteractableFeedFoodToPlayer`, `InteractableFlareComponent`, `InteractableFoodVoiceModifierComponent`, `InteractableGravityComponent`, `InteractableGravityModifierComponent`, `InteractableGrenadeComponent`, `InteractableGunComponent`, `InteractableHealthPotionComponent`, `InteractableHolderComponent`, `InteractableLaserGunComponent`, `InteractableLoadLevelComponent`, `InteractableMegaphoneComponent`, `InteractableNodeVisibilityComponent`, `InteractableParticleComponent`, `InteractablePickupItemComponent`, `InteractablePlaySoundComponent`, `InteractableReviveAllComponent`, `InteractableScaleCurveComponent`, `InteractableSetUnconsciousComponent`, `InteractableShowCharacterEditorComponent`, `InteractableShowGameCustomizerComponent`, `InteractableShowInviteOverlayComponent`, `InteractableSpawnerComponent`, `InteractableSpinComponent`, `InteractableStartDrillerComponent`, `InteractableTeleporterComponent`, `InteractableTreasureChestComponent`, `InteractableUnlockDogBallAchievementComponent`, `InteractableWinComponent`, `InteractableZiplineLauncherComponent`.
+
+**Network components (7)** — replicated state for multiplayer.
+
+`NetworkComponent` (base), `NetworkContactComponent`, `NetworkEntitySpawnComponent`, `NetworkGroupComponent`, `NetworkTransformComponent`, `NetworkVoicePlayerComponent`, plus `StatsRuntimeComponent` (stat replication).
+
+**Bat enemy (4)**: `BatEatComponent`, `BatExplodeComponent`, `BatFlyingMovementComponent`, `BatKickComponent`.
+
+**Goblin enemy (2)**: `GoblinMovementComponent`, `GoblinSpawnComponent`.
+
+**Worm enemy (2)**: `WormMovementComponent`, `WormSpawnComponent`.
+
+**Spitting enemy (1)**: `SpittingEnemyComponent`.
+
+**Camera (3)**: `CameraShakeComponent`, `CameraShakeReceiverComponent`, `FirstPersonMovementComponent`.
+
+**Physics / damage (7)**: `ContactListenerComponent`, `DeathComponent`, `DestroyEntityBelowYComponent`, `DestroyOnDeathComponent`, `KnockbackOnHitComponent`, `LifetimeComponent`, `RagdollComponent`.
+
+**Explosion / projectile (5)**: `ExplosionComponent`, `ExplosionInstanceComponent`, `ExplosionReceiverComponent`, `ProjectileRagdollComponent`, `SpawnGrenadesOnExplosionComponent`.
+
+**Voxel / chunk (5)**: `ChunkEntityComponent`, `ChunkLoaderComponent`, `ChunkPhysicsObjectComponent`, `VoxelFieldComponent`, `VoxelFieldInstance`.
+
+**Procedural / world (10)**: `BiomeFlagPoleComponent`, `ChangeLightOverTimeComponent`, `ChangeMaterialContinuouslyComponent`, `CloudRotationComponent`, `EmissiveLightComponent`, `FlickerLightSizeComponent`, `LightBlinkComponent`, `ProceduralCaveComponent`, `WorldEnvironmentBlendComponent`, `WorldEnvironmentSettingsComponent`.
+
+**Animation / mesh (8)**: `AnimationTreePhysicsTickComponent`, `AlignWithVelocityComponent`, `HatFallPropellerComponent`, `MeshRandomizerComponent`, `NodeRandomizerComponent`, `RotateComponent`, `RotateHolderComponent`, `TalkAnimationBlendComponent`.
+
+**Audio (2)**: `AudioPlayerComponent`, `CollisionSoundComponent`.
+
+**Lifecycle / spawn (10)**: `BossHealthComponent`, `BuriedMineComponent`, `CheckpointStatueComponent`, `DespawnWhenTooFarAwayComponent`, `EnableInteractableOnDugOut`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `PickupItemOnDeathComponent`, `SpawnEntityOnDeathComponent`, `SpawnMeshOnBounceComponent`.
+
+**Misc / debug (41)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
+
+### Public interfaces (13)
+
+- `IComponent` — every component implements this. 184 implementors (see above).
+- `IEntity` — every entity implements this. 23 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
+- `INetworkEvent` — payload type for `Network.Instance.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
+- `INetworkMessage` — base for `INetworkEvent`.
+- `INetworkLobby` / `INetworkLobbyMember` — multiplayer-lobby abstractions (Steam vs EOS hide behind these).
+- `INetworkVoicePlayer` — voice-chat abstraction.
+- `ILifecycleHandler` — opt into `LifecycleManager`-ordered `_Process` / `_PhysicsProcess` ticks. Most managers implement this.
+- `IPersistentId` — entities that persist across save/load.
+- `IPooledObject` — entities that participate in `ScenePoolManager`.
+- `IPreBuildCallback` — `_Ready`-time pre-build hook.
+- `ISerializationCallbackReceiver` — pre/post-serialize callbacks.
+
+### `res://` path conventions
+
+Cecil-scanned distinct top-level folders that appear as `res://X/...` string literals in Pratfall.dll:
+
+| Pattern | Contents |
+|---|---|
+| `res://assets/...` | Art, audio, models, textures — most game content |
+| `res://data/...` | Data resources: `gameplay_tags/*.tres`, configs, level metadata |
+| `res://data/gameplay_tags/*.tres` | The 40 `GameplayTag` resources loaded by `GameplayTags` static cctor |
+| `res://scenes/...` | `.tscn` scene files (rooms, prefabs) |
+| `res://materials/...` | Godot material resources |
+| `res://addons/...` | Godot editor addons (not loaded at runtime) |
+| `res://tests/...` | Internal test scenes (not loaded by `TestRunner` in retail) |
+| `res://...` (no folder) | A few root-level resources |
+
+**Mod assets get mounted at `res://<YourModFolderName>/...`** — Pratfall's loader mounts each mod's `.pck` under its folder name. So if your mod folder is `MyMod`, your mod's `scene.tscn` lives at `res://MyMod/scene.tscn`. This is why folder names must be unique across all installed mods.
+
+### Save-coupled arrays — don't mutate
+
+These arrays are referenced by save-game data via **index**. Adding entries shifts every existing player's saved choice and silently corrupts their data. Don't touch:
+
+- `PlayerColorsConfig.Colors: Color[]` — saved color index
+- `GameModeManager.Modes: GameModeBaseConfig[]` — saved game-mode index
+- `LevelManager.LevelPrefabs: PackedScene[]` — saved level-prefab index
 - `ProceduralCaveComponent.BiomeGenerationConfigs` — also affects procedural determinism → multiplayer would diverge
-- `OptionsUIViewController.TabBarItems: OptionsContentUIViewBase[]` — milder, but still shifts indices
+- `OptionsUIViewController.TabBarItems: OptionsContentUIViewBase[]` — milder, but still shifts tab indices
 
-### Config types (read-only by convention)
-26 `*Config` and `*Settings` types: `GameConfig`, `NetworkConfig`, `GameModeBaseConfig`, `AudioStreamsPreloadConfig`, `BiomeConfig`, `MaterialConfig`, etc. Read them via `Manager.Instance.Config` patterns; don't mutate.
+If you need to add a game mode / level / color, your mod has to ship a fresh save profile (advanced — Pratfall doesn't have first-class support for this yet). Stick with extension points that are array-of-records-by-content (like `RandomWeightedDropPool.Pool` — see [drop pool recipe](#recipe-extend-a-drop-pool)) rather than array-of-references-by-index.
+
+## Debugging & dev iteration
+
+### Where logs go
+
+Pratfall is built on Godot 4.6. Anything you write with `GD.Print(...)` or `GD.PrintErr(...)` from your mod ends up in the game's `godot.log`. The file lives under whatever `Game.Platform.GetUserDataPath()` resolves to, in the `logs/` subfolder. To find the exact path on your machine, run from your mod:
+
+```csharp
+GD.Print(ProjectSettings.GlobalizePath("user://logs/"));
+```
+
+On a typical Steam install this is `%APPDATA%\Godot\app_userdata\Pratfall\logs\` — but don't hard-code it; resolve at runtime. Up to 5 historical log files are kept (rotated), with `godot.log` being the most recent.
+
+### Useful Godot CLI flags
+
+Pass these via Steam → right-click Pratfall → Properties → Launch options, or launch the executable directly from a terminal:
+
+| Flag | Effect |
+|---|---|
+| `--verbose` | Enables Godot's verbose engine logging in addition to your `GD.Print` lines. |
+| `--log-file <path>` | Redirects engine output to a specific file (useful for diff-based debugging across runs). |
+| `--qh-skip-mods` | Pratfall flag — skips all mod loading. Use to bisect "is this bug from my mod or vanilla?". |
+| `--qh-disable-mod-ui` | Pratfall flag — hides the Mods button. Useful when running with a framework that injects its own UI. |
+
+There is no `--console` flag on Windows for Godot 4 to attach a live stdout console. To see live output, launch the executable from a terminal: `Pratfall.exe > out.log 2>&1` from cmd/PowerShell, then tail `out.log`. Steam's launch-options can take stdout redirection but it's finicky — direct-launch from the install dir is the reliable path.
+
+### Iteration loop
+
+The fastest edit-build-test cycle:
+
+1. **Launch Pratfall directly**, not through Steam. Steam's restart-after-quit is the slow part — running `Pratfall.exe` from the install dir means a kill-and-relaunch is sub-second.
+2. **Build directly into the mod folder.** The `InstallMod` MSBuild target in the [Setup csproj template](#setup) does this — `<Copy>` the DLL into `$(APPDATA)\Pratfall\mods\$(ModId)` after each build. Iteration is `dotnet build` → kill game → launch.
+3. **Skip the user-confirmation gate on subsequent enables.** Once a mod has been approved, the framework remembers your decision; mid-session edit-build-test doesn't re-prompt. (Vanilla loader doesn't have a gate at all.)
+4. **`ModInit` runs once per enable.** To re-test a code path without restarting the game, toggle your mod off → on from the in-game Mods button. `ModDestroy` runs on disable, `ModInit` runs again on enable. **Both must be reentrant** — see [Pitfalls](#pitfalls).
+
+### Attaching a debugger
+
+VS Code with the C# extension can attach to a running game by process name. Pratfall's process is `Pratfall.exe`. Set breakpoints in your mod's source, launch the game, attach via "Run and Debug" → ".NET Core Attach", pick `Pratfall.exe`. Step-through and watch work; **hot-edit does not** — modifying a mod DLL requires a game restart (see [Godot concepts](#godot-4-concepts)).
+
+### Bisecting a multi-mod conflict
+
+If your mod works alone but breaks alongside Mod X:
+
+1. Note your enabled mod list.
+2. Restart with `--qh-skip-mods` to confirm Pratfall is healthy without any mods.
+3. Re-enable mods one at a time via the in-game Mods button; the conflict surfaces on the offender.
+4. With both mods enabled, look at `godot.log` for `[ModId]` prefixed lines from each — the one that throws first usually points at the conflict.
+
+### Smoke test before sharing
+
+Before posting a mod for others:
+- Load it alongside the **3 most-installed mods** in the Pratfall community (whatever those are at the time). Conflicts you don't expect show up in 3 minutes of play.
+- Test on **both Steam-installed paths** if you have a friend who installs Pratfall to `D:\` instead of `C:\Program Files (x86)\Steam`. Hard-coded paths are a classic break.
+- Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.Instance.LobbyManager` properly.
+
+## Distribution conventions
+
+Pratfall's vanilla loader doesn't enforce these — they're community conventions imported from comparable games (Webfishing, REPO, Lethal Company, PEAK) so authors moving between scenes recognize the layout.
+
+### Mod ID format
+
+`AuthorName.ModName` (PascalCase, dot-separated). For example: `Unexpear.BiggerDropPool`. Use this as your mod folder name AND as the `ModId` in your csproj's `<ModId>` property. Uniqueness matters because the folder name is the asset namespace — see [Setup](#setup).
+
+### Folder contents
+
+Alongside your DLL:
+- `manifest.json` (required by Pratfall)
+- `README.md` — what the mod does, dependencies, multiplayer compatibility, known issues
+- `CHANGELOG.md` — version history
+- `icon.png` — **256×256** PNG. The current Pratfall loader doesn't surface it yet, but Thunderstore-style mod managers and future framework UI will.
+- `LICENSE` — pick one. Default in this community is MIT (the [pratfall-example-mod](https://github.com/quad-head/pratfall-example-mod) is MIT). Without a LICENSE file, default is "All Rights Reserved" and other mod authors legally cannot fork or redistribute your work.
+
+### Version format
+
+Use [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`. Bump MAJOR for breaking config / API changes; MINOR for new features; PATCH for bug-fix-only releases. Set the same string in `manifest.json`'s `Version` field and your `.csproj` `<Version>`.
+
+### Multiplayer-compatibility tag in README
+
+Lead your README with one of:
+- **Client-side only** — cosmetic / UI only; lobby members with or without your mod can play together.
+- **Host-only** — only the host runs the logic; clients are unaffected.
+- **All players need this** — protocol changes; mismatched lobbies break in subtle ways. Friends need to install it together.
+
+The Pratfall Mod Framework can detect mismatches and prompt to transfer the mod, but vanilla mods have no such negotiation — players have to coordinate manually. Saying it up front in the README saves the support back-and-forth.
+
+### What NOT to include in your package
+
+- **Other mods' DLLs.** Declare them as dependencies in your README (and in the manifest's `Dependencies` field once that's standardized). Bundling causes duplicate-load conflicts and version skew.
+- **Source-game DLLs** (`Pratfall.dll`, `GodotSharp.dll`). These resolve from the game install. Your csproj should reference them with `<Private>false</Private>` (see [Setup](#setup)).
+- **Debug builds of your own DLL.** Build with `dotnet build -c Release` and ship the `bin/Release` output, not `bin/Debug`.
+- **`*.pdb` files** unless you explicitly want users to be able to get source-line stack traces. They roughly double your DLL footprint.
+
+## Godot 4 concepts
+
+A few things mod authors hit if they're new to Godot. None of this is Pratfall-specific.
+
+### Node lifecycle
+
+Godot nodes go through:
+
+```
+constructor → _EnterTree → _Ready → _Process (every frame) / _PhysicsProcess (fixed tick) → _ExitTree → destructor
+```
+
+- `_EnterTree` fires when the node is added to the scene tree.
+- `_Ready` fires AFTER all children are ready — safe place to do "find children by name" / setup work.
+- `_Process(double delta)` runs every visual frame. **Don't allocate here** — it's a hot path.
+- `_PhysicsProcess(double delta)` runs at fixed physics rate (60 Hz default).
+- `_ExitTree` fires when removed from the tree.
+
+If you override these on a class shipped in your mod, mark them `public override void` — Godot calls through reflection.
+
+### `PackedScene.Instantiate()` returns a detached node
+
+```csharp
+var scene = GD.Load<PackedScene>("res://MyMod/MyProp.tscn");
+var node = scene.Instantiate();    // detached — NOT in the tree yet
+Game.RootNode.AddChild(node);      // now it's live
+```
+
+Forgetting the `AddChild` is the #1 newcomer bug — your code runs, no error, but nothing appears. The node exists in memory but isn't in the scene tree.
+
+### `Resource` is shared by reference
+
+Godot resources (`PackedScene`, `Texture2D`, `RandomWeightedDropPool`, etc.) are reference-counted shared objects. Two `GD.Load<T>` calls for the same path return the **same instance**. If you mutate one, every holder sees the change.
+
+This is *why* the drop-pool recipe works (mutation sticks) but also why you have to undo it carefully on `ModDestroy`. To make a private copy, call `resource.Duplicate(subresources: true)`.
+
+### `user://` vs `res://`
+
+Both are Godot URIs, not filesystem paths:
+- `res://...` — read-only path inside the game's mounted PCKs (and your mod's PCK if loaded). Use for assets your mod ships.
+- `user://...` — read-write path under the platform's user-data folder. Use for save data, logs, config.
+
+To get a real filesystem path that `System.IO` understands, pass either through `ProjectSettings.GlobalizePath(...)`. Godot's own `DirAccess` / `FileAccess` understand the URIs directly without globalization.
+
+### C# hot-reload doesn't work for mods
+
+GDScript supports hot-reload; C# does not, especially for code loaded via `AssemblyLoadContext`. Modifying your mod's source means: rebuild → game restart → re-test. Steps to make this fast are in [Debugging & dev iteration](#debugging--dev-iteration).
+
+### `GD.Print` vs `Console.WriteLine`
+
+Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherever Godot's stdout is wired (often nowhere visible on Windows builds). `GD.Print` always ends up in `user://logs/godot.log`. For errors use `GD.PrintErr(...)` so they're tagged red in the in-engine console.
 
 ## Pitfalls
 
 - **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-16.)
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
 - **Don't mutate save-coupled arrays.** `PlayerColorsConfig.Colors`, `GameModeManager.Modes`, `LevelManager.LevelPrefabs` are all indexed by save-game data — mutating them invalidates existing player saves.
-- **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `NetworkEventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
+- **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.Instance.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
 - **`Game.Config` is a value-type struct with `init`-only setters.** Mods cannot mutate config flags at runtime — not even via reflection (the `modreq(IsExternalInit)` modifier enforces this at the C# language level, and even reflection-based hacks would write to a copy because `Game.Config` returns the struct by value). If `Game.Config.AllowUserLocalization == false` on the shipped build, your mod can't flip it; either ship a JSON-only locale that side-loads via `TranslationServer.AddTranslation` directly, or wait for the dev to enable the flag.
-- **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub). `Constants.EventId*` strings (values like `"129"`, `"115"`) are for `NetworkEventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel). Don't mix them — subscribing to a `GameEventBus` handler with a `Constants.EventId*` string will match nothing.
+- **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub — `GameEventBus` IS a singleton with `Instance`, but the event itself is static). `Constants.EventId*` are `const ushort` numeric IDs (values like `129`, `115`) for `Network.Instance.EventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel — `NetworkEventManager` is an *instance* accessed through the `Network` singleton, NOT a static class). Don't mix them — subscribing to a `GameEventBus` handler hoping a numeric event id will match would match nothing.
 - **`ModEntry` class name is exact.** Pratfall uses `assembly.GetType("ModEntry")` — case-sensitive, no namespace.
 - **`ModInit` / `ModDestroy` reentrance.** Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent: every subscription paired with an unsubscribe, every array growth paired with a shrink.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's `ModEntry` — the GC needs to collect your assembly's load context.
 - **HUD-attached singletons are null on the main menu.** `ButtonPrompBarController.Instance` and similar HUD pieces are only present during gameplay. Null-check before use.
+- **Don't allocate in `_Process` / `_PhysicsProcess` hot paths.** These run every frame / every physics tick. Allocating boxes / temp lists / closures generates GC pressure that Pratfall already instruments (`GcManager.ListenForGcEvents`). Pool what you can, cache lookup results, and prefer `for` over LINQ on per-frame code.
+- **Don't touch Godot objects from a background thread.** Godot 4's C# API is main-thread-only — calling `node.Position = ...` or `resource.Duplicate()` from a `Task.Run` / timer thread crashes silently or corrupts state. If you have off-thread work, marshal back via `MainThreadDispatcher.Instance.Enqueue(() => { /* main-thread code */ })`.
+- **Don't `[GlobalClass]`-collide with a game type name.** Godot 4 has a global class registry shared between the game and your mod's `AddAssemblyToGodot: true` types. If your `[GlobalClass] class Player : Node3D { }` collides with Pratfall's own `Player`, registration loses silently and your scenes won't instantiate it. Namespace your `[GlobalClass]` types or use unambiguous names.
+- **Don't open mod `.tscn` files outside Pratfall's decompiled Godot project.** Opening a `.tscn` that references `Pratfall.dll` types in a fresh Godot editor instance will offer to "fix missing dependencies" and silently strip references to game types. You'll save the file and your scene will be missing every Pratfall-specific node. Either work inside a Godot project that has Pratfall's types available, or edit `.tscn` files as text only.
+- **Don't ship other mods' DLLs inside your mod folder.** Two copies of the same assembly in two different `AssemblyLoadContext`s create type-identity confusion (`typeof(X)` from one ALC isn't equal to `typeof(X)` from the other). Declare your dependencies in your README; let users install them separately.
 
 ## Resources
 

@@ -18,6 +18,12 @@ To install a mod, drop its folder into `%APPDATA%\Pratfall\mods\<modid>\` (or wa
 
 A mod is enabled when you flip its toggle ON, click 🔍, or accept Download in a multiplayer prompt. Updating a mod (any DLL or PCK byte change) re-locks the gate.
 
+## Writing mods
+
+See **[MOD_AUTHORS_GUIDE.md](MOD_AUTHORS_GUIDE.md)** — full reference for mod authors, covering setup, lifecycle, decoded Pratfall extension surfaces, and recipes for the common patterns (Harmony patches, localization, save data, game events, button prompts, drop pools, custom Godot types). Each recipe shows both the vanilla approach (no framework dependency) and the framework helper approach side-by-side so you can pick what fits.
+
+Minimal sample mod (Harmony patch via `[ModPatch]`): [`sample-mods/HelloWorldMod/`](sample-mods/HelloWorldMod).
+
 ## Build from source (devs)
 
 Requires .NET 8 SDK. From the repo root:

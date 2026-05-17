@@ -1,4 +1,4 @@
-Pratfall Mod Framework — Installer (v1.2)
+Pratfall Mod Framework — Installer (v1.3)
 =========================================
 
 Quick install
@@ -12,18 +12,28 @@ Quick install
 5. Launch Pratfall. The native Pratfall "Mod" button is hidden and the
    framework's "Mods" button takes its slot in the main menu.
 
-What's new in v1.2
-------------------
-- Mod-defined Godot Node / Resource types now register with the engine on
-  load (matches the official loader's behavior). Content mods that ship
-  .tscn files or instantiate custom scripts via PackedScene work properly
-  instead of silently failing on type lookup.
-- New manifest field: addAssemblyToGodot (default true). Opt out only if
-  you have a specific reason to skip script registration.
-- HelloWorldMod sample csproj uses $(MSBuildProgramFiles32) so the build
-  works on non-English Windows and 32-bit MSBuild without editing paths.
+What's new in v1.3 — extension helpers for mod authors
+------------------------------------------------------
+Four new helpers wrap native Pratfall APIs that mods can extend cleanly:
 
-What's still v1.1
+- ModLocalizationHelper.Register(modId, localeCode, translations)
+    Adds a language to the in-game language selector. Wraps
+    LocalizationManager.LoadUserLocalizations.
+
+- ModSaveDataHelper.Register(modId, serialize)
+    Persists mod data alongside the game's save. Hooks into
+    SavegameManager.OnGameWillSave. Pair with LoadIfPresent at startup.
+
+- ModGameEventHelper.SubscribeToTag(tagString, handler)
+    Subscribes to Pratfall's GameEventBus, filtered by tag.
+
+- ModButtonPromptHelper.Show(actionName, description, context)
+    Shows HUD button-prompt hints. Wraps ButtonPrompBarController.
+
+All four return IDisposable / have paired cleanup — call from your mod's
+OnLoad and dispose in OnUnload.
+
+What's still v1.2
 -----------------
 - Compatible with Pratfall 1.1.0.R2943 (the build with the native Mod button).
 - Mods stay disabled until you check them. Each card has two buttons:

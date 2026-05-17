@@ -134,7 +134,7 @@ To pass these via Steam: right-click Pratfall → Properties → Launch options 
 
 1. **Ship `0Harmony.dll` alongside your mod's DLL.** Add `<PackageReference Include="Lib.Harmony" Version="2.3.3" />` to your csproj and copy `0Harmony.dll` into your mod folder at build time. Whether the runtime resolves it cleanly depends on AssemblyLoadContext probe order — works in most cases on .NET 8 but has been known to be fragile across game updates.
 
-2. **Use direct property/field mutation** (no Harmony). For many mod ideas this is enough. Example pattern from `123DMWM` in #mod-dev:
+2. **Use direct property/field mutation** (no Harmony). For many mod ideas this is enough. Pattern shown by `123DMWM` in #mod-dev for an infinite-flare mod:
 
 ```csharp
 using Godot;
@@ -143,17 +143,32 @@ public static class ModEntry
 {
     public static void ModInit()
     {
+        // Player.LocalPlayer is a public static field on the Player class.
+        // ThrowFlareComponent is inherited from RigidBody3DEntity (which
+        // implements IEntity, where every component type is a property).
+        // Player.LocalPlayer.ThrowFlareComponent is null UNTIL the player
+        // has picked up a flare item — IEntity's component-property accessors
+        // return null when the entity has no instance of that component.
+        // For a "global tweak on next spawn" effect you'd typically hook
+        // into a spawn event and re-apply; null-check up front to be safe.
         var flare = Player.LocalPlayer?.ThrowFlareComponent;
-        if (flare == null) return;
+        if (flare == null)
+        {
+            GD.Print("[MyMod] no ThrowFlareComponent yet — apply on next pickup");
+            return;
+        }
         flare.MaxFlares = 50;
         flare.FlareRecoverySeconds = 0.01f;
     }
 
     public static void ModDestroy()
     {
+        // Defaults pulled from Pratfall.dll IL: MaxFlares=3, FlareRecoverySeconds
+        // depends on the .tscn-author setting per scene; restore with your
+        // best guess or skip restore if your mod is "load once, never undo".
         var flare = Player.LocalPlayer?.ThrowFlareComponent;
         if (flare == null) return;
-        flare.MaxFlares = 3;                  // restore your guess at the defaults
+        flare.MaxFlares = 3;
         flare.FlareRecoverySeconds = 5.0f;
     }
 }
@@ -163,6 +178,7 @@ Caveats with the direct-mutation pattern:
 - The IL safety scanner shipped by the Pratfall Mod Framework won't flag this (it's just `stfld` on a game type — not a dangerous API). That's intentional: cheat-style mods are out of scope for the malware scanner.
 - You need to remember the original values yourself to restore them on `ModDestroy`. Pratfall doesn't expose "the defaults" as a snapshot.
 - Mutations apply to whatever instance exists at the moment — instances created later (respawned players, new sessions) get the unmodified defaults unless you re-apply.
+- Many "feels like a component on Player" things are actually `IEntity`-inherited properties that can be null when the specific component instance isn't present. Null-check before dereferencing.
 
 If you genuinely need Harmony patches (transpilers, prefix-with-skip, advanced argument injection), the cleanest path on vanilla is option 1 above. Mods targeting the **Pratfall Mod Framework** instead get a `[ModPatch]` attribute that handles Harmony loading, attribute scanning, and unpatch-on-disable — see [MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md) for that pattern.
 
@@ -399,9 +415,11 @@ Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(myAssembly);
 
 ## Decoded Pratfall surface inventory
 
-Audit of `Pratfall.dll` (2026-05-17) — 804 game types analyzed. The most mod-relevant ones:
+Audit of `Pratfall.dll` (2026-05-17, re-verified post-helper-bugfix) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System namespaces). The most mod-relevant ones:
 
-### Singleton managers (99 total — key ones for modding)
+### Singleton managers (74 total — key ones for modding)
+
+Counted as a public type with a static `Instance` field or static-getter property. Some additional types have `*Manager` in their name but aren't strict singletons (state-only static classes like `SavegameManager` / `SettingsManager` are listed below with a `(static)` note).
 - `AudioManager.Instance` — sound playback
 - `MusicManager.Instance` — music tracks
 - `InputManager.Instance` — cursor + input source

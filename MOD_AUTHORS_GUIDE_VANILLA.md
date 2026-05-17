@@ -1176,7 +1176,7 @@ There is no `--console` flag on Windows for Godot 4 to attach a live stdout cons
 The fastest edit-build-test cycle:
 
 1. **Launch Pratfall directly**, not through Steam. Steam's restart-after-quit is the slow part — running `Pratfall.exe` from the install dir means a kill-and-relaunch is sub-second.
-2. **Build directly into the mod folder.** The `InstallMod` MSBuild target in the [Setup csproj template](#setup) does this — `<Copy>` the DLL into `$(APPDATA)\Pratfall\mods\$(ModId)` after each build. Iteration is `dotnet build` → kill game → launch.
+2. **Build directly into the mod folder.** The `InstallMod` MSBuild target in the [Setup csproj template](#setup) copies the DLL into `$(GameDir)\mods\$(ModId)` after each build. Iteration is `dotnet build` → kill game → launch.
 3. **Skip the user-confirmation gate on subsequent enables.** Once a mod has been approved, the framework remembers your decision; mid-session edit-build-test doesn't re-prompt. (Vanilla loader doesn't have a gate at all.)
 4. **`ModInit` runs once per enable.** To re-test a code path without restarting the game, toggle your mod off → on from the in-game Mods button. `ModDestroy` runs on disable, `ModInit` runs again on enable. **Both must be reentrant** — see [Pitfalls](#pitfalls).
 
@@ -1196,8 +1196,8 @@ If your mod works alone but breaks alongside Mod X:
 ### Smoke test before sharing
 
 Before posting a mod for others:
-- **Use Tim's [`quad-head/pratfall-example-mod`](https://github.com/quad-head/pratfall-example-mod) as the known-good baseline**, not your own first attempt. If the example mod loads cleanly on a fresh machine but yours doesn't, the problem is in YOUR mod, not the loader. (Mods from this repo's `sample-mods/` folder work for framework development but should NOT be the only proof that the vanilla loader path works — they share too much surface with the framework codebase.)
-- Load your mod alongside the **3 most-installed mods** in the Pratfall community (whatever those are at the time). Conflicts you don't expect show up in 3 minutes of play.
+- **Use Tim's [`quad-head/pratfall-example-mod`](https://github.com/quad-head/pratfall-example-mod) as the known-good baseline**, not your own first attempt. If the example mod loads cleanly on the same Pratfall build and install path but yours doesn't, assume the problem is in your mod first, not the loader. (Mods from this repo's `sample-mods/` folder work for framework development but should NOT be the only proof that the vanilla loader path works — they share too much surface with the framework codebase. Game version, install path, launch flags, and enabled state still matter; rule those out before blaming the loader.)
+- When the Pratfall community has enough public mods, test alongside the **3 most-used mods** available for the same Pratfall build. Conflicts you don't expect show up in 3 minutes of play.
 - Test on **both Steam-installed paths** if you have a friend who installs Pratfall to `D:\` instead of `C:\Program Files (x86)\Steam`. Hard-coded paths are a classic break.
 - Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.Instance.LobbyManager` properly — and per the [multiplayer-patterns disclaimer](#recipe-multiplayer-patterns), if you don't have explicit per-mod state sync, the lobby is your only way to know whether host-vs-client divergence ships.
 

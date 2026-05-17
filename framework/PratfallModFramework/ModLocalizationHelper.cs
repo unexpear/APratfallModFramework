@@ -117,12 +117,20 @@ public static class ModLocalizationHelper
     private static string? GetUserLocaleFolder()
     {
         // Match LocalizationManager.CreateUserDataDirectory: <platform user data>/localization
+        //
+        // Game.Platform.GetUserDataPath() returns a Godot `user://...` URI on Steam
+        // (the game's own code uses Godot.DirAccess which understands the URI). We
+        // write with System.IO, so we need to ProjectSettings.GlobalizePath it to
+        // get a real filesystem path first.
         try
         {
             var platform = global::Game.Platform;
             if (platform == null) return null;
             var userData = platform.GetUserDataPath();
-            return string.IsNullOrWhiteSpace(userData) ? null : Path.Combine(userData, "localization");
+            if (string.IsNullOrWhiteSpace(userData)) return null;
+            var globalized = ProjectSettings.GlobalizePath(userData);
+            if (string.IsNullOrWhiteSpace(globalized)) globalized = userData;
+            return Path.Combine(globalized, "localization");
         }
         catch (Exception ex)
         {

@@ -508,4 +508,206 @@ public static class ModFrameworkSelfTest
         result.Success = result.PeakCount == result.StartCount + entryCount && result.EndCount == result.StartCount;
         return result;
     }
+
+    // --- v1.3 extension-helper self-tests ---
+    //
+    // These exercise the four helpers shipped in v1.3 (ModLocalizationHelper,
+    // ModSaveDataHelper, ModGameEventHelper, ModButtonPromptHelper). Verifies
+    // file ops and subscription mechanics WITHOUT triggering real game side
+    // effects (no save flow, no UI mutation). Subscription tests use reflection
+    // to count delegate invocation lists before/after Register + Dispose.
+
+    public sealed class HelperTestResult
+    {
+        public bool Success;
+        public string ErrorMessage = "";
+        public List<string> StepsPassed = new();
+        public override string ToString() =>
+            $"success={Success} steps={StepsPassed.Count} err={ErrorMessage}";
+    }
+
+    public static HelperTestResult RunLocalizationHelperTest()
+    {
+        var r = new HelperTestResult();
+        const string modId = "SelfTestLocalization";
+        const string locale = "test_xx";
+        try
+        {
+            var translations = new Dictionary<string, string>
+            {
+                { "SELFTEST_KEY", "selftest_value" },
+                { "ANOTHER", "another value" },
+            };
+            var reg = ModLocalizationHelper.Register(modId, locale, translations);
+            r.StepsPassed.Add("Register returned non-null disposable");
+
+            var folder = ResolveUserLocaleFolderForTest();
+            if (folder == null) { r.ErrorMessage = "could not resolve user locale folder"; return r; }
+            var expectedFile = Path.Combine(folder, $"_{modId}_{locale}.json");
+            if (!File.Exists(expectedFile)) { r.ErrorMessage = $"file not written at expected path: {expectedFile}"; return r; }
+            r.StepsPassed.Add($"file exists at {expectedFile}");
+
+            var content = File.ReadAllText(expectedFile);
+            if (!content.Contains("SELFTEST_KEY") || !content.Contains("selftest_value"))
+            { r.ErrorMessage = "file content missing expected key/value"; return r; }
+            r.StepsPassed.Add("file content contains expected translations");
+
+            reg.Dispose();
+            if (File.Exists(expectedFile)) { r.ErrorMessage = "file not removed after Dispose"; return r; }
+            r.StepsPassed.Add("file cleaned up on Dispose");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    public static HelperTestResult RunSaveDataHelperTest()
+    {
+        var r = new HelperTestResult();
+        const string modId = "SelfTestSaveData";
+        const string sampleJson = "{\"selftest\":\"sample\"}";
+        try
+        {
+            ModSaveDataHelper.Delete(modId); // pre-clean
+            if (ModSaveDataHelper.LoadIfPresent(modId) != null) { r.ErrorMessage = "Delete failed to clear prior save"; return r; }
+            r.StepsPassed.Add("LoadIfPresent returns null before any Register");
+
+            var beforeCount = GetStaticDelegateCount(typeof(global::SavegameManager), "OnGameWillSave");
+            var fireCount = 0;
+            var reg = ModSaveDataHelper.Register(modId, () => { fireCount++; return sampleJson; });
+            var afterCount = GetStaticDelegateCount(typeof(global::SavegameManager), "OnGameWillSave");
+
+            if (afterCount != beforeCount + 1) { r.ErrorMessage = $"subscriber count expected {beforeCount + 1}, got {afterCount}"; return r; }
+            r.StepsPassed.Add($"OnGameWillSave subscriber count went {beforeCount} -> {afterCount}");
+
+            // Write a file directly via the public path and verify LoadIfPresent reads it.
+            var path = ModSaveDataHelper.GetModSaveFilePath(modId);
+            if (path == null) { r.ErrorMessage = "GetModSaveFilePath returned null"; return r; }
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, sampleJson);
+            var loaded = ModSaveDataHelper.LoadIfPresent(modId);
+            if (loaded != sampleJson) { r.ErrorMessage = $"LoadIfPresent='{loaded}' expected '{sampleJson}'"; return r; }
+            r.StepsPassed.Add("LoadIfPresent round-trips manually-written content");
+
+            if (!ModSaveDataHelper.Delete(modId)) { r.ErrorMessage = "Delete returned false on existing file"; return r; }
+            if (ModSaveDataHelper.LoadIfPresent(modId) != null) { r.ErrorMessage = "Delete did not actually remove file"; return r; }
+            r.StepsPassed.Add("Delete removed the save file");
+
+            reg.Dispose();
+            var afterDisposeCount = GetStaticDelegateCount(typeof(global::SavegameManager), "OnGameWillSave");
+            if (afterDisposeCount != beforeCount) { r.ErrorMessage = $"subscriber count after Dispose expected {beforeCount}, got {afterDisposeCount}"; return r; }
+            r.StepsPassed.Add($"OnGameWillSave subscriber count after Dispose back to {beforeCount}");
+
+            // Belt-and-suspenders: fireCount should still be 0 since we never triggered the event.
+            if (fireCount != 0) { r.ErrorMessage = $"serializer fired {fireCount} times unexpectedly"; return r; }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    public static HelperTestResult RunGameEventHelperTest()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var beforeCount = GetStaticDelegateCount(typeof(global::GameEventBus), "OnGameEventReceived");
+
+            var allHits = 0;
+            var subAll = ModGameEventHelper.SubscribeAll((_, _) => allHits++);
+            var afterAll = GetStaticDelegateCount(typeof(global::GameEventBus), "OnGameEventReceived");
+            if (afterAll != beforeCount + 1) { r.ErrorMessage = $"SubscribeAll count {beforeCount} -> {afterAll}, expected +1"; return r; }
+            r.StepsPassed.Add("SubscribeAll added one subscriber");
+
+            var tagHits = 0;
+            var subTag = ModGameEventHelper.SubscribeToTag("selftest.tag", (_, _) => tagHits++);
+            var afterTag = GetStaticDelegateCount(typeof(global::GameEventBus), "OnGameEventReceived");
+            if (afterTag != beforeCount + 2) { r.ErrorMessage = $"SubscribeToTag count {afterAll} -> {afterTag}, expected +1"; return r; }
+            r.StepsPassed.Add("SubscribeToTag added one subscriber");
+
+            subAll.Dispose();
+            subTag.Dispose();
+            var afterDispose = GetStaticDelegateCount(typeof(global::GameEventBus), "OnGameEventReceived");
+            if (afterDispose != beforeCount) { r.ErrorMessage = $"after both Dispose: {afterDispose}, expected {beforeCount}"; return r; }
+            r.StepsPassed.Add($"OnGameEventReceived subscriber count back to {beforeCount} after Dispose");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    public static HelperTestResult RunButtonPromptHelperTest()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // Pre-check Instance — ButtonPrompBarController is HUD-attached and may not
+            // exist on the main menu. If it's null, we can only verify the helper
+            // tolerates that case (logs and returns) without throwing.
+            var instance = global::ButtonPrompBarController.Instance;
+            if (instance == null)
+            {
+                ModButtonPromptHelper.Show("selftest_action", "Self Test", "selftest.ctx");
+                ModButtonPromptHelper.ClearContext("selftest.ctx");
+                r.StepsPassed.Add("Show + ClearContext tolerated null Instance (HUD not loaded)");
+                r.Success = true; // partial success — full path needs HUD context
+                return r;
+            }
+
+            ModButtonPromptHelper.Show("selftest_action", "Self Test", "selftest.ctx");
+            r.StepsPassed.Add("Show against live HUD did not throw");
+            ModButtonPromptHelper.ClearContext("selftest.ctx");
+            r.StepsPassed.Add("ClearContext against live HUD did not throw");
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Helpers for the helper tests above.
+
+    private static string? ResolveUserLocaleFolderForTest()
+    {
+        try
+        {
+            var platform = global::Game.Platform;
+            if (platform == null) return null;
+            var userData = platform.GetUserDataPath();
+            if (string.IsNullOrWhiteSpace(userData)) return null;
+            var globalized = ProjectSettings.GlobalizePath(userData);
+            if (string.IsNullOrWhiteSpace(globalized)) globalized = userData;
+            return Path.Combine(globalized, "localization");
+        }
+        catch { return null; }
+    }
+
+    // Reflection-only — reads a private static delegate field and counts its
+    // invocation list. Used to verify subscribe/unsubscribe mechanics without
+    // having to invoke the delegate (which would trigger real game side effects).
+    private static int GetStaticDelegateCount(Type t, string fieldName)
+    {
+        var field = t.GetField(fieldName, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        if (field == null) throw new InvalidOperationException($"{t.FullName}.{fieldName} not found");
+        var del = field.GetValue(null) as Delegate;
+        return del?.GetInvocationList().Length ?? 0;
+    }
 }

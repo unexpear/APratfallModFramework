@@ -108,13 +108,17 @@ public static class ModSaveDataHelper
 
     public static string? GetModSaveFilePath(string modId)
     {
+        // Game.Platform.GetUserDataPath() returns a Godot `user://...` URI on Steam.
+        // System.IO needs the real filesystem path, so GlobalizePath it.
         try
         {
             var platform = global::Game.Platform;
             if (platform == null) return null;
             var userData = platform.GetUserDataPath();
             if (string.IsNullOrWhiteSpace(userData)) return null;
-            return Path.Combine(userData, "modframework-saves", Sanitize(modId) + ".json");
+            var globalized = ProjectSettings.GlobalizePath(userData);
+            if (string.IsNullOrWhiteSpace(globalized)) globalized = userData;
+            return Path.Combine(globalized, "modframework-saves", Sanitize(modId) + ".json");
         }
         catch (Exception ex)
         {

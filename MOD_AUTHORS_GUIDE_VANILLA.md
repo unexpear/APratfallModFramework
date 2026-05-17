@@ -155,9 +155,9 @@ public static class ModEntry
 }
 ```
 
-- Class name MUST be exactly `ModEntry` (any namespace).
-- Methods MUST be `public static`, no parameters.
-- After `ModDestroy` is called, the loader calls `AssemblyLoadContext.Unload()` and forces a GC.
+- Class name MUST be exactly `ModEntry` **in the global namespace** — top-level, no `namespace MyMod { ... }` wrapper. Pratfall calls `assembly.GetType("ModEntry")` which only finds a type whose full name is exactly `ModEntry`. If you put `class ModEntry` inside `namespace MyMod`, its full name becomes `MyMod.ModEntry` and the lookup returns `null`, ModInit never fires, and the loader silently does nothing. (Confirmed by Tim's `quad-head/pratfall-example-mod`, whose `ModEntry` is at the global namespace.)
+- Methods MUST be `public static`, no parameters. Pratfall looks them up via `GetMethod(name, BindingFlags.Public | BindingFlags.Static)` and invokes with `null` target + `null` args.
+- After `ModDestroy` is called, the loader calls `Unload()` on the AssemblyLoadContext your mod was loaded into, then forces three GC passes. The catch: Pratfall loads your mod **into the same AssemblyLoadContext that hosts Godot's `ScriptManagerBridge`** (verified in `ModManager.LoadAssembly` IL — `AssemblyLoadContext.GetLoadContext(typeof(ScriptManagerBridge).Assembly)`). It does NOT create a per-mod ALC. Whether the runtime can actually free your mod's assembly depends on whether that shared ALC is collectible AND whether anything else still references your code. Exceptions during unload are swallowed by an `ExceptionHandler.Block` toggle, so a failed unload is silent.
 
 **Unload is cooperative, not forced.** Disabling a mod runs your `ModDestroy` and asks the runtime to unload the `AssemblyLoadContext`, but the runtime CANNOT actually free the assembly while anything still references it. Things that will silently keep your mod alive in memory after disable:
 
@@ -218,13 +218,14 @@ public static class ModEntry
 
     public static void ModDestroy()
     {
-        // Defaults pulled from Pratfall.dll IL: MaxFlares=3, FlareRecoverySeconds
-        // depends on the .tscn-author setting per scene; restore with your
-        // best guess or skip restore if your mod is "load once, never undo".
+        // Defaults pulled from ThrowFlareComponent.ctor IL: MaxFlares=3,
+        // FlareRecoverySeconds=3, ThrowStrength=10, TorqueStrength=0.1f.
+        // A specific .tscn-equipped flare can override these in scene data;
+        // restoring to the C# ctor defaults is "close enough" for most mods.
         var flare = Player.LocalPlayer?.ThrowFlareComponent;
         if (flare == null) return;
         flare.MaxFlares = 3;
-        flare.FlareRecoverySeconds = 5.0f;
+        flare.FlareRecoverySeconds = 3.0f;
     }
 }
 ```
@@ -780,7 +781,7 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
 | Add a custom `Node` / `Resource` type | Set `AddAssemblyToGodot: true` in manifest ([recipe](#recipe-custom-godot-types)) |
 | Change a game mode / level / color | **DON'T** — those arrays are save-coupled by index. See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
-| Spawn an entity from code | `EcsHelper.Spawn(...)` / `ScenePoolManager.Instance` for pooled instances |
+| Spawn an entity from code | `ScenePoolManager.Instance.Instantiate(packedScene, parent)` for local-only, `Network.Instance.ComponentManager.SpawnNetworkPrefab(prefab, parent)` for replicated ([recipe](#recipe-spawn-an-entity)) |
 | Hook game ticks | Override `_Process` / `_PhysicsProcess` on a `Node` you parent under `Game.RootNode`, or use `MainThreadDispatcher.Instance.Enqueue(Action)` for one-shot off-thread → main-thread dispatch |
 | Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
 | Know which config is "the game settings" | `Game.Config` — but it's a struct with `init`-only setters, you can read but not mutate |
@@ -1037,12 +1038,18 @@ Concrete entities (23 total, Cecil-counted):
 - Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `HangDebuggerNode`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
 - Cameras: `CharacterEditorCamera`, `SpectatorCamera`
 
-**`IEntity` exposes 185 properties** — 184 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<Type, IComponent>` for dynamic access. This is the killer feature for mods:
+**`IEntity` exposes 185 properties** — 184 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
 
 ```csharp
 // Instead of GetComponent<PlayerHealthComponent>() everywhere, you just write:
 var hp = Player.LocalPlayer?.PlayerHealthComponent;
-if (hp != null) hp.CurrentHealth = hp.MaxHealth;
+// PlayerHealthComponent is actually Pratfall's FOOD/HUNGER component despite
+// the "Health" name. Real fields per Cecil dump: FoodValue (UInt16 current),
+// MaxFoodValue (UInt16 cap), FoodNormalized / HungerNormalized (0-1 floats),
+// FoodConsumptionPerSecond, HungrySoundThreshold, HungrySound. There is NO
+// CurrentHealth / MaxHealth field — those are on Pratfall's other body
+// (HitPointsComponent etc.). For "fill me up to max food":
+if (hp != null) hp.FoodValue = hp.MaxFoodValue;
 
 // Same pattern for any component on any entity:
 var flare = Player.LocalPlayer?.ThrowFlareComponent;
@@ -1055,9 +1062,18 @@ var cam   = Player.LocalPlayer?.PlayerCameraComponent;
 Lower-level access if you need the dictionary lookup:
 
 ```csharp
-var comp = EcsHelper.GetComponentRef<PlayerHealthComponent>(player);
-// or
-player.Components.TryGetValue(typeof(PlayerHealthComponent), out var comp);
+// EcsHelper.GetComponentRef has a ref-out signature (Cecil:
+// GetComponentRef<T>(ref T component, Node node, ComponentType componentType)).
+// Most mod code should NOT call this — use the IEntity property accessor above.
+// If you really need it:
+PlayerHealthComponent? hp = null;
+EcsHelper.GetComponentRef(ref hp, playerNode, ComponentType.PlayerHealthComponent);
+
+// The Components dictionary is keyed by component-type ID (int), NOT typeof(...):
+//   PROP Dictionary<int, IComponent> Components
+// Each IComponent has a numeric type id; the IEntity property accessors are the
+// readable wrapper. Don't write your own TryGetValue against this dict — you'd
+// have to know the type ids by hand. Use `player.PlayerHealthComponent` instead.
 ```
 
 ### `IComponent` implementors (184)
@@ -1302,7 +1318,7 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 - **`ModInit` / `ModDestroy` reentrance.** Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent: every subscription paired with an unsubscribe, every array growth paired with a shrink.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's `ModEntry` — the GC needs to collect your assembly's load context.
 - **HUD-attached singletons are null on the main menu.** `ButtonPrompBarController.Instance` and similar HUD pieces are only present during gameplay. Null-check before use.
-- **Don't allocate in `_Process` / `_PhysicsProcess` hot paths.** These run every frame / every physics tick. Allocating boxes / temp lists / closures generates GC pressure that Pratfall already instruments (`GcManager.ListenForGcEvents`). Pool what you can, cache lookup results, and prefer `for` over LINQ on per-frame code.
+- **Don't allocate in `_Process` / `_PhysicsProcess` hot paths.** These run every frame / every physics tick. Allocating boxes / temp lists / closures generates GC pressure that Pratfall already instruments (`GcTimingListener.OnGcTiming` event for measuring; `GcManager.Instance` for blocking GC during sensitive sections — note `GcManager` is a *blocker*, not an event source, despite its name). Pool what you can, cache lookup results, and prefer `for` over LINQ on per-frame code.
 - **Don't touch Godot objects from a background thread.** Godot 4's C# API is main-thread-only — calling `node.Position = ...` or `resource.Duplicate()` from a `Task.Run` / timer thread crashes silently or corrupts state. If you have off-thread work, marshal back via `MainThreadDispatcher.Instance.Enqueue(() => { /* main-thread code */ })`.
 - **Don't `[GlobalClass]`-collide with a game type name.** Godot 4 has a global class registry shared between the game and your mod's `AddAssemblyToGodot: true` types. If your `[GlobalClass] class Player : Node3D { }` collides with Pratfall's own `Player`, registration loses silently and your scenes won't instantiate it. Namespace your `[GlobalClass]` types or use unambiguous names.
 - **Don't open mod `.tscn` files outside Pratfall's decompiled Godot project.** Opening a `.tscn` that references `Pratfall.dll` types in a fresh Godot editor instance will offer to "fix missing dependencies" and silently strip references to game types. You'll save the file and your scene will be missing every Pratfall-specific node. Either work inside a Godot project that has Pratfall's types available, or edit `.tscn` files as text only.

@@ -179,7 +179,20 @@ Pratfall reads these from its command line at startup:
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
 | `--qh-skip-mods` | Skips loading any mods at launch. (`ModManager.ShouldLoadMods` returns false.) Debug / recovery use. |
-| `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder (handy for dev iteration against a non-Steam install location). Cecil-confirmed in `ModManager.CreateModDirectory`. |
+| `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder. Cecil-confirmed in `ModManager.CreateModDirectory`. **Useful for profile-based mod managers** (Thunderstore / r2modman) — see the [profile / mod-manager-compat note below](#profile--mod-manager-compat). |
+| `--qh-skip-preload` | Skips resource preloading on launch. Auto-skipped already when the GPU vendor contains "Intel" (workaround for an Intel preload bug); this flag forces-skips on any GPU. Cecil-confirmed in `Preloader.SkipPreload`. |
+| `--qh-disable-login` | Disables EOS (Epic Online Services) login at launch. Useful for dev iteration when you don't want Steam→EOS authentication to fire. |
+| `--qh-skip-video-settings` | Skips the launch-time video-settings detect/apply pass. Useful when you've manually edited your settings file and don't want them overwritten on launch. |
+
+### Profile / mod-manager compat
+
+Pratfall is already compatible with profile-based mod managers (Thunderstore / r2modman style). The path is:
+
+1. The mod manager creates per-profile mod folders, e.g. `<profile_root>/Pratfall/<profile_name>/mods/`
+2. Drops the profile's enabled-mod-id list into `<that mods folder>/enabled_mods.json`
+3. Launches Pratfall with `--qh-mod-directory <that mods folder>`
+
+Pratfall's official loader reads `enabled_mods.json` from whatever folder `--qh-mod-directory` points at, so the same launch-arg controls both the mod set AND the enabled state — no separate "enabled state" flag is needed. Per `ModManager.CreateModDirectory` IL: `--qh-mod-directory` takes the highest precedence, beating both editor-mode-userdata fallback and the shipped-build `OS.GetExecutablePath() + "/mods"` default.
 
 To pass these via Steam: right-click Pratfall → Properties → Launch options → add the flag.
 

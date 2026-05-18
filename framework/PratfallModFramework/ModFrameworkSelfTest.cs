@@ -741,6 +741,130 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Verifies ModLogger + ModCrashReporter end-to-end. Creates a logger for a
+    // disposable mod id, writes a few lines (verifying file write + ring buffer),
+    // then triggers ModCrashReporter.Report with a synthetic exception and confirms
+    // the report file appeared. Cleans up after itself.
+    public static HelperTestResult RunLoggerAndCrashReporterTest()
+    {
+        var r = new HelperTestResult();
+        const string testModId = "SelfTestLoggerCrash";
+        string? logFile = null;
+        string? crashFolder = null;
+        try
+        {
+            var logger = ModLogger.For(testModId);
+            if (logger == null)
+            {
+                r.ErrorMessage = "ModLogger.For returned null";
+                return r;
+            }
+            r.StepsPassed.Add("ModLogger.For returned an instance");
+
+            logger.Info("self-test info line");
+            logger.Warn("self-test warn line");
+            logger.Error("self-test error line", new InvalidOperationException("synthetic — for ring-buffer test"));
+            r.StepsPassed.Add("Logger.Info / Warn / Error did not throw");
+
+            // Verify ring buffer contains the lines we just wrote.
+            var recent = ModLogger.GetRecentLines(testModId);
+            if (recent.Count < 3)
+            {
+                r.ErrorMessage = $"Ring buffer expected ≥3 entries, got {recent.Count}";
+                return r;
+            }
+            r.StepsPassed.Add($"Ring buffer contains {recent.Count} recent entries");
+
+            // Verify the log file exists where we expect.
+            var logFolder = ModLogger.ResolveLogFolder();
+            if (logFolder != null)
+            {
+                logFile = Path.Combine(logFolder, $"{testModId}.log");
+                if (!File.Exists(logFile))
+                {
+                    r.ErrorMessage = $"Expected log file at {logFile} but it was not created";
+                    return r;
+                }
+                var fileBytes = new FileInfo(logFile).Length;
+                if (fileBytes <= 0)
+                {
+                    r.ErrorMessage = $"Log file exists but is empty (0 bytes)";
+                    return r;
+                }
+                r.StepsPassed.Add($"Log file written: {fileBytes} bytes at {logFile}");
+            }
+            else
+            {
+                r.StepsPassed.Add("Log folder not resolvable (Game.Platform not up yet?) — ring buffer fallback validated");
+            }
+
+            // Trigger a synthetic crash report and confirm the file lands.
+            crashFolder = ResolveCrashReportFolderForTest();
+            int crashFilesBefore = crashFolder != null && Directory.Exists(crashFolder)
+                ? Directory.GetFiles(crashFolder, $"{testModId}_*.txt").Length
+                : 0;
+
+            ModCrashReporter.Report(testModId, "self-test synthetic crash", new ApplicationException("self-test — no real failure"));
+
+            if (crashFolder != null && Directory.Exists(crashFolder))
+            {
+                var crashFilesAfter = Directory.GetFiles(crashFolder, $"{testModId}_*.txt");
+                if (crashFilesAfter.Length <= crashFilesBefore)
+                {
+                    r.ErrorMessage = $"Crash report not written (before={crashFilesBefore}, after={crashFilesAfter.Length})";
+                    return r;
+                }
+                // Read the most recent and verify it has the recent log lines we wrote.
+                var latest = crashFilesAfter.OrderByDescending(File.GetLastWriteTimeUtc).First();
+                var crashText = File.ReadAllText(latest);
+                if (!crashText.Contains("self-test info line") || !crashText.Contains("self-test synthetic crash"))
+                {
+                    r.ErrorMessage = $"Crash report missing expected content (path={latest})";
+                    return r;
+                }
+                r.StepsPassed.Add($"Crash report written + contains ring-buffer history: {Path.GetFileName(latest)}");
+
+                // Clean up so we don't accumulate self-test reports across runs.
+                try
+                {
+                    foreach (var f in crashFilesAfter) File.Delete(f);
+                    r.StepsPassed.Add("Cleaned up self-test crash report file(s)");
+                }
+                catch { /* best-effort */ }
+            }
+            else
+            {
+                r.StepsPassed.Add("Crash report folder not resolvable — verified Report() didn't throw");
+            }
+
+            // Clean up the log file too.
+            try { if (logFile != null && File.Exists(logFile)) File.Delete(logFile); } catch { }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static string? ResolveCrashReportFolderForTest()
+    {
+        try
+        {
+            var platform = global::Game.Platform;
+            if (platform == null) return null;
+            var raw = platform.GetUserDataPath();
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var globalized = ProjectSettings.GlobalizePath(raw);
+            if (string.IsNullOrWhiteSpace(globalized)) globalized = raw;
+            return Path.Combine(globalized, "modframework-crash-reports");
+        }
+        catch { return null; }
+    }
+
     // Helpers for the helper tests above.
 
     private static string? ResolveUserLocaleFolderForTest()

@@ -177,6 +177,10 @@ public class ModAssemblyLoader
                 catch (Exception ex)
                 {
                     LogError($"[ModFramework] OnLoad failed for {type.FullName} in mod {id}: {ex.InnerException?.Message ?? ex.Message}");
+                    // Drop a crash report with manifest + stack + recent log lines so
+                    // the mod author can debug. The TargetInvocationException wrapper
+                    // from reflection is unwrapped to the real exception when present.
+                    ModCrashReporter.Report(id, $"OnLoad in {type.FullName}", ex.InnerException ?? ex);
                 }
             }
 
@@ -215,6 +219,7 @@ public class ModAssemblyLoader
                 catch (Exception ex)
                 {
                     LogError($"[ModFramework] OnUnload failed for mod {id}: {ex.InnerException?.Message ?? ex.Message}");
+                    ModCrashReporter.Report(id, $"OnUnload in {callback.DeclaringType?.FullName ?? "<unknown>"}", ex.InnerException ?? ex);
                 }
             }
         }

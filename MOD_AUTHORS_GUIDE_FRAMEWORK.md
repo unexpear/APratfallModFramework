@@ -27,9 +27,10 @@ If you want a mod that works against just Pratfall + Tim's loader with no third-
 7. [Recipe: Listen to game events (`ModGameEventHelper`)](#recipe-gameevents)
 8. [Recipe: Show HUD button hints (`ModButtonPromptHelper`)](#recipe-buttonprompts)
 9. [Recipe: Extend a random drop pool (`ModDropPoolHelper`)](#recipe-droppools)
-10. [Multiplayer manifest fields](#multiplayer-fields)
-11. [Pitfalls + framework-specific things to know](#pitfalls)
-12. [Resources](#resources)
+10. [Recipe: Per-mod logs + crash reports (`ModLogger` / `ModCrashReporter`)](#recipe-logging--crash-reports)
+11. [Multiplayer manifest fields](#multiplayer-fields)
+12. [Pitfalls + framework-specific things to know](#pitfalls)
+13. [Resources](#resources)
 
 ---
 
@@ -366,6 +367,75 @@ The helper handles:
 - Allocating a grown array, copying old entries, appending yours.
 - Removing exactly your entry on dispose (by reference identity).
 - Edge cases — empty pool, pool with the entry already removed by something else, etc.
+
+## Recipe: Logging + crash reports
+
+`ModLogger.For(modId)` returns a per-mod `IModLogger` that writes to `<userData>/modframework-logs/<modid>.log` AND tees to Godot's console (`GD.Print` / `GD.PrintErr` with a `[modid]` prefix). Replace `GD.Print` calls in your mod — you get structured per-mod logs without breaking the line-in-godot.log convention. The framework also keeps a ring buffer of your last ~200 entries in memory; when your mod throws, those entries are baked into the crash report so you can see what your mod was doing right before the failure.
+
+```csharp
+using PratfallModFramework;
+
+public static class MyMod
+{
+    // Hold a single instance for the mod's lifetime. ModLogger.For returns the same
+    // instance on repeat calls, so caching it is purely a readability choice.
+    private static readonly IModLogger Log = ModLogger.For("MyMod");
+
+    public static void OnLoad()
+    {
+        Log.Info("loading");
+        try
+        {
+            DoTheRiskyThing();
+            Log.Info("loaded");
+        }
+        catch (Exception ex)
+        {
+            // The framework already drops a crash report automatically when an
+            // exception propagates out of OnLoad / OnUnload / EnableMod / patch
+            // loading. Calling Log.Error here is optional — it'll show in
+            // godot.log + your per-mod log file, but the crash report fires either way.
+            Log.Error("DoTheRiskyThing failed", ex);
+            throw; // re-throw so the framework's crash reporter writes the report
+        }
+    }
+
+    public static void OnUnload() => Log.Info("unloaded");
+}
+```
+
+### What automatic crash reports give you
+
+When your `OnLoad` / `OnUnload` / `EnableMod` path / declared patch throws, the framework writes a file to `<userData>/modframework-crash-reports/<modid>_<utc-timestamp>.txt` containing:
+
+- **Manifest snapshot** — id, name, version, author, type, multiplayer mode.
+- **Exception chain** — type, message, full stack trace, walking `InnerException` to a depth of 8.
+- **Recent log lines** — the last ~200 entries from your `ModLogger`'s in-memory ring buffer, so you can see what your mod logged right up to the failure.
+
+The report path is logged to Godot's console (`[ModFramework] Crash report written: <path>`) so you can find it without remembering the folder. Users can send you the file when they hit a bug.
+
+### Levels + tee behavior
+
+| Method | Log file | Godot console |
+|---|---|---|
+| `Log.Debug(msg)` | `[DEBUG] msg` line | `GD.Print` (default Godot color) |
+| `Log.Info(msg)` | `[INFO ] msg` line | `GD.Print` |
+| `Log.Warn(msg)` | `[WARN ] msg` line | `GD.Print` |
+| `Log.Error(msg)` | `[ERROR] msg` line | **`GD.PrintErr`** (red in console) |
+| `Log.Error(msg, ex)` | `[ERROR] msg | ExceptionType: ExceptionMessage` line | `GD.PrintErr` |
+
+Files are written UTF-8, append-mode. The framework does NOT rotate them automatically — they grow until you delete them. (For an actively-developed mod, you might want to wipe `<userData>/modframework-logs/<modid>.log` between debugging sessions.)
+
+### What you don't need to write yourself
+
+The framework already drops crash reports automatically for the four most common mod-side failure modes:
+
+1. **`OnLoad` throws** — wired in `ModAssemblyLoader.InvokeLoadCallbacks`. Reflection's `TargetInvocationException` wrapper is unwrapped to the real exception.
+2. **`OnUnload` throws** — wired in `ModAssemblyLoader.UnloadMod`.
+3. **`EnableMod` fails** (any reason: hash mismatch, load failure, PCK mount failure) — wired in `ModManager.EnableMod`.
+4. **Apply loop fails** (during `Load Enabled Mods` / pre-session apply) — wired in `ModManager.LoadAllEnabledMods`.
+
+For your own try/catch sites inside the mod, call `ModCrashReporter.Report(modId, context, exception)` directly to drop a report with the same format.
 
 ## Multiplayer fields
 

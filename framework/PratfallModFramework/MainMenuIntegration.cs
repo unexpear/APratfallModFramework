@@ -162,8 +162,13 @@ public static partial class MainMenuIntegration
         container.AddChild(modsBtn);
         container.MoveChild(modsBtn, insertIdx);
 
-        // Expand parent containers to fit the new button
-        ExpandContainer(container);
+        // Note: we used to walk up the ancestor chain growing every Control's
+        // CustomMinimumSize.Y by 40px to "make room" for the new button. That
+        // was wrong on two counts: (1) Godot's HBoxContainer/VBoxContainer
+        // auto-size to their children, so no manual resize is needed; (2) on
+        // re-injection (player navigates Options→back, menu rebuilds) the +40
+        // accumulated on every ancestor, eventually pushing scene content
+        // (notably the menu's 3D dog) into a layout-fight that flickered.
 
         _everInjected = true;
         GD.Print("[ModFramework] Mods button added to main menu");
@@ -264,21 +269,6 @@ public static partial class MainMenuIntegration
         panel.AddThemeConstantOverride("separation", 14);
         root.AddChild(panel);
         return panel;
-    }
-
-    private static void ExpandContainer(Node container)
-    {
-        // Walk up and expand Rect2 / min_size to fit the new button
-        var parent = container.GetParent();
-        while (parent != null && parent != _tree?.Root)
-        {
-            if (parent is Control control)
-            {
-                var h = control.Size.Y + 40;
-                control.CustomMinimumSize = new Vector2(control.CustomMinimumSize.X, h);
-            }
-            parent = parent.GetParent();
-        }
     }
 
     private static Node? FindButtonContainer(Node root)

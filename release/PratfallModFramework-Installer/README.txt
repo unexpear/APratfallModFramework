@@ -1,4 +1,4 @@
-Pratfall Mod Framework — Installer (v1.3)
+Pratfall Mod Framework — Installer (v1.4)
 =========================================
 
 Quick install
@@ -12,9 +12,25 @@ Quick install
 5. Launch Pratfall. The native Pratfall "Mod" button is hidden and the
    framework's "Mods" button takes its slot in the main menu.
 
-What's new in v1.3 — extension helpers for mod authors
-------------------------------------------------------
-Four new helpers wrap native Pratfall APIs that mods can extend cleanly:
+What's new in v1.4
+------------------
+- Installer window is now resizable. Drag the borders to resize, or use
+  the maximize button. Minimum size is the original 560x480 so the layout
+  never collapses. The log box (largest control) grows in both directions.
+- "Framework loaded?" sentinel file. When the framework boots, it drops
+  an empty read-only file at the top of your Pratfall install folder:
+    __PRATFALL_MOD_FRAMEWORK_LOADED.txt
+  Sorts to the top of the folder for visibility. Useful for checking that
+  both PCs in a multiplayer session have the framework loaded (just look
+  at each install folder). Cleaned up on clean game exit; persists across
+  force-kill (so post-crash you can still tell it was loaded).
+- Installer is now self-contained. No separate .NET runtime install
+  required — the EXE bundles .NET 10 directly (~52 MB). Works on any
+  64-bit Windows machine out of the box.
+
+What's still from v1.3
+----------------------
+Four helpers wrap native Pratfall APIs that mods can extend cleanly:
 
 - ModLocalizationHelper.Register(modId, localeCode, translations)
     Adds a language to the in-game language selector. Wraps
@@ -48,9 +64,8 @@ What's still v1.2
 Requirements
 ------------
 - Windows 10/11 64-bit
-- .NET 8 Desktop Runtime
-  Download: https://dotnet.microsoft.com/download/dotnet/8.0/runtime
-  (Pick "Desktop Runtime — x64" — about 55 MB.)
+- NO separate .NET runtime needed. The Installer bundles its own .NET 10
+  runtime so it runs out of the box on any 64-bit Windows machine.
 
 Uninstall
 ---------

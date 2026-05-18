@@ -30,10 +30,13 @@ public class MainForm : Form
     private void InitializeComponent()
     {
         Text = "Pratfall Mod Framework Installer";
+        // Resizable window. MinimumSize keeps the layout from collapsing below
+        // the original 560x480 footprint where buttons / log would overlap.
         Size = new Size(560, 480);
+        MinimumSize = new Size(560, 480);
         StartPosition = FormStartPosition.CenterScreen;
-        MaximizeBox = false;
-        FormBorderStyle = FormBorderStyle.FixedSingle;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
         BackColor = Color.FromArgb(28, 28, 30);
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 10);
@@ -42,6 +45,7 @@ public class MainForm : Form
         {
             Location = new Point(0, 0),
             Size = new Size(560, 80),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             BackColor = Color.FromArgb(45, 45, 50)
         };
 
@@ -50,6 +54,7 @@ public class MainForm : Form
             Text = "Pratfall Mod Framework",
             Location = new Point(20, 15),
             Size = new Size(520, 28),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Font = new Font("Segoe UI", 16, FontStyle.Bold),
             ForeColor = Color.White,
             BackColor = Color.Transparent
@@ -60,6 +65,7 @@ public class MainForm : Form
             Text = "One-click install. Fully reversible via Uninstall or Steam Verify.",
             Location = new Point(20, 48),
             Size = new Size(520, 20),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Font = new Font("Segoe UI", 9),
             ForeColor = Color.FromArgb(180, 180, 190),
             BackColor = Color.Transparent
@@ -72,13 +78,16 @@ public class MainForm : Form
         {
             Text = "Game Path:",
             Location = new Point(20, 100),
-            Size = new Size(80, 24)
+            Size = new Size(80, 24),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
         };
 
         _gamePathBox = new TextBox
         {
             Location = new Point(100, 98),
             Size = new Size(340, 24),
+            // Stretch horizontally between the label and the Browse button.
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle,
@@ -90,6 +99,7 @@ public class MainForm : Form
             Text = "Browse...",
             Location = new Point(450, 96),
             Size = new Size(90, 28),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -101,6 +111,7 @@ public class MainForm : Form
             Text = "Install",
             Location = new Point(100, 140),
             Size = new Size(160, 40),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
             BackColor = Color.FromArgb(0, 120, 215),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -113,6 +124,7 @@ public class MainForm : Form
             Text = "Uninstall",
             Location = new Point(280, 140),
             Size = new Size(160, 40),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.FromArgb(200, 200, 200),
             FlatStyle = FlatStyle.Flat,
@@ -125,6 +137,7 @@ public class MainForm : Form
             Text = "Ready",
             Location = new Point(20, 195),
             Size = new Size(520, 20),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Font = new Font("Segoe UI", 9, FontStyle.Italic),
             ForeColor = Color.FromArgb(150, 150, 160)
         };
@@ -133,6 +146,7 @@ public class MainForm : Form
         {
             Location = new Point(20, 220),
             Size = new Size(520, 20),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Style = ProgressBarStyle.Continuous,
             ForeColor = Color.FromArgb(0, 120, 215),
             BackColor = Color.FromArgb(50, 50, 55)
@@ -142,6 +156,8 @@ public class MainForm : Form
         {
             Location = new Point(20, 255),
             Size = new Size(520, 175),
+            // Log area grows in both axes — primary beneficiary of a bigger window.
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
             BackColor = Color.FromArgb(20, 20, 22),
             ForeColor = Color.FromArgb(200, 200, 210),
             BorderStyle = BorderStyle.None,

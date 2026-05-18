@@ -36,8 +36,8 @@ public class MainForm : Form
         // (controls overlapped, status/progress/log got pushed off-screen).
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
-        Size = new Size(560, 480);
-        MinimumSize = new Size(560, 400);
+        Size = new Size(700, 720);
+        MinimumSize = new Size(700, 720);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
@@ -51,9 +51,9 @@ public class MainForm : Form
         _headerPanel = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 80,
+            Height = 130,
             BackColor = Color.FromArgb(45, 45, 50),
-            Padding = new Padding(20, 12, 20, 12)
+            Padding = new Padding(24, 20, 24, 20)
         };
 
         var headerStack = new TableLayoutPanel
@@ -63,8 +63,8 @@ public class MainForm : Form
             RowCount = 2,
             BackColor = Color.Transparent
         };
-        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
 
         _titleLabel = new Label
         {
@@ -102,13 +102,15 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 5,
-            Padding = new Padding(20, 15, 20, 15),
+            Padding = new Padding(24, 24, 24, 24),
             BackColor = Color.Transparent
         };
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));     // path row (textbox + browse)
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));     // install/uninstall buttons
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));     // status label
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));     // progress bar
+        // Every row gets an extra ~1 inch (96px) of vertical room over the
+        // bare-minimum so controls render with breathing space at any DPI.
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));     // path row (textbox + browse)
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));     // install/uninstall buttons
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));     // status label
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));     // progress bar
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));    // log fills rest
 
         // Row 0 — path label + textbox + browse button.
@@ -117,12 +119,12 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 1,
-            Margin = new Padding(0, 0, 0, 8),
+            Margin = new Padding(0, 0, 0, 12),
             BackColor = Color.Transparent
         };
-        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
 
         _gamePathLabel = new Label
         {
@@ -165,7 +167,7 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 1,
-            Margin = new Padding(0, 4, 0, 4),
+            Margin = new Padding(0, 10, 0, 10),
             BackColor = Color.Transparent
         };
         buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));

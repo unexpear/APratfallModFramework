@@ -278,6 +278,30 @@ public static partial class MainMenuIntegration
                     topRow.AddChild(scanBtn);
                 }
 
+                // ⚙ — per-mod settings panel. Only shown if the mod has actually
+                // called ModConfig.For(modId).Bind<T>(...) at least once. Mods
+                // that don't use ModConfig don't get a button (zero clutter).
+                if (ModConfig.GetAllEntries(mod.Id).Count > 0)
+                {
+                    var settingsBtn = new Button
+                    {
+                        Text = "⚙",
+                        FocusMode = Control.FocusModeEnum.All,
+                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+                        TooltipText = "Mod settings (auto-generated from ModConfig)",
+                    };
+                    ApplyButtonTheme(settingsBtn);
+                    settingsBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
+                    var capturedIdSettings = mod.Id;
+                    var capturedNameSettings = string.IsNullOrWhiteSpace(mod.Name) ? mod.Id : mod.Name;
+                    settingsBtn.Pressed += () =>
+                    {
+                        if (_tree != null)
+                            ShowSettingsPanel(_tree, capturedIdSettings, capturedNameSettings);
+                    };
+                    topRow.AddChild(settingsBtn);
+                }
+
                 var toggle = new ToggleSwitch(_isModEnabled?.Invoke(mod.Id) ?? false);
                 var captured = mod.Id;
                 _dialogToggles[captured] = toggle;

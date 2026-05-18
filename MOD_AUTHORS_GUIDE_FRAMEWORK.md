@@ -458,9 +458,27 @@ ModConfig.For("MyMod").Reload();
 
 `ModConfig.GetAllEntries(modId)` returns the list of `IConfigEntry` instances bound for a mod. The framework reserves the right to use this for an in-game settings UI in a future release; mod authors generally won't need to call it.
 
+### In-game settings editor
+
+If a mod has called `ModConfig.Bind(...)` at least once, a **⚙ Settings** button appears on that mod's card in the Mods dialog (next to ℹ Info and 🔍 Scan). Clicking it opens a settings panel that auto-renders each bound entry with the right widget:
+
+| Type | Constraint | Widget |
+|---|---|---|
+| `bool` | (none) | toggle switch (our `ToggleSwitch`) |
+| `int` / `long` | `AcceptableValueRange<T>` | slider with current-value label |
+| `int` / `long` | _(none)_ | spin box |
+| `float` / `double` | `AcceptableValueRange<T>` | slider with 2-decimal current-value label |
+| `float` / `double` | _(none)_ | spin box |
+| `string` | `AcceptableValueList<T>` | dropdown |
+| `string` | _(none)_ | text input |
+| enum | _(implicit list from enum values)_ | dropdown |
+
+Per-row "↺" button calls `entry.ResetToDefault()` and refreshes the widget. Entries are grouped by `Section`; sections with no name fall under "General". Tooltips from `ConfigDescription.Tooltip` show on the entry label hover. Mods that haven't bound anything don't get a ⚙ button — zero clutter for the rest of the list.
+
+Bidirectional binding caveat: widget edits flow into the `ConfigEntry.Value` setter (which fires `OnChange`). Programmatic `Value` mutations from elsewhere while the panel is open are NOT reflected live — reopen the panel to see them. Rare enough in practice that the v1 trade-off is acceptable.
+
 ### What this does NOT do (yet)
 
-- **No in-game UI yet.** Players edit the JSON file directly until the Settings tab ships.
 - **No multiplayer sync yet.** `ConfigDescription.Synced = true` is reserved for a future host-pushes-to-clients (CSync) feature; today it's just metadata.
 
 ## Recipe: Logging + crash reports

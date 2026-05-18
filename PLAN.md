@@ -139,7 +139,7 @@ Gaps identified by surveying BepInEx, GDWeave, Godot Mod Loader, Lethal Company 
 
 ### Medium effort
 
-- [ ] **Config system: `ConfigEntry<T>`** — `ModConfig.Bind<T>("Section", "Key", default, description, AcceptableValueRange/List)` + JSON file at `<userData>/modframework-config/<modid>.json` + `OnChange` event. No UI yet, just the data layer. Authors that want settings get a persistent typed key/value with change events. (~3 days)
+- [ ] **Config system: `ConfigEntry<T>`** — `ModConfig.Bind<T>("Section", "Key", default, description, AcceptableValueRange/List)` + JSON file at `<userData>/modframework-config/<modid>.json` + `OnChange` event. No UI yet, just the data layer. Authors that want settings get a persistent typed key/value with change events. (~3 days) — **design sketched [below](#config-system-design-sketch)**
 - [ ] **In-game config editor** — per-mod "Settings" tab in the existing Mods dialog that reflects over registered `ConfigEntry` objects and auto-generates sliders / dropdowns / toggles from `AcceptableValue*`. Every existing mod gets a UI for free. **The single biggest author-facing quality jump available** — every comparable framework has this (BepInEx ConfigurationManager, MelonPreferences, LethalConfig, REPOConfig). Depends on the config system landing first. (~3-5 days)
 - [ ] **Host-config-pushed-to-clients (CSync pattern)** — mark a `ConfigEntry` as `Synced = true`; framework auto-sends host's value on join and on change. Critical for physics co-op — "host turned floor friction to 0.1, all clients use 0.1." Depends on config system + existing `ModNetworkLayer`. (~2 days)
 - [ ] **Mod profiles** — loadout presets in the Mods dialog: `<userData>/profiles/<name>.json` listing enabled mod IDs + per-mod config snapshot. UI: Profiles tab with [+ New], [Activate], [Export Modpack]. Players running 20+ mods will demand this. Our enable/disable persistence does 80% of the work. (~2-3 days)
@@ -150,6 +150,121 @@ Gaps identified by surveying BepInEx, GDWeave, Godot Mod Loader, Lethal Company 
 - [ ] **Per-mod locale files** — verify `ModLocalizationHelper` cleanly handles `<modfolder>/locales/en.json`, `de.json`, etc. with multi-mod no-collision + fallback to en. May already work — needs audit. (~1 day audit + ~1 day fix if needed)
 - [ ] **In-game dev console** — backtick-toggled overlay accepting `<modid> <command> <args>` dispatched to mod-registered commands. Pays for itself in dev iteration speed alone. (~3-5 days)
 - [ ] **Content registration helpers beyond drop pools** — props, characters, whatever Pratfall's content surface offers. Depends on game internals; size unknown. Co-design with Tim. (sizing TBD)
+
+### Config system design sketch
+
+Reference for when we decide to build it. Three-phase plan: data layer first (3 days), then UI on top (3-5 days), then host-sync (2 days). All independent; UI and CSync each depend on the data layer.
+
+**Phase 1 — Data layer (`ModConfig` + `ConfigEntry<T>`)**
+
+Public API surface (matches BepInEx ConfigFile conventions so authors moving between frameworks recognize it):
+
+```csharp
+public static class ModConfig
+{
+    // Cached per modId — repeated For() calls return the same ModConfigFile.
+    public static ModConfigFile For(string modId);
+    // Discovery for the future UI — iterates every Bind() the mod has made.
+    public static IReadOnlyList<IConfigEntry> GetAllEntries(string modId);
+}
+
+public class ModConfigFile
+{
+    public ConfigEntry<T> Bind<T>(string section, string key, T defaultValue, ConfigDescription? description = null);
+    public void Save();      // explicit save (auto-fires on every Value setter too)
+    public void Reload();    // re-read file from disk (loses unsaved in-memory changes)
+}
+
+public class ConfigEntry<T> : IConfigEntry
+{
+    public string Section { get; }
+    public string Key { get; }
+    public T DefaultValue { get; }
+    public T Value { get; set; }       // setter validates against Constraint, fires OnChange, queues file save
+    public event Action<T>? OnChange;  // fires on EVERY Value mutation (including programmatic via UI)
+    public ConfigDescription? Description { get; }
+}
+
+public class ConfigDescription
+{
+    public string? Tooltip { get; init; }      // UI shows on hover
+    public IConstraint? Constraint { get; init; }  // AcceptableValueRange / AcceptableValueList
+    public bool Synced { get; init; }          // Phase 3 (CSync) — host pushes value to clients
+    public string[]? Tags { get; init; }       // UI extension: "advanced", "browsable: false", etc.
+}
+
+public class AcceptableValueRange<T> : IConstraint where T : IComparable<T> { public T Min, Max; }
+public class AcceptableValueList<T> : IConstraint { public T[] Values; }
+```
+
+**Persistence:**
+- Path: `<userData>/modframework-config/<sanitized_modId>.json` (matches existing modframework-* pattern)
+- Format: nested JSON `{ "_schema_version": 1, "<Section>": { "<Key>": value } }`
+- Type support: `bool`, `int`, `long`, `float`, `double`, `string`, enums (as string names). No arrays/dicts in v1.
+- Edge cases: missing file → defaults + write on first save; corrupt file → log error, back up corrupt as `.bad`, use defaults; type mismatch → log + default.
+- Save policy: immediate on Value setter (no debounce in v1 — keep simple, optimize if it becomes hot)
+- Thread safety: file writes locked; OnChange fires on the calling thread (mod's responsibility if it touches Godot from the handler — same convention as the rest of the framework)
+
+**Failure modes the framework should handle silently:**
+- Game.Platform not up yet → defer file load until first save attempt (same pattern as ModLogger)
+- Read-only filesystem → log via GD.PrintErr + ModCrashReporter, fall back to in-memory only
+
+**Self-test (step 15 of StressAllMod):**
+- Bind a few entries with varied types → verify file written + structure correct
+- Reload → verify values round-trip
+- Constraint enforcement (AcceptableValueRange<int>.Min=0, Max=10; verify .Value = 50 throws)
+- OnChange fires on setter
+- Missing file → defaults
+- Corrupt file → backup + recovery
+- Cleanup self-test config files
+
+**Files to create:** `ModConfig.cs`, `ConfigEntry.cs`, `ConfigDescription.cs`, `AcceptableValueRange.cs`, `AcceptableValueList.cs` (or all in one `ModConfig.cs` for simplicity).
+
+**Docs:** `MOD_AUTHORS_GUIDE_FRAMEWORK.md` gets a new "Recipe: Settings (ModConfig)" section before the Multiplayer fields section.
+
+---
+
+**Phase 2 — In-game editor (UI on top of Phase 1)**
+
+Add a per-mod "Settings" sub-tab to the existing Mods dialog. UI iterates `ModConfig.GetAllEntries(modId)` and renders one row per entry. Widget mapping:
+
+| Type | Constraint | Widget |
+|---|---|---|
+| `bool` | (none) | toggle |
+| `int` / `long` | AcceptableValueRange | slider with min/max labels |
+| `int` / `long` | AcceptableValueList | dropdown |
+| `int` / `long` | (none) | numeric spinner |
+| `float` / `double` | AcceptableValueRange | slider with min/max labels |
+| `float` / `double` | (none) | numeric spinner |
+| `string` | AcceptableValueList | dropdown |
+| `string` | (none) | text input |
+| enum | (implicit list from enum values) | dropdown |
+
+Two-way bind: UI writes → ConfigEntry.Value setter → fires OnChange → if some other code changes Value, OnChange refreshes the UI widget.
+
+Per-section grouping (entries with the same Section render under a collapsible header). Reset-to-default buttons per entry + per section + per mod.
+
+Tooltip from `Description.Tooltip` shown on hover.
+
+`tags` includes "advanced" → hide behind "Show Advanced" toggle. `tags` includes "browsable:false" → hide entirely (mod-internal flags).
+
+This is "the single biggest author-facing jump" because every existing mod that adopts Phase 1 immediately gets a UI for free, no per-mod UI code.
+
+---
+
+**Phase 3 — Host-config-pushed-to-clients (CSync pattern)**
+
+When `ConfigDescription.Synced = true`:
+- On lobby join: host snapshots all Synced entries across all loaded mods → sends as a single network event → peers apply via internal setter that bypasses save (host is source of truth, peer's local file unchanged)
+- On host Value setter for a Synced entry: broadcast the (modId, section, key, value) tuple to all peers
+- On peer receive: apply via `entry.SetValueFromHost(value)` (new internal API that fires OnChange but NOT file save — keeps local file as authoritative for next solo session)
+- Wire over existing `ModNetworkLayer` — pick a new event id in our 62000-62005 range (or extend after Tim's confirmation of safe range)
+
+Tested via the existing debug-peer mode (already works for vote consensus, should work for config snapshots).
+
+---
+
+**Combined effort estimate:** ~8-10 days for all three phases. Each phase ships independently. Phase 1 alone is useful (mods get persistent typed settings); Phase 2 is the killer feature; Phase 3 is what unlocks physics-coop "host changes friction, everyone uses host's friction".
 
 ### Explicitly NOT doing
 

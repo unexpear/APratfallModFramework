@@ -310,7 +310,9 @@ public static void ModInit()
 }
 ```
 
-This works on every Pratfall build regardless of the gate, but it has a hard limitation: you can **only add or override translation keys inside locales the game already knows about**. You can't add a brand-new selectable language with this approach — the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is the JSON-file path's output. For "add a new selectable language", the JSON recipe is the only path; wait for the dev to flip `AllowUserLocalization`.
+**Today (build 1.1.0.R2943)** this works on every build regardless of the gate, but it has a hard limitation: you can only add or override translation keys inside locales the game already knows about. You can't add a brand-new *selectable* language because the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is populated only by the JSON-file path above. As a workaround for getting NEW keys into the active language reliably, Henrique's [PratfallLocalizationMod](https://github.com/HenriqueCamillo/PratfallLocalizationMod) listens to `NotificationTranslationChanged` and re-applies its `AddTranslation` calls after every locale change — works today, but a little fiddly.
+
+**Coming in the next Pratfall update** (per Tim in `#mod-dev`, 2026-05-18): the settings menu will rescan Godot's known languages every time it opens, and the launch-time language cache will be removed. After that ships, `TranslationServer.AddTranslation` becomes a first-class path for **adding new selectable languages too** — call it from `ModInit`, and the language shows up in the in-game selector. The JSON-file path will still work for authors who want their locale file alongside the mod folder; both paths will coexist. Re-check this section against the actual update notes when it lands.
 
 ## Recipe: Persist mod data
 
@@ -1253,6 +1255,21 @@ The Pratfall Mod Framework can detect mismatches and prompt to transfer the mod,
 - **Source-game DLLs** (`Pratfall.dll`, `GodotSharp.dll`). These resolve from the game install. Your csproj should reference them with `<Private>false</Private>` (see [Setup](#setup)).
 - **Debug builds of your own DLL.** Build with `dotnet build -c Release` and ship the `bin/Release` output, not `bin/Debug`.
 - **`*.pdb` files** unless you explicitly want users to be able to get source-line stack traces. They roughly double your DLL footprint.
+
+### Where to publish (as of 2026-05-18)
+
+There's no single official Pratfall mod host yet. Current state, per the dev team in `#mod-dev`:
+
+| Platform | Status | Notes |
+|---|---|---|
+| **Steam Workshop** | In active development by Tim, "should be ready soon" | Will be the canonical first-party path once it ships. Auto-update + re-install across devices are the big wins. **Caveat: Chinese players may not have Workshop access** (Robert) — consider this if your mod targets that audience. |
+| **Nexus Mods** | De facto current host; works today | Manual install only — users download a zip and drop the mod folder into `<GameDir>\mods\`. No auto-update. |
+| **Thunderstore** | Community exists; rep (Ebkr) is engaged with the Pratfall team | Standard format for BepInEx-style games (Risk of Rain 2, Lethal Company, REPO, Content Warning). Pratfall is on Godot+C# which is uncommon for the platform, so existing tooling (r2modman) doesn't natively understand the loader yet. |
+| **GitHub release / direct download** | Universal fallback | Works for any platform Pratfall runs on. Reasonable for early development; not a great long-term distribution channel. |
+
+**Fragmentation matters.** Ebkr (Thunderstore) flagged the risk of mods splintering across platforms — if your players use one platform and your dependencies are on another, the install path breaks. Until Steam Workshop ships, picking ONE host per mod (and saying so in your README) reduces friction. If you publish on multiple, link cross-platform so users can find the same mod from anywhere.
+
+**Pratfall's uncommon stack matters too.** Tim noted that Godot + C# is rare among modded games, so tooling assumptions made for Unity+BepInEx don't always transfer. If you write a Thunderstore-format manifest, expect to also explain manual install for users whose mod manager doesn't auto-handle Pratfall yet.
 
 ## Godot 4 concepts
 

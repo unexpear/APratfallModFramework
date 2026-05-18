@@ -477,9 +477,33 @@ Per-row "↺" button calls `entry.ResetToDefault()` and refreshes the widget. En
 
 Bidirectional binding caveat: widget edits flow into the `ConfigEntry.Value` setter (which fires `OnChange`). Programmatic `Value` mutations from elsewhere while the panel is open are NOT reflected live — reopen the panel to see them. Rare enough in practice that the v1 trade-off is acceptable.
 
+### Multiplayer sync (CSync)
+
+Setting `Synced = true` on a `ConfigDescription` opts the entry into host-pushes-to-clients sync. The host's value wins; peers receive a snapshot when they join, and live updates when the host changes any synced value. Local edits on peers still apply locally (so their UI feels responsive), but the next snapshot from the host overwrites them.
+
+```csharp
+cfg.Bind("Gameplay", "MaxFlares", 3, new ConfigDescription
+{
+    Tooltip = "How many flares each player can carry.",
+    Constraint = new AcceptableValueRange<int>(1, 10),
+    Synced = true  // host's value wins for everyone in the lobby
+});
+```
+
+Mechanics:
+
+- The framework subscribes to all `Synced` entries automatically — your mod doesn't need to wire anything.
+- On a peer joining the lobby (after manifest exchange completes), the host sends one `ModConfigSyncSnapshot` containing every Synced entry across every loaded mod.
+- When the host's value changes (via `entry.Value = ...` or the in-game ⚙ panel), a snapshot with just that one entry broadcasts to all peers.
+- Peers apply via `SetFromHost(value)`, which: applies the value, fires `OnChange`, but **does NOT** persist to the peer's config file and **does NOT** re-broadcast (so there's no cycle).
+- Non-Synced entries are never sent — peers keep their own values for those.
+- Values are serialized as `(TypeName, StringValue)` discriminator pairs. Supported types: `bool`, `int`, `long`, `float`, `double`, `string`, and any `enum`. Custom types are not supported — they stay local-only.
+- Snapshots are capped at 32700 bytes (Pratfall's `ByteBufferWriter` limit); a typical mod has a handful of synced entries and won't approach this.
+
 ### What this does NOT do (yet)
 
-- **No multiplayer sync yet.** `ConfigDescription.Synced = true` is reserved for a future host-pushes-to-clients (CSync) feature; today it's just metadata.
+- **Custom value types don't sync.** Only primitives, strings, and enums (listed above) round-trip through CSync. A `Synced = true` on, say, a `Vector3` entry won't be transmitted.
+- **No conflict resolution UI.** If the host's snapshot rejects on a peer (constraint violation, type mismatch from a version skew), the peer logs and continues — there's no in-game notification.
 
 ## Recipe: Logging + crash reports
 

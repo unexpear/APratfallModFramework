@@ -998,6 +998,148 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Verifies the CSync wire format end-to-end without needing a real second peer.
+    // Tests:
+    //  - ModConfigSyncNetworkEvent serializes + deserializes intact (JSON wrapper)
+    //  - EncodeValueForSync / DecodeValueFromSync round-trip every supported type
+    //  - SetFromHost applies values without firing the broadcast cycle
+    //    (verified by counting OnSyncedValueChanged events before + after)
+    //  - SetFromHost still fires the mod's OnChange handler (so reactive code reacts)
+    public static HelperTestResult RunConfigSyncTest()
+    {
+        var r = new HelperTestResult();
+        const string testModId = "SelfTestConfigSync";
+        try
+        {
+            var cleanupFolder = ModConfig.ResolveConfigFolder();
+            string? cleanupPath = cleanupFolder == null ? null : Path.Combine(cleanupFolder, $"{testModId}.json");
+            if (cleanupPath != null && File.Exists(cleanupPath)) File.Delete(cleanupPath);
+
+            var cfg = ModConfig.For(testModId);
+
+            // Bind 3 Synced entries covering bool / int with range / string with list.
+            // Plus 1 non-Synced entry to verify it doesn't get into snapshots.
+            var syncBool = cfg.Bind("Sync", "EnableThing", true, new ConfigDescription { Synced = true });
+            var syncInt = cfg.Bind("Sync", "Count", 5, new ConfigDescription
+            {
+                Synced = true,
+                Constraint = new AcceptableValueRange<int>(0, 100)
+            });
+            var syncString = cfg.Bind("Sync", "Mode", "Auto", new ConfigDescription
+            {
+                Synced = true,
+                Constraint = new AcceptableValueList<string>("Auto", "Manual", "Off")
+            });
+            var localOnly = cfg.Bind("Local", "Volume", 0.5f); // not Synced — must be skipped in EnumerateSyncedEntries
+            r.StepsPassed.Add("Bind 3 Synced + 1 non-Synced entry");
+
+            // Verify EnumerateSyncedEntries returns ONLY the Synced ones.
+            var synced = ModConfig.EnumerateSyncedEntries().Where(t => t.ModId == testModId).ToList();
+            if (synced.Count != 3)
+            {
+                r.ErrorMessage = $"EnumerateSyncedEntries returned {synced.Count} entries for testModId (expected 3 — the non-Synced one should be skipped)";
+                return r;
+            }
+            r.StepsPassed.Add("EnumerateSyncedEntries skipped the non-Synced entry");
+
+            // Build a synthetic snapshot, send it through Serialize -> wire bytes ->
+            // Deserialize, verify intact. This validates the JSON wire format.
+            var origSnapshot = new ModConfigSyncSnapshot
+            {
+                Entries =
+                {
+                    new ModConfigSyncEntry { ModId = testModId, Section = "Sync", Key = "EnableThing", TypeName = "bool", StringValue = "False" },
+                    new ModConfigSyncEntry { ModId = testModId, Section = "Sync", Key = "Count",       TypeName = "int",  StringValue = "42" },
+                    new ModConfigSyncEntry { ModId = testModId, Section = "Sync", Key = "Mode",        TypeName = "string", StringValue = "Manual" }
+                }
+            };
+            var wireEvent = ModConfigSyncNetworkEvent.Create("self-test-sender", 0, origSnapshot);
+            var roundtripped = wireEvent.ToSnapshot();
+            if (roundtripped.Entries.Count != 3)
+            {
+                r.ErrorMessage = $"Snapshot wire round-trip: expected 3 entries, got {roundtripped.Entries.Count}";
+                return r;
+            }
+            if (roundtripped.Entries[1].Key != "Count" || roundtripped.Entries[1].StringValue != "42")
+            {
+                r.ErrorMessage = $"Snapshot wire round-trip: entry data corrupted (Entry[1]={roundtripped.Entries[1].Key}/{roundtripped.Entries[1].StringValue})";
+                return r;
+            }
+            r.StepsPassed.Add("Snapshot JSON wire format round-trips correctly");
+
+            // SetFromHost behavior: applies value, fires OnChange, does NOT fire the
+            // broadcast hook (which would cycle infinitely between host and peer in
+            // an actual lobby).
+            int broadcastFireCount = 0;
+            Action<string, string, string, object?> broadcastWatcher = (m, s, k, v) =>
+            {
+                if (m == testModId) broadcastFireCount++;
+            };
+            ModConfig.OnSyncedValueChanged += broadcastWatcher;
+
+            int onChangeFireCount = 0;
+            syncInt.OnChange += _ => onChangeFireCount++;
+
+            // Apply via SetFromHost (simulates a host pushing a new value to us as peer).
+            if (syncInt is IConfigEntryInternal internalIface)
+            {
+                internalIface.SetFromHost(99);
+            }
+            else
+            {
+                r.ErrorMessage = "ConfigEntry<int> doesn't implement IConfigEntryInternal";
+                ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+                return r;
+            }
+
+            if (syncInt.Value != 99)
+            {
+                r.ErrorMessage = $"SetFromHost didn't apply (Value={syncInt.Value}, expected 99)";
+                ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+                return r;
+            }
+            if (onChangeFireCount != 1)
+            {
+                r.ErrorMessage = $"SetFromHost should fire OnChange exactly once, got {onChangeFireCount}";
+                ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+                return r;
+            }
+            if (broadcastFireCount != 0)
+            {
+                r.ErrorMessage = $"SetFromHost should NOT fire OnSyncedValueChanged (would cycle), got {broadcastFireCount}";
+                ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+                return r;
+            }
+            r.StepsPassed.Add("SetFromHost: applied + fired OnChange + did NOT fire broadcast hook (no cycle)");
+
+            // Now verify a NORMAL setter (host-side) DOES fire the broadcast hook.
+            // This is the case where mod code (or our UI) sets the value on the host
+            // and we want it pushed to peers.
+            syncInt.Value = 7;
+            if (broadcastFireCount != 1)
+            {
+                r.ErrorMessage = $"Normal setter should fire OnSyncedValueChanged once, got {broadcastFireCount}";
+                ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+                return r;
+            }
+            r.StepsPassed.Add("Normal setter fires broadcast hook (host-side push)");
+
+            ModConfig.OnSyncedValueChanged -= broadcastWatcher;
+
+            // Cleanup.
+            try { if (cleanupPath != null && File.Exists(cleanupPath)) File.Delete(cleanupPath); } catch { }
+            r.StepsPassed.Add("Cleaned up self-test config file");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

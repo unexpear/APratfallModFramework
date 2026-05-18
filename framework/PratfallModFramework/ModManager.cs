@@ -103,10 +103,17 @@ public class ModManager : IDisposable
         _networkLayer.OnVoteResultReceived += OnVoteResultReceived;
         _networkLayer.OnTransferRequestReceived += OnTransferRequestReceived;
         _networkLayer.OnTransferChunkReceived += OnTransferChunkReceived;
+        _networkLayer.OnConfigSyncReceived += OnConfigSyncReceived;
         WorkshopHook.OnWorkshopItemInstalled += OnWorkshopItemInstalled;
         _networkLayer.OnMemberLeftLobby += OnLobbyMemberLeft;
         _networkLayer.OnTransportReset += OnTransportReset;
         _voteSession.OnVoteResolved += OnVoteResolved;
+
+        // CSync: when a Synced ConfigEntry's Value changes locally AND we're the
+        // host, broadcast the delta. When we're a peer, the value change came
+        // either from the user editing the JSON file (don't broadcast — host is
+        // authoritative) or from a SetFromHost call (already bypassed via fromSync).
+        ModConfig.OnSyncedValueChanged += OnLocalSyncedValueChanged;
 
         LoadLocalAssemblyMods();
         PersistDesiredEnabledState();
@@ -512,6 +519,160 @@ public class ModManager : IDisposable
 
         foreach (var request in BuildVoteRequestsForPeer(peerSnapshot))
             QueueVoteRequest(request, isHostLocalPrompt: true);
+
+        // CSync: a peer just announced their manifest, which only happens on
+        // initial join (and on host-side toggles). Push a full snapshot of all
+        // Synced ConfigEntry values so the new peer converges to host state.
+        // Broadcasts to ALL peers (not just the joiner) — wasteful for existing
+        // peers but harmless (set-equal no-ops via EqualityComparer in setter).
+        TryBroadcastFullSyncedSnapshot();
+    }
+
+    // CSync send paths.
+    //
+    // Two triggers:
+    //   1. A new peer joined → broadcast all Synced entries (via OnPeerManifestReceived above)
+    //   2. A Synced entry's Value changed locally on the host → broadcast that one entry
+    //
+    // Both go through ModNetworkLayer.BroadcastConfigSync. Non-host invocations are
+    // logged + no-op'd inside the layer.
+    private void TryBroadcastFullSyncedSnapshot()
+    {
+        if (!_networkLayer.IsLocalHost) return;
+        var snapshot = BuildSyncedSnapshot();
+        if (snapshot.Entries.Count == 0) return;
+        _networkLayer.BroadcastConfigSync(snapshot);
+    }
+
+    private static ModConfigSyncSnapshot BuildSyncedSnapshot()
+    {
+        var snap = new ModConfigSyncSnapshot();
+        foreach (var (modId, entry) in ModConfig.EnumerateSyncedEntries())
+        {
+            var serialized = SerializeSyncEntry(modId, entry);
+            if (serialized != null) snap.Entries.Add(serialized);
+        }
+        return snap;
+    }
+
+    private void OnLocalSyncedValueChanged(string modId, string section, string key, object? newValue)
+    {
+        // Only the host pushes Synced values to peers. Non-host changes (mod
+        // edited JSON file by hand, etc.) stay local.
+        if (!_networkLayer.IsLocalHost) return;
+
+        // Find the entry to read its declared type (the receiver needs the
+        // type discriminator to deserialize correctly).
+        var entry = ModConfig.GetAllEntries(modId)
+            .FirstOrDefault(e => e.Section == section && e.Key == key);
+        if (entry == null) return; // shouldn't happen — we just got an event from it
+
+        var serialized = SerializeSyncEntry(modId, entry);
+        if (serialized == null) return;
+
+        var snap = new ModConfigSyncSnapshot();
+        snap.Entries.Add(serialized);
+        _networkLayer.BroadcastConfigSync(snap);
+    }
+
+    private static ModConfigSyncEntry? SerializeSyncEntry(string modId, IConfigEntry entry)
+    {
+        try
+        {
+            var (typeName, stringValue) = EncodeValueForSync(entry.ValueType, entry.BoxedValue);
+            return new ModConfigSyncEntry
+            {
+                ModId = modId,
+                Section = entry.Section,
+                Key = entry.Key,
+                TypeName = typeName,
+                StringValue = stringValue
+            };
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] CSync: failed to serialize {modId}/[{entry.Section}].{entry.Key}: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static (string TypeName, string StringValue) EncodeValueForSync(Type valueType, object? boxed)
+    {
+        if (boxed == null) return ("string", "");
+        if (valueType == typeof(bool)) return ("bool", ((bool)boxed).ToString());
+        if (valueType == typeof(int)) return ("int", ((int)boxed).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (valueType == typeof(long)) return ("long", ((long)boxed).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (valueType == typeof(float)) return ("float", ((float)boxed).ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+        if (valueType == typeof(double)) return ("double", ((double)boxed).ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+        if (valueType == typeof(string)) return ("string", (string)boxed);
+        if (valueType.IsEnum) return ("enum", boxed.ToString() ?? "");
+        // Unsupported type — encode as round-trip string and let the receiver
+        // skip if it can't parse. Better than throwing and dropping the whole snapshot.
+        return ("string", boxed.ToString() ?? "");
+    }
+
+    private void OnConfigSyncReceived(string senderUserId, ModConfigSyncSnapshot snapshot)
+    {
+        if (snapshot == null || snapshot.Entries.Count == 0) return;
+        // Only accept syncs from the lobby owner. Drop from anyone else (defensive —
+        // peer-auth already restricts to lobby members, but only the host should be
+        // pushing config values).
+        var ownerId = _networkLayer.LobbyOwnerUserId;
+        if (!string.IsNullOrWhiteSpace(ownerId) && !string.Equals(senderUserId, ownerId, StringComparison.OrdinalIgnoreCase))
+        {
+            GD.Print($"[ModFramework] CSync: ignoring snapshot from non-host {senderUserId} (host is {ownerId})");
+            return;
+        }
+
+        int applied = 0;
+        int skipped = 0;
+        foreach (var entry in snapshot.Entries)
+        {
+            var localEntry = ModConfig.GetAllEntries(entry.ModId)
+                .FirstOrDefault(e => string.Equals(e.Section, entry.Section, StringComparison.Ordinal)
+                                  && string.Equals(e.Key, entry.Key, StringComparison.Ordinal));
+            if (localEntry == null)
+            {
+                // Peer doesn't have this entry (mod not loaded or Bind not called). Skip silently.
+                skipped++;
+                continue;
+            }
+
+            object? decodedValue;
+            try
+            {
+                decodedValue = DecodeValueFromSync(entry.TypeName, entry.StringValue, localEntry.ValueType);
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[ModFramework] CSync: failed to decode {entry.ModId}/[{entry.Section}].{entry.Key}: {ex.GetType().Name}: {ex.Message}");
+                skipped++;
+                continue;
+            }
+
+            if (localEntry is IConfigEntryInternal internalEntry)
+            {
+                internalEntry.SetFromHost(decodedValue);
+                applied++;
+            }
+        }
+        GD.Print($"[ModFramework] CSync applied: {applied} entries (skipped {skipped})");
+    }
+
+    private static object? DecodeValueFromSync(string typeName, string stringValue, Type targetType)
+    {
+        // Trust the receiver's declared type more than the wire's type name; the
+        // type-name field is mostly for debug visibility. Use targetType to pick
+        // the parser so we converge on the receiver's contract.
+        if (targetType == typeof(bool)) return bool.Parse(stringValue);
+        if (targetType == typeof(int)) return int.Parse(stringValue, System.Globalization.CultureInfo.InvariantCulture);
+        if (targetType == typeof(long)) return long.Parse(stringValue, System.Globalization.CultureInfo.InvariantCulture);
+        if (targetType == typeof(float)) return float.Parse(stringValue, System.Globalization.CultureInfo.InvariantCulture);
+        if (targetType == typeof(double)) return double.Parse(stringValue, System.Globalization.CultureInfo.InvariantCulture);
+        if (targetType == typeof(string)) return stringValue;
+        if (targetType.IsEnum) return Enum.Parse(targetType, stringValue);
+        // Unknown target type — return the raw string and let SetFromHost's cast fail loudly.
+        return stringValue;
     }
 
     // Recomputes the local-AND-remote compatibility picture over the union of local

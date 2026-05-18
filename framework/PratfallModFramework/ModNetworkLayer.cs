@@ -13,6 +13,7 @@ public sealed class ModNetworkLayer : IDisposable
     private const ushort VoteResultEventId = 62003;
     private const ushort TransferRequestEventId = 62004;
     private const ushort TransferChunkEventId = 62005;
+    private const ushort ConfigSyncEventId = 62006;
 
     private Func<ModLocalState>? _snapshotProvider;
     private Godot.Timer? _pollTimer;
@@ -30,6 +31,9 @@ public sealed class ModNetworkLayer : IDisposable
     public event Action<string, ModVoteResult>? OnVoteResultReceived;
     public event Action<string /*requesterUserId*/, ModTransferRequest>? OnTransferRequestReceived;
     public event Action<string /*sourceUserId*/, ModTransferChunk>? OnTransferChunkReceived;
+    // CSync: host broadcasts ConfigEntry values for entries marked Description.Synced=true.
+    // The string arg is the senderUserId (will be the lobby host's id under normal play).
+    public event Action<string /*senderUserId*/, ModConfigSyncSnapshot>? OnConfigSyncReceived;
     public event Action<string>? OnMemberLeftLobby;
     public event Action? OnTransportReset;
 
@@ -105,6 +109,39 @@ public sealed class ModNetworkLayer : IDisposable
         SendReliableGlobalEvent(ManifestSnapshotEventId, payload, "ModFramework.ManifestSnapshot");
 
         GD.Print($"[ModFramework] Broadcast manifest snapshot: {localState.EnabledModIds.Count}/{localState.InstalledManifests.Count} enabled");
+    }
+
+    // Broadcast a CSync snapshot to all peers (host-side use). The host calls
+    // this on (a) lobby join — full snapshot of all Synced entries, and
+    // (b) every Value change on a Synced entry — single-entry delta snapshot.
+    // Peers (non-host) calling this is a no-op modulo a warning — only the
+    // host's values are authoritative.
+    public void BroadcastConfigSync(ModConfigSyncSnapshot snapshot)
+    {
+        if (snapshot == null || snapshot.Entries.Count == 0) return;
+
+        if (_transportMode == TransportMode.Debug)
+        {
+            // In debug-peer mode there's no real peer to deliver to. Just log so
+            // self-tests can verify the host-side path ran.
+            GD.Print($"[ModFramework] CSync broadcast (debug-peer mode, no real delivery): {snapshot.Entries.Count} entries");
+            return;
+        }
+
+        if (!_isHooked) return;
+        var localUserId = LocalUserId;
+        if (string.IsNullOrWhiteSpace(localUserId)) return;
+
+        try
+        {
+            var payload = ModConfigSyncNetworkEvent.Create(localUserId, LocalMemberIndex, snapshot);
+            SendReliableGlobalEvent(ConfigSyncEventId, payload, "ModFramework.ConfigSync");
+            GD.Print($"[ModFramework] Broadcast CSync snapshot: {snapshot.Entries.Count} entries");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] CSync broadcast failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public void BroadcastVoteRequest(ModVoteRequest request)
@@ -406,6 +443,12 @@ public sealed class ModNetworkLayer : IDisposable
                 if (!string.Equals(chunkEvent.TargetUserId, localUserId, StringComparison.OrdinalIgnoreCase))
                     return;
                 OnTransferChunkReceived?.Invoke(chunkEvent.SenderUserId, chunkEvent.ToChunk());
+                return;
+
+            case ConfigSyncEventId:
+                var configSyncEvent = eventData.GetEvent<ModConfigSyncNetworkEvent>();
+                if (!SenderIsLobbyMember(configSyncEvent.SenderUserId)) return;
+                OnConfigSyncReceived?.Invoke(configSyncEvent.SenderUserId, configSyncEvent.ToSnapshot());
                 return;
         }
     }

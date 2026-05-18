@@ -441,3 +441,73 @@ internal sealed class SnapshotEnvelope
     public List<ModManifest>? InstalledManifests { get; set; }
     public List<string>? EnabledModIds { get; set; }
 }
+
+// CSync — host-config-pushed-to-clients wire format. Carries one or more
+// ConfigEntry value bindings the host wants peers to apply. Value is encoded
+// as (TypeName, StringValue) discriminator pair so the receiver can deserialize
+// to the right target type even without compile-time knowledge of T.
+public sealed class ModConfigSyncEntry
+{
+    public string ModId { get; set; } = "";
+    public string Section { get; set; } = "";
+    public string Key { get; set; } = "";
+    // Type discriminator: "bool", "int", "long", "float", "double", "string", "enum".
+    // For enums, the StringValue is the enum-name string; receiver looks up the target
+    // ConfigEntry to discover the actual enum type at apply time.
+    public string TypeName { get; set; } = "";
+    // String-encoded value. Bool serializes as "True"/"False" via bool.ToString;
+    // numerics use InvariantCulture; strings pass through; enums use Enum.GetName.
+    public string StringValue { get; set; } = "";
+}
+
+public sealed class ModConfigSyncSnapshot
+{
+    public List<ModConfigSyncEntry> Entries { get; set; } = new();
+}
+
+public sealed class ModConfigSyncNetworkEvent : INetworkEvent
+{
+    public string SenderUserId { get; set; } = "";
+    public byte SenderIndex { get; set; }
+    public string SnapshotJson { get; set; } = "{}";
+
+    // Pratfall's ByteBufferWriter caps strings at 32768 bytes. Snapshots that
+    // exceed this need to be split into batches by the sender (caller's job;
+    // a typical mod has a handful of synced entries so this won't fire in practice).
+    private const int MaxSerializedJsonBytes = 32700;
+
+    public static ModConfigSyncNetworkEvent Create(string senderUserId, byte senderIndex, ModConfigSyncSnapshot snapshot)
+    {
+        var json = JsonSerializer.Serialize(snapshot, ModNetworkJson.Options);
+        var byteLen = System.Text.Encoding.UTF8.GetByteCount(json);
+        if (byteLen > MaxSerializedJsonBytes)
+            throw new InvalidOperationException(
+                $"ModConfigSync snapshot JSON is {byteLen} bytes; exceeds Pratfall ByteBufferWriter limit of 32768. Split the snapshot or trim synced entries.");
+        return new ModConfigSyncNetworkEvent
+        {
+            SenderUserId = senderUserId,
+            SenderIndex = senderIndex,
+            SnapshotJson = json
+        };
+    }
+
+    public ModConfigSyncSnapshot ToSnapshot()
+    {
+        return JsonSerializer.Deserialize<ModConfigSyncSnapshot>(SnapshotJson, ModNetworkJson.Options)
+               ?? new ModConfigSyncSnapshot();
+    }
+
+    public void Serialize(ByteBufferWriter writer)
+    {
+        writer.Write(SenderUserId);
+        writer.Write(SenderIndex);
+        writer.Write(SnapshotJson);
+    }
+
+    public void Deserialize(ByteBufferReader reader)
+    {
+        SenderUserId = reader.ReadString("");
+        SenderIndex = reader.ReadByte();
+        SnapshotJson = reader.ReadString("{}");
+    }
+}

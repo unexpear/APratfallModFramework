@@ -50,6 +50,39 @@ public static class ModConfig
         }
     }
 
+    // Iterate every ConfigEntry across every mod that has Synced=true on its
+    // ConfigDescription. Used by ModManager to build the on-join CSync snapshot
+    // when this peer is the host.
+    public static IEnumerable<(string ModId, IConfigEntry Entry)> EnumerateSyncedEntries()
+    {
+        lock (_filesLock)
+        {
+            foreach (var (modId, file) in _files)
+            {
+                foreach (var entry in file.GetAllEntries())
+                {
+                    if (entry.Description?.Synced == true)
+                        yield return (modId, entry);
+                }
+            }
+        }
+    }
+
+    // Internal event fired from ConfigEntry<T>.SetInternal when a Synced entry's
+    // value changed via a normal setter (NOT from a host-sync apply). ModManager
+    // subscribes and broadcasts the delta if this peer is the host. Decoupled
+    // here so ModConfig doesn't depend on the network layer.
+    internal static event Action<string, string, string, object?>? OnSyncedValueChanged;
+
+    internal static void RaiseSyncedValueChanged(string modId, string section, string key, object? newValue)
+    {
+        try { OnSyncedValueChanged?.Invoke(modId, section, key, newValue); }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] ModConfig OnSyncedValueChanged handler threw for {modId}/[{section}].{key}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     // Filesystem-safe per-mod file basename. Same rule as elsewhere.
     internal static string Sanitize(string s)
     {
@@ -87,6 +120,13 @@ public static class ModConfig
 public sealed class ModConfigFile
 {
     private const int CurrentSchemaVersion = 1;
+
+    // Cloned from JsonSerializerOptions.Default so the TypeInfoResolver is
+    // populated — required when Godot's runtime has JsonSerializerIsReflection-
+    // EnabledByDefault=false (otherwise a fresh JsonSerializerOptions throws on
+    // first use: "must specify a TypeInfoResolver before being marked read-only").
+    private static readonly JsonSerializerOptions WriteOptions =
+        new(JsonSerializerOptions.Default) { WriteIndented = true };
 
     private readonly object _lock = new();
     private readonly string _modId;
@@ -252,8 +292,7 @@ public sealed class ModConfigFile
 
         try
         {
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            var json = _loadedJson.ToJsonString(options);
+            var json = _loadedJson.ToJsonString(WriteOptions);
             File.WriteAllText(_filePath, json, Encoding.UTF8);
         }
         catch (Exception ex)
@@ -297,11 +336,17 @@ public interface IConfigEntry
     void ResetToDefault();
 }
 
-// Internal-only — used by ModConfigFile.Reload to dispatch over entries
-// without knowing T. Kept off IConfigEntry so it doesn't leak as public API.
+// Internal-only — used by ModConfigFile.Reload and CSync receive to dispatch
+// over entries without knowing T. Kept off IConfigEntry so neither leaks as
+// public API.
 internal interface IConfigEntryInternal
 {
     void ReapplyFromFile();
+    // Set the value from a CSync host broadcast. Bypasses local file save
+    // (host is source of truth) and bypasses the OnSyncedValueChanged hook
+    // (so the peer doesn't echo the change back to the host). Still fires
+    // ConfigEntry<T>.OnChange so mod code reacts.
+    void SetFromHost(object? boxedValue);
 }
 
 public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
@@ -336,7 +381,9 @@ public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
     public void ResetToDefault() => Value = DefaultValue;
 
     // Internal setter used during initial load (persist: false) and from Reload.
-    internal void SetInternal(T newValue, bool persist, bool fireOnChange)
+    // fromSync=true bypasses the OnSyncedValueChanged broadcast hook (used when
+    // the value comes from a host-sync apply — we don't want to echo it back).
+    internal void SetInternal(T newValue, bool persist, bool fireOnChange, bool fromSync = false)
     {
         if (Description?.Constraint is IConstraint c && !c.IsValid(newValue!))
             throw new ArgumentOutOfRangeException(nameof(newValue),
@@ -346,7 +393,8 @@ public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
         _value = newValue;
         if (persist)
             _file.PersistValueAndSave(Section, Key, newValue);
-        if (fireOnChange && !EqualityComparer<T>.Default.Equals(old, newValue))
+        var actuallyChanged = !EqualityComparer<T>.Default.Equals(old, newValue);
+        if (fireOnChange && actuallyChanged)
         {
             try { OnChange?.Invoke(newValue); }
             catch (Exception ex)
@@ -355,6 +403,11 @@ public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
                             $"{ex.GetType().Name}: {ex.Message}");
             }
         }
+        // CSync broadcast hook — only fires for Synced entries when the change
+        // came from a normal setter (not from receiving a host sync). ModManager
+        // subscribes and broadcasts to peers if this peer is the host.
+        if (actuallyChanged && !fromSync && Description?.Synced == true)
+            ModConfig.RaiseSyncedValueChanged(_file.ModId, Section, Key, newValue);
     }
 
     // Called from ModConfigFile.Reload via IConfigEntryInternal — refresh value
@@ -367,6 +420,34 @@ public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
             SetInternal(fileValue, persist: false, fireOnChange: true);
         }
         // If file doesn't have the key, keep the current in-memory value.
+    }
+
+    // Called from ModManager when a CSync broadcast arrives. The value comes
+    // from the host's authoritative state; we apply it locally without
+    // persisting (host owns the value for the session) and without re-broadcasting
+    // (would create a cycle). The mod's OnChange handler still fires so reactive
+    // code reacts.
+    void IConfigEntryInternal.SetFromHost(object? boxedValue)
+    {
+        if (boxedValue is null && default(T) != null) return; // can't unbox null to value-type
+        T typed;
+        try { typed = (T)boxedValue!; }
+        catch (InvalidCastException)
+        {
+            GD.PrintErr($"[ModFramework] ModConfig SetFromHost: value type mismatch for {_file.ModId}/[{Section}].{Key} — expected {typeof(T).Name}, got {boxedValue?.GetType().Name}");
+            return;
+        }
+        try
+        {
+            SetInternal(typed, persist: false, fireOnChange: true, fromSync: true);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            // Host pushed a value that fails our constraint. Log + leave the
+            // local value unchanged; on next host re-send (rejoin) we'll
+            // converge again if the host fixed the value.
+            GD.PrintErr($"[ModFramework] ModConfig SetFromHost: constraint rejection for {_file.ModId}/[{Section}].{Key}: {ex.Message}");
+        }
     }
 
     // IConfigEntry implementation for UI iteration.

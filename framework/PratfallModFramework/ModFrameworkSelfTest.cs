@@ -850,6 +850,154 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Verifies ModConfig end-to-end:
+    //  - Bind round-trips through the JSON file
+    //  - Constraint enforcement on .Value setter
+    //  - OnChange fires on mutations
+    //  - Reload picks up file changes
+    //  - GetAllEntries discovery for the future UI
+    //  - Cleanup after itself
+    public static HelperTestResult RunConfigSystemTest()
+    {
+        var r = new HelperTestResult();
+        const string testModId = "SelfTestConfigSystem";
+        string? configFilePath = null;
+        try
+        {
+            var folder = ModConfig.ResolveConfigFolder();
+            if (folder != null)
+            {
+                configFilePath = Path.Combine(folder, $"{testModId}.json");
+                // Wipe any leftover from a previous run.
+                if (File.Exists(configFilePath)) File.Delete(configFilePath);
+                if (File.Exists(configFilePath + ".bad")) File.Delete(configFilePath + ".bad");
+            }
+
+            var cfg = ModConfig.For(testModId);
+            r.StepsPassed.Add("ModConfig.For returned a ModConfigFile");
+
+            var enabled = cfg.Bind("General", "Enabled", true);
+            var maxFlares = cfg.Bind("Combat", "MaxFlares", 3, new ConfigDescription
+            {
+                Tooltip = "How many flares to allow",
+                Constraint = new AcceptableValueRange<int>(1, 100)
+            });
+            var name = cfg.Bind("General", "Name", "default-name");
+            r.StepsPassed.Add("Bind() created 3 entries (bool / int with constraint / string)");
+
+            // Verify defaults are in place.
+            if (enabled.Value != true || maxFlares.Value != 3 || name.Value != "default-name")
+            {
+                r.ErrorMessage = "Default values not set correctly after Bind";
+                return r;
+            }
+            r.StepsPassed.Add("Default values match expected (true / 3 / \"default-name\")");
+
+            // OnChange handler — verify it fires on mutation.
+            int changeCount = 0;
+            int lastSeenValue = 0;
+            maxFlares.OnChange += v => { changeCount++; lastSeenValue = v; };
+
+            maxFlares.Value = 50;
+            if (changeCount != 1 || lastSeenValue != 50)
+            {
+                r.ErrorMessage = $"OnChange did not fire correctly (count={changeCount}, last={lastSeenValue})";
+                return r;
+            }
+            r.StepsPassed.Add("OnChange fired exactly once with new value 50");
+
+            // Constraint enforcement — setting out-of-range should throw.
+            bool threw = false;
+            try { maxFlares.Value = 9999; } catch (ArgumentOutOfRangeException) { threw = true; }
+            if (!threw)
+            {
+                r.ErrorMessage = "Constraint did not enforce (expected ArgumentOutOfRangeException for 9999)";
+                return r;
+            }
+            // Value should still be 50 (constraint rejected the bad value before it landed).
+            if (maxFlares.Value != 50)
+            {
+                r.ErrorMessage = $"Value changed despite constraint failure (now {maxFlares.Value})";
+                return r;
+            }
+            r.StepsPassed.Add("Constraint threw on out-of-range + value unchanged");
+
+            // File written?
+            if (configFilePath != null)
+            {
+                if (!File.Exists(configFilePath))
+                {
+                    r.ErrorMessage = $"Config file not written at {configFilePath}";
+                    return r;
+                }
+                var text = File.ReadAllText(configFilePath);
+                if (!text.Contains("\"MaxFlares\"") || !text.Contains("50"))
+                {
+                    r.ErrorMessage = $"Config file missing expected content. Body:\n{text}";
+                    return r;
+                }
+                r.StepsPassed.Add($"Config file written + contains expected fields ({new FileInfo(configFilePath).Length} bytes)");
+            }
+            else
+            {
+                r.StepsPassed.Add("Config folder not resolvable — verified API didn't throw");
+            }
+
+            // GetAllEntries discovery.
+            var all = cfg.GetAllEntries();
+            if (all.Count != 3)
+            {
+                r.ErrorMessage = $"GetAllEntries expected 3 entries, got {all.Count}";
+                return r;
+            }
+            r.StepsPassed.Add($"GetAllEntries returned 3 entries");
+
+            // Reload — verify file values override in-memory if changed externally.
+            if (configFilePath != null)
+            {
+                var text = File.ReadAllText(configFilePath);
+                text = text.Replace("\"MaxFlares\": 50", "\"MaxFlares\": 7");
+                File.WriteAllText(configFilePath, text);
+
+                int changesBeforeReload = changeCount;
+                cfg.Reload();
+                if (maxFlares.Value != 7)
+                {
+                    r.ErrorMessage = $"Reload did not pick up external file change (Value={maxFlares.Value}, expected 7)";
+                    return r;
+                }
+                if (changeCount != changesBeforeReload + 1)
+                {
+                    r.ErrorMessage = $"Reload did not fire OnChange (count {changeCount}, expected {changesBeforeReload + 1})";
+                    return r;
+                }
+                r.StepsPassed.Add("Reload picked up external file change + fired OnChange");
+            }
+
+            // ResetToDefault.
+            maxFlares.ResetToDefault();
+            if (maxFlares.Value != 3)
+            {
+                r.ErrorMessage = $"ResetToDefault didn't restore default (Value={maxFlares.Value})";
+                return r;
+            }
+            r.StepsPassed.Add("ResetToDefault restored default value");
+
+            // Cleanup.
+            try { if (configFilePath != null && File.Exists(configFilePath)) File.Delete(configFilePath); } catch { }
+            try { if (configFilePath != null && File.Exists(configFilePath + ".bad")) File.Delete(configFilePath + ".bad"); } catch { }
+            r.StepsPassed.Add("Cleaned up self-test config file");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

@@ -27,10 +27,11 @@ If you want a mod that works against just Pratfall + Tim's loader with no third-
 7. [Recipe: Listen to game events (`ModGameEventHelper`)](#recipe-gameevents)
 8. [Recipe: Show HUD button hints (`ModButtonPromptHelper`)](#recipe-buttonprompts)
 9. [Recipe: Extend a random drop pool (`ModDropPoolHelper`)](#recipe-droppools)
-10. [Recipe: Per-mod logs + crash reports (`ModLogger` / `ModCrashReporter`)](#recipe-logging--crash-reports)
-11. [Multiplayer manifest fields](#multiplayer-fields)
-12. [Pitfalls + framework-specific things to know](#pitfalls)
-13. [Resources](#resources)
+10. [Recipe: Settings (`ModConfig`)](#recipe-settings-modconfig)
+11. [Recipe: Per-mod logs + crash reports (`ModLogger` / `ModCrashReporter`)](#recipe-logging--crash-reports)
+12. [Multiplayer manifest fields](#multiplayer-fields)
+13. [Pitfalls + framework-specific things to know](#pitfalls)
+14. [Resources](#resources)
 
 ---
 
@@ -367,6 +368,100 @@ The helper handles:
 - Allocating a grown array, copying old entries, appending yours.
 - Removing exactly your entry on dispose (by reference identity).
 - Edge cases — empty pool, pool with the entry already removed by something else, etc.
+
+## Recipe: Settings (ModConfig)
+
+`ModConfig.For(modId)` returns a per-mod `ModConfigFile`. Call `Bind<T>(section, key, defaultValue, description?)` for each setting your mod exposes. The bound `ConfigEntry<T>` persists to `<userData>/modframework-config/<modid>.json`, fires `OnChange` events on mutation, and enforces optional `AcceptableValueRange<T>` / `AcceptableValueList<T>` constraints. Authors moving between framework ecosystems will recognize the API — it's modeled after BepInEx's `ConfigFile`.
+
+```csharp
+using PratfallModFramework;
+
+public static class MyMod
+{
+    private static ConfigEntry<int> _maxFlares = null!;
+    private static ConfigEntry<bool> _enabled = null!;
+
+    public static void OnLoad()
+    {
+        var cfg = ModConfig.For("MyMod");
+
+        _enabled = cfg.Bind("General", "Enabled", true, new ConfigDescription
+        {
+            Tooltip = "Master on/off switch for the mod"
+        });
+
+        _maxFlares = cfg.Bind("Combat", "MaxFlares", 3, new ConfigDescription
+        {
+            Tooltip = "How many flares the player can carry",
+            Constraint = new AcceptableValueRange<int>(1, 100)
+        });
+
+        // React to changes (player edits the JSON file or, in a future release, the
+        // in-game settings tab — both go through the same setter).
+        _maxFlares.OnChange += newMax =>
+            GD.Print($"[MyMod] MaxFlares changed to {newMax}");
+
+        // Read the current value any time:
+        if (_enabled.Value)
+            ApplyMaxFlares(_maxFlares.Value);
+    }
+
+    public static void OnUnload() { /* no per-entry teardown needed */ }
+}
+```
+
+### What's persistent vs in-memory
+
+- **Persistent**: The current `Value` of every bound entry, written to disk immediately on every setter.
+- **In-memory**: The `OnChange` handlers (re-subscribed in `OnLoad`), the `ConfigEntry<T>` references (rebound in `OnLoad` — same instance returned each time for the same `(section, key)`).
+
+### Type support
+
+`bool`, `int`, `long`, `float`, `double`, `string`, and any `enum`. Enums serialize as their string name (so `"Wood"` not `0`). Arrays / dictionaries / custom types are NOT supported in v1 — for that, use `ModSaveDataHelper`.
+
+### Constraints
+
+| Constraint | Used for | Behavior |
+|---|---|---|
+| `new AcceptableValueRange<int>(1, 100)` | Bounded numeric ranges | `.Value = 9999` throws `ArgumentOutOfRangeException` |
+| `new AcceptableValueList<string>("low", "medium", "high")` | Discrete allowed values | Any value not in the list throws |
+| _(no constraint)_ | Free-form values | No validation |
+
+Constraints are validated on every `Value` setter. If the value passes, it's persisted and `OnChange` fires.
+
+### File format
+
+```json
+{
+  "_schema_version": 1,
+  "General": {
+    "Enabled": true
+  },
+  "Combat": {
+    "MaxFlares": 50
+  }
+}
+```
+
+Users can hand-edit this file. If the JSON is malformed, the framework backs up the file as `<modid>.json.bad`, falls back to defaults, and logs the failure. If a key has the wrong type, the framework logs + uses the default for that one key.
+
+### Reload from disk
+
+If your mod has a "reload settings" button or you want to react to external edits:
+
+```csharp
+ModConfig.For("MyMod").Reload();
+// Every ConfigEntry with a changed file value fires OnChange.
+```
+
+### Discovery (for the future in-game settings editor)
+
+`ModConfig.GetAllEntries(modId)` returns the list of `IConfigEntry` instances bound for a mod. The framework reserves the right to use this for an in-game settings UI in a future release; mod authors generally won't need to call it.
+
+### What this does NOT do (yet)
+
+- **No in-game UI yet.** Players edit the JSON file directly until the Settings tab ships.
+- **No multiplayer sync yet.** `ConfigDescription.Synced = true` is reserved for a future host-pushes-to-clients (CSync) feature; today it's just metadata.
 
 ## Recipe: Logging + crash reports
 

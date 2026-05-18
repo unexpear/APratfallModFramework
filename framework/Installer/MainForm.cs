@@ -36,8 +36,8 @@ public class MainForm : Form
         // (controls overlapped, status/progress/log got pushed off-screen).
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
-        Size = new Size(700, 720);
-        MinimumSize = new Size(700, 720);
+        Size = new Size(700, 864);
+        MinimumSize = new Size(700, 864);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
@@ -51,7 +51,7 @@ public class MainForm : Form
         _headerPanel = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 130,
+            Height = 178,
             BackColor = Color.FromArgb(45, 45, 50),
             Padding = new Padding(24, 20, 24, 20)
         };
@@ -63,8 +63,8 @@ public class MainForm : Form
             RowCount = 2,
             BackColor = Color.Transparent
         };
-        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
 
         _titleLabel = new Label
         {
@@ -107,8 +107,8 @@ public class MainForm : Form
         };
         // Every row gets an extra ~1 inch (96px) of vertical room over the
         // bare-minimum so controls render with breathing space at any DPI.
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));     // path row (textbox + browse)
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));     // install/uninstall buttons
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));    // path row (textbox + browse)
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 128));    // install/uninstall buttons
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));     // status label
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));     // progress bar
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));    // log fills rest

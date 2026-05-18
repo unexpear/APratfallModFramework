@@ -28,6 +28,7 @@ public static class Bootstrap
                 _instance = new ModManager();
                 _instance.Initialize(tree);
                 GD.Print("[ModFramework] Framework initialized");
+                WriteLoadedSentinel();
                 ShowStartupStatus(tree, "Mod Framework", "Pratfall Mod Framework loaded successfully!", false);
             }
             catch (System.Exception ex)
@@ -48,7 +49,62 @@ public static class Bootstrap
         ModRuntime.MarkGodotRuntimeStopped();
         _instance = null;
         _initialized = 0;
+        RemoveLoadedSentinel();
         GD.Print("[ModFramework] Shutdown complete");
+    }
+
+    // Visual "did the framework load on this PC?" check for users — drops an empty
+    // read-only file at the top of the Pratfall install folder so you can compare
+    // two machines (or just glance at one) without checking godot.log. Double-
+    // underscore prefix sorts the file to the top of an alphabetized Explorer view.
+    // Failure is silent (e.g., game folder is on a write-protected drive).
+    private const string SentinelFileName = "__PRATFALL_MOD_FRAMEWORK_LOADED.txt";
+
+    private static void WriteLoadedSentinel()
+    {
+        try
+        {
+            var path = ResolveSentinelPath();
+            if (path == null) return;
+
+            // If file already exists from a previous run, clear read-only so we can overwrite it.
+            if (System.IO.File.Exists(path))
+            {
+                try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch { }
+            }
+            System.IO.File.WriteAllBytes(path, System.Array.Empty<byte>());
+            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.ReadOnly); } catch { }
+            GD.Print($"[ModFramework] Wrote loaded-sentinel at {path}");
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Could not write loaded-sentinel: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void RemoveLoadedSentinel()
+    {
+        try
+        {
+            var path = ResolveSentinelPath();
+            if (path == null || !System.IO.File.Exists(path)) return;
+            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch { }
+            System.IO.File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup. If the file persists across launches, the next
+            // WriteLoadedSentinel call will refresh its mtime.
+        }
+    }
+
+    private static string? ResolveSentinelPath()
+    {
+        var exe = Godot.OS.GetExecutablePath();
+        if (string.IsNullOrEmpty(exe)) return null;
+        var dir = System.IO.Path.GetDirectoryName(exe);
+        if (string.IsNullOrEmpty(dir)) return null;
+        return System.IO.Path.Combine(dir, SentinelFileName);
     }
 
     private static void ShowStartupStatus(SceneTree tree, string titleText, string bodyText, bool isError)

@@ -5,7 +5,7 @@ Runtime mod framework for [Pratfall](https://store.steampowered.com/app/4244510/
 ## Install (players)
 
 1. Quit Pratfall.
-2. Download `PratfallModFramework-Installer.zip` from the **Releases** section of this repo and unzip it anywhere.
+2. Download the latest `PratfallModFramework-Installer-vX.Y.zip` from the [**Releases**](https://github.com/unexpear/APratfallModFramework/releases/latest) page and unzip it anywhere.
 3. Run `PratfallModFramework.Installer.exe`. It auto-detects your Pratfall install via Steam.
 4. Click **Install**. The installer backs up `Pratfall.dll` to `Pratfall.dll.original` before patching, so it's fully reversible — click **Uninstall** any time, or run Steam Verify and Steam will restore the original automatically.
 5. Launch Pratfall. The native Pratfall **Mod** button (added in Pratfall 1.1.0.R2943) is hidden, and the framework's **Mods** button takes its slot.
@@ -22,7 +22,7 @@ A mod is enabled when you flip its toggle ON, click 🔍, or accept Download in 
 
 Two focused guides, pick the path that matches your distribution model:
 
-- **[MOD_AUTHORS_GUIDE_VANILLA.md](MOD_AUTHORS_GUIDE_VANILLA.md)** — for mods targeting **just Pratfall + Tim's official loader**, no framework dependency. Setup, the `ModEntry.ModInit`/`ModDestroy` lifecycle, recipes for Harmony patches / localization / save data / game events / button prompts / drop pools / custom Godot types, plus the full decoded Pratfall surface inventory (99 singletons, 12 events, native extension APIs, and the arrays you should NOT mutate) and pitfalls.
+- **[MOD_AUTHORS_GUIDE_VANILLA.md](MOD_AUTHORS_GUIDE_VANILLA.md)** — for mods targeting **just Pratfall + Tim's official loader**, no framework dependency. Setup, the `ModEntry.ModInit`/`ModDestroy` lifecycle, recipes for Harmony patches / localization / save data / game events / button prompts / drop pools / custom Godot types, plus the full Cecil-verified Pratfall surface inventory (73 singletons, 22 static helpers, 26 configs, 11 events, 56 network EventIds, 40 GameplayTags, 184 IComponent types, the arrays you should NOT mutate) and pitfalls.
 
 - **[MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md)** — for mods using **this framework's helpers**. Same recipe set but using the wrappers (`[ModPatch]`, `ModLocalizationHelper`, `ModSaveDataHelper`, `ModGameEventHelper`, `ModButtonPromptHelper`, `ModDropPoolHelper`) plus framework-specific manifest fields (multiplayer mode, requires/conflictsWith, assemblySha256 pinning) and behavior you should understand (the user-check gate, fingerprint re-locks on update).
 
@@ -148,7 +148,7 @@ It should not scan unrelated folders on the machine.
 
 ## Quick Start
 
-1. Download the latest `PratfallModFramework.Installer.exe` from Releases.
+1. Download the latest installer zip from the [Releases page](https://github.com/unexpear/APratfallModFramework/releases/latest), unzip it, and run `PratfallModFramework.Installer.exe` inside.
 2. Run it. It patches `Pratfall.dll` and copies framework files.
 3. Launch Pratfall from Steam.
 4. Place mods in `<Pratfall>\mods\<ModName>\`.

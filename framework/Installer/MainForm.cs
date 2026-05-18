@@ -30,10 +30,14 @@ public class MainForm : Form
     private void InitializeComponent()
     {
         Text = "Pratfall Mod Framework Installer";
-        // Resizable window. MinimumSize keeps the layout from collapsing below
-        // the original 560x480 footprint where buttons / log would overlap.
+        // Explicit DPI auto-scale so the layout looks the same at 100%, 125%,
+        // 150%, 200%. Without this, WinForms uses Font-based scaling and the
+        // absolute positions we used previously got mangled on high-DPI displays
+        // (controls overlapped, status/progress/log got pushed off-screen).
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         Size = new Size(560, 480);
-        MinimumSize = new Size(560, 480);
+        MinimumSize = new Size(560, 400);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
@@ -41,139 +45,201 @@ public class MainForm : Form
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 10);
 
+        // Header panel — fixed height, docked to top.
         _headerPanel = new Panel
         {
-            Location = new Point(0, 0),
-            Size = new Size(560, 80),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-            BackColor = Color.FromArgb(45, 45, 50)
+            Dock = DockStyle.Top,
+            Height = 70,
+            BackColor = Color.FromArgb(45, 45, 50),
+            Padding = new Padding(20, 10, 20, 10)
         };
+
+        var headerStack = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Color.Transparent
+        };
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         _titleLabel = new Label
         {
             Text = "Pratfall Mod Framework",
-            Location = new Point(20, 15),
-            Size = new Size(520, 28),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 16, FontStyle.Bold),
             ForeColor = Color.White,
-            BackColor = Color.Transparent
+            BackColor = Color.Transparent,
+            AutoSize = false
         };
 
         var subtitleLabel = new Label
         {
             Text = "One-click install. Fully reversible via Uninstall or Steam Verify.",
-            Location = new Point(20, 48),
-            Size = new Size(520, 20),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9),
             ForeColor = Color.FromArgb(180, 180, 190),
-            BackColor = Color.Transparent
+            BackColor = Color.Transparent,
+            AutoSize = false
         };
 
-        _headerPanel.Controls.Add(_titleLabel);
-        _headerPanel.Controls.Add(subtitleLabel);
+        headerStack.Controls.Add(_titleLabel, 0, 0);
+        headerStack.Controls.Add(subtitleLabel, 0, 1);
+        _headerPanel.Controls.Add(headerStack);
+
+        // Body — TableLayoutPanel with explicit row sizing so high-DPI scaling
+        // doesn't squash anything. Filling row (log box) takes remaining height.
+        var body = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(20, 15, 20, 15),
+            BackColor = Color.Transparent
+        };
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // path row
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // buttons row
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // status
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // progress
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));    // log fills rest
+
+        // Row 0 — path label + textbox + browse button.
+        var pathRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            Height = 30,
+            Margin = new Padding(0, 0, 0, 8),
+            BackColor = Color.Transparent
+        };
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         _gamePathLabel = new Label
         {
             Text = "Game Path:",
-            Location = new Point(20, 100),
-            Size = new Size(80, 24),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 6, 8, 0)
         };
 
         _gamePathBox = new TextBox
         {
-            Location = new Point(100, 98),
-            Size = new Size(340, 24),
-            // Stretch horizontally between the label and the Browse button.
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle,
-            ReadOnly = true
+            ReadOnly = true,
+            Margin = new Padding(0, 3, 8, 0)
         };
 
         _browseBtn = new Button
         {
             Text = "Browse...",
-            Location = new Point(450, 96),
-            Size = new Size(90, 28),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(80, 26),
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
+            FlatStyle = FlatStyle.Flat,
+            Margin = new Padding(0)
         };
         _browseBtn.Click += BrowseBtn_Click;
+
+        pathRow.Controls.Add(_gamePathLabel, 0, 0);
+        pathRow.Controls.Add(_gamePathBox, 1, 0);
+        pathRow.Controls.Add(_browseBtn, 2, 0);
+
+        // Row 1 — Install + Uninstall buttons (centered via a FlowLayoutPanel).
+        var buttonRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+            Margin = new Padding(0, 8, 0, 8),
+            BackColor = Color.Transparent
+        };
 
         _installBtn = new Button
         {
             Text = "Install",
-            Location = new Point(100, 140),
-            Size = new Size(160, 40),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(150, 36),
             BackColor = Color.FromArgb(0, 120, 215),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 11, FontStyle.Bold)
+            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Margin = new Padding(0, 0, 12, 0)
         };
         _installBtn.Click += InstallBtn_Click;
 
         _uninstallBtn = new Button
         {
             Text = "Uninstall",
-            Location = new Point(280, 140),
-            Size = new Size(160, 40),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(150, 36),
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.FromArgb(200, 200, 200),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 11)
+            Font = new Font("Segoe UI", 11),
+            Margin = new Padding(0)
         };
         _uninstallBtn.Click += UninstallBtn_Click;
 
+        buttonRow.Controls.Add(_installBtn);
+        buttonRow.Controls.Add(_uninstallBtn);
+
+        // Row 2 — status label.
         _statusLabel = new Label
         {
             Text = "Ready",
-            Location = new Point(20, 195),
-            Size = new Size(520, 20),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            Height = 20,
             Font = new Font("Segoe UI", 9, FontStyle.Italic),
-            ForeColor = Color.FromArgb(150, 150, 160)
+            ForeColor = Color.FromArgb(150, 150, 160),
+            Margin = new Padding(0, 4, 0, 4)
         };
 
+        // Row 3 — progress bar.
         _progressBar = new ProgressBar
         {
-            Location = new Point(20, 220),
-            Size = new Size(520, 20),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Dock = DockStyle.Fill,
+            Height = 18,
             Style = ProgressBarStyle.Continuous,
             ForeColor = Color.FromArgb(0, 120, 215),
-            BackColor = Color.FromArgb(50, 50, 55)
+            BackColor = Color.FromArgb(50, 50, 55),
+            Margin = new Padding(0, 0, 0, 8)
         };
 
+        // Row 4 — log box fills remaining vertical space.
         _logBox = new RichTextBox
         {
-            Location = new Point(20, 255),
-            Size = new Size(520, 175),
-            // Log area grows in both axes — primary beneficiary of a bigger window.
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
+            Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(20, 20, 22),
             ForeColor = Color.FromArgb(200, 200, 210),
             BorderStyle = BorderStyle.None,
             ReadOnly = true,
-            Font = new Font("Consolas", 9)
+            Font = new Font("Consolas", 9),
+            Margin = new Padding(0)
         };
 
+        body.Controls.Add(pathRow, 0, 0);
+        body.Controls.Add(buttonRow, 0, 1);
+        body.Controls.Add(_statusLabel, 0, 2);
+        body.Controls.Add(_progressBar, 0, 3);
+        body.Controls.Add(_logBox, 0, 4);
+
+        // Order matters: docked controls fill in reverse-Z order, so add Fill
+        // before Top to ensure the body sits below the header.
+        Controls.Add(body);
         Controls.Add(_headerPanel);
-        Controls.Add(_gamePathLabel);
-        Controls.Add(_gamePathBox);
-        Controls.Add(_browseBtn);
-        Controls.Add(_installBtn);
-        Controls.Add(_uninstallBtn);
-        Controls.Add(_statusLabel);
-        Controls.Add(_progressBar);
-        Controls.Add(_logBox);
     }
 
     private void AutoDetectGamePath()

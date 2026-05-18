@@ -45,13 +45,15 @@ public class MainForm : Form
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 10);
 
-        // Header panel — fixed height, docked to top.
+        // Header panel — fixed height, docked to top. Children use Absolute
+        // pixel heights (not AutoSize) because Dock=Fill labels in AutoSize
+        // rows collapse to a 1-pixel sliver.
         _headerPanel = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 70,
+            Height = 80,
             BackColor = Color.FromArgb(45, 45, 50),
-            Padding = new Padding(20, 10, 20, 10)
+            Padding = new Padding(20, 12, 20, 12)
         };
 
         var headerStack = new TableLayoutPanel
@@ -62,7 +64,7 @@ public class MainForm : Form
             BackColor = Color.Transparent
         };
         headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        headerStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        headerStack.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
 
         _titleLabel = new Label
         {
@@ -71,7 +73,9 @@ public class MainForm : Form
             Font = new Font("Segoe UI", 16, FontStyle.Bold),
             ForeColor = Color.White,
             BackColor = Color.Transparent,
-            AutoSize = false
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0)
         };
 
         var subtitleLabel = new Label
@@ -81,15 +85,18 @@ public class MainForm : Form
             Font = new Font("Segoe UI", 9),
             ForeColor = Color.FromArgb(180, 180, 190),
             BackColor = Color.Transparent,
-            AutoSize = false
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0)
         };
 
         headerStack.Controls.Add(_titleLabel, 0, 0);
         headerStack.Controls.Add(subtitleLabel, 0, 1);
         _headerPanel.Controls.Add(headerStack);
 
-        // Body — TableLayoutPanel with explicit row sizing so high-DPI scaling
-        // doesn't squash anything. Filling row (log box) takes remaining height.
+        // Body — TableLayoutPanel with Absolute pixel row heights so docked
+        // children render at their intended size. Only the log row uses
+        // Percent so it fills whatever space is left.
         var body = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -98,10 +105,10 @@ public class MainForm : Form
             Padding = new Padding(20, 15, 20, 15),
             BackColor = Color.Transparent
         };
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // path row
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // buttons row
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // status
-        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // progress
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));     // path row (textbox + browse)
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));     // install/uninstall buttons
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));     // status label
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));     // progress bar
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));    // log fills rest
 
         // Row 0 — path label + textbox + browse button.
@@ -110,20 +117,20 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 1,
-            Height = 30,
             Margin = new Padding(0, 0, 0, 8),
             BackColor = Color.Transparent
         };
-        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
 
         _gamePathLabel = new Label
         {
             Text = "Game Path:",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 6, 8, 0)
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0)
         };
 
         _gamePathBox = new TextBox
@@ -133,19 +140,17 @@ public class MainForm : Form
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle,
             ReadOnly = true,
-            Margin = new Padding(0, 3, 8, 0)
+            Margin = new Padding(0, 4, 8, 4)
         };
 
         _browseBtn = new Button
         {
             Text = "Browse...",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(80, 26),
+            Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Margin = new Padding(0)
+            Margin = new Padding(0, 2, 0, 2)
         };
         _browseBtn.Click += BrowseBtn_Click;
 
@@ -153,47 +158,45 @@ public class MainForm : Form
         pathRow.Controls.Add(_gamePathBox, 1, 0);
         pathRow.Controls.Add(_browseBtn, 2, 0);
 
-        // Row 1 — Install + Uninstall buttons (centered via a FlowLayoutPanel).
-        var buttonRow = new FlowLayoutPanel
+        // Row 1 — Install + Uninstall buttons in a nested 2-column TLP so they
+        // share the row width evenly and stay legible at any DPI.
+        var buttonRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            Anchor = AnchorStyles.Left | AnchorStyles.Right,
-            Margin = new Padding(0, 8, 0, 8),
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 4, 0, 4),
             BackColor = Color.Transparent
         };
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
 
         _installBtn = new Button
         {
             Text = "Install",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(150, 36),
+            Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(0, 120, 215),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Font = new Font("Segoe UI", 11, FontStyle.Bold),
-            Margin = new Padding(0, 0, 12, 0)
+            Margin = new Padding(0, 0, 8, 0)
         };
         _installBtn.Click += InstallBtn_Click;
 
         _uninstallBtn = new Button
         {
             Text = "Uninstall",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(150, 36),
+            Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(60, 60, 65),
             ForeColor = Color.FromArgb(200, 200, 200),
             FlatStyle = FlatStyle.Flat,
             Font = new Font("Segoe UI", 11),
-            Margin = new Padding(0)
+            Margin = new Padding(8, 0, 0, 0)
         };
         _uninstallBtn.Click += UninstallBtn_Click;
 
-        buttonRow.Controls.Add(_installBtn);
-        buttonRow.Controls.Add(_uninstallBtn);
+        buttonRow.Controls.Add(_installBtn, 0, 0);
+        buttonRow.Controls.Add(_uninstallBtn, 1, 0);
 
         // Row 2 — status label.
         _statusLabel = new Label
@@ -201,30 +204,31 @@ public class MainForm : Form
             Text = "Ready",
             Dock = DockStyle.Fill,
             AutoSize = false,
-            Height = 20,
+            TextAlign = ContentAlignment.MiddleLeft,
             Font = new Font("Segoe UI", 9, FontStyle.Italic),
             ForeColor = Color.FromArgb(150, 150, 160),
-            Margin = new Padding(0, 4, 0, 4)
+            Margin = new Padding(0)
         };
 
         // Row 3 — progress bar.
         _progressBar = new ProgressBar
         {
             Dock = DockStyle.Fill,
-            Height = 18,
             Style = ProgressBarStyle.Continuous,
             ForeColor = Color.FromArgb(0, 120, 215),
             BackColor = Color.FromArgb(50, 50, 55),
-            Margin = new Padding(0, 0, 0, 8)
+            Margin = new Padding(0, 2, 0, 6)
         };
 
-        // Row 4 — log box fills remaining vertical space.
+        // Row 4 — log box fills remaining vertical space. Slight border + lighter
+        // bg than form so the empty rectangle is visibly present (otherwise it
+        // blends into the form background and looks like there's nothing there).
         _logBox = new RichTextBox
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(20, 20, 22),
-            ForeColor = Color.FromArgb(200, 200, 210),
-            BorderStyle = BorderStyle.None,
+            BackColor = Color.FromArgb(38, 38, 42),
+            ForeColor = Color.FromArgb(220, 220, 230),
+            BorderStyle = BorderStyle.FixedSingle,
             ReadOnly = true,
             Font = new Font("Consolas", 9),
             Margin = new Padding(0)

@@ -20,9 +20,13 @@ public static partial class MainMenuIntegration
         if (_tree == null) return;
         var existing = _tree.Root.GetNodeOrNull("ModFrameworkDialogLayer");
         if (existing == null) return; // dialog not open — nothing to refresh
+        // Rename the closing layer BEFORE QueueFree. QueueFree defers actual
+        // deletion to end-of-frame, and CallDeferred runs at the same boundary,
+        // so without renaming there's a race window where OnModsButtonPressed's
+        // `existing != null` short-circuit would re-find the dying layer and
+        // toggle the dialog OFF instead of refreshing it.
+        existing.Name = "ModFrameworkDialogLayer_closing";
         existing.QueueFree();
-        // Defer the reopen by one frame so QueueFree completes before we
-        // re-add a layer with the same name.
         Callable.From(() => OnModsButtonPressed()).CallDeferred();
     }
 

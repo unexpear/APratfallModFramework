@@ -37,19 +37,23 @@ internal static class WorkshopSubscriber
         {
             _harmony = new Harmony("PratfallModFramework.WorkshopSubscriber");
             var target = AccessTools.Method(typeof(global::Steam), "SetupWorkshopCallbacks");
-            if (target == null)
+            if (target != null)
             {
-                // Fall back to direct subscribe if Pratfall changes the wrapper name.
-                // Steamworks SDK is initialized by Game.Setup which runs before our
-                // Initialize on most boots, so this is usually safe.
-                TrySubscribeDirect();
-                GD.Print("[ModFramework] WorkshopSubscriber: Steam.SetupWorkshopCallbacks not found; tried direct SteamUGC subscribe");
-                return;
+                var postfix = new HarmonyMethod(typeof(WorkshopSubscriber), nameof(SetupCallbacksPostfix));
+                _harmony.Patch(target, postfix: postfix);
+                GD.Print("[ModFramework] WorkshopSubscriber: hooked Steam.SetupWorkshopCallbacks postfix");
+            }
+            else
+            {
+                GD.Print("[ModFramework] WorkshopSubscriber: Steam.SetupWorkshopCallbacks not found — relying on direct SteamUGC subscribe only");
             }
 
-            var postfix = new HarmonyMethod(typeof(WorkshopSubscriber), nameof(SetupCallbacksPostfix));
-            _harmony.Patch(target, postfix: postfix);
-            GD.Print("[ModFramework] WorkshopSubscriber: hooked Steam.SetupWorkshopCallbacks — live Workshop subscribes will appear in the Mods dialog without a restart");
+            // ALSO subscribe immediately. Harmony postfixes don't fire retroactively,
+            // so if Pratfall already called Steam.SetupWorkshopCallbacks before our
+            // framework initialized, the postfix above never runs. TrySubscribeDirect
+            // is guarded by _ugcSubscribed so it's a no-op when the postfix also fires.
+            TrySubscribeDirect();
+            GD.Print("[ModFramework] WorkshopSubscriber: live Workshop subscribes will appear in the Mods dialog without a restart");
         }
         catch (System.Exception ex)
         {
@@ -82,13 +86,25 @@ internal static class WorkshopSubscriber
     {
         ulong workshopId = fileId.Value;
         GD.Print($"[ModFramework] Workshop item installed: appId={appId} fileId={workshopId} — rescanning sources");
+        // Facepunch.Steamworks dispatches OnItemInstalled from its callback pump,
+        // which may or may not be on Godot's main thread. ModManager mutates
+        // _localMods + several dictionaries; doing that off-thread could race
+        // with main-thread iteration. Marshal via Callable+CallDeferred so the
+        // re-scan + UI refresh always happen on the main thread.
         try
         {
-            ModManager.Instance?.NotifyWorkshopItemInstalled(workshopId);
+            Callable.From(() =>
+            {
+                try { ModManager.Instance?.NotifyWorkshopItemInstalled(workshopId); }
+                catch (System.Exception ex)
+                {
+                    GD.PrintErr($"[ModFramework] WorkshopSubscriber: ModManager.NotifyWorkshopItemInstalled threw: {ex.GetType().Name}: {ex.Message}");
+                }
+            }).CallDeferred();
         }
         catch (System.Exception ex)
         {
-            GD.PrintErr($"[ModFramework] WorkshopSubscriber: ModManager.NotifyWorkshopItemInstalled threw: {ex.GetType().Name}: {ex.Message}");
+            GD.PrintErr($"[ModFramework] WorkshopSubscriber: CallDeferred dispatch failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }

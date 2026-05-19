@@ -8,7 +8,7 @@ Runtime mod framework for [Pratfall](https://store.steampowered.com/app/4244510/
 2. Download the latest `PratfallModFramework-Installer-vX.Y.zip` from the [**Releases**](https://github.com/unexpear/APratfallModFramework/releases/latest) page and unzip it anywhere.
 3. Run `PratfallModFramework.Installer.exe`. It auto-detects your Pratfall install via Steam.
 4. Click **Install**. The installer backs up `Pratfall.dll` to `Pratfall.dll.original` before patching, so it's fully reversible — click **Uninstall** any time, or run Steam Verify and Steam will restore the original automatically.
-5. Launch Pratfall. The native Pratfall **Mod** button (added in Pratfall 1.1.0.R2943) is hidden, and the framework's **Mods** button takes its slot.
+5. Launch Pratfall. The native Pratfall **Mod** button (added 1.1.0.R2943, expanded with Steam Workshop in `1.1.0.R2973` on 2026-05-18) is hidden, and the framework's **Mods** button takes its slot.
 
 To install a mod: drop its folder into `%APPDATA%\Pratfall\mods\<modid>\` and it'll appear in the Mods dialog on next launch. Steam Workshop subscriptions also work — the framework discovers them automatically (at startup, and live mid-session when you subscribe from inside Pratfall).
 

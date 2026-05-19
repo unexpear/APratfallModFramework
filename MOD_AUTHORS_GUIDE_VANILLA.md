@@ -1,6 +1,6 @@
 # Pratfall Mod Author Guide — Vanilla
 
-This guide is for writing mods that target **just Pratfall and its official mod loader** (Tim's `ModManager`, shipped with the game in `1.1.0.R2943` and later). No third-party framework required.
+This guide is for writing mods that target **just Pratfall and its official mod loader** (Tim's `ModManager`, shipped with the game in `1.1.0.R2943` and later; updated `1.1.0.R2973` on 2026-05-18 with Steam Workshop support, a "very simple mod loader (main menu)" UI, and assorted multiplayer bug fixes — see Tim's [Workshop & Bugfixes patch notes](https://store.steampowered.com/news/app/4244510/view/663861845817296708)). No third-party framework required.
 
 If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers added by the Pratfall Mod Framework, see [MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md) instead. The two paths are interoperable — your mod can target the vanilla loader and still run on a player's machine that has the framework installed.
 
@@ -178,7 +178,7 @@ Pratfall reads these from its command line at startup:
 | Flag | Effect |
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
-| `--qh-skip-mods` | **Currently a no-op** despite the flag-reading code being present. `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")` per Cecil, but no code path in Pratfall 1.1.0.R2943 actually reads `ShouldLoadMods` — the getter is defined but unused. Probably intended for a future refactor; document here so debug users don't rely on it. |
+| `--qh-skip-mods` | **Currently a no-op** despite the flag-reading code being present. `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")` per Cecil (verified `1.1.0.R2973`), but no code path in Pratfall actually reads `ShouldLoadMods` — the getter is defined but unused. Probably intended for a future refactor; document here so debug users don't rely on it. |
 | `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder. Cecil-confirmed in `ModManager.CreateModDirectory`. **Useful for profile-based mod managers** (Thunderstore / r2modman) — see the [profile / mod-manager-compat note below](#profile--mod-manager-compat). |
 | `--qh-skip-preload` | Skips resource preloading on launch. Auto-skipped already when the GPU vendor contains "Intel" (workaround for an Intel preload bug); this flag forces-skips on any GPU. Cecil-confirmed in `Preloader.SkipPreload`. |
 | `--qh-disable-login` | Disables EOS (Epic Online Services) login at launch. Useful for dev iteration when you don't want Steam→EOS authentication to fire. |
@@ -253,7 +253,7 @@ If you genuinely need Harmony patches (transpilers, prefix-with-skip, advanced a
 
 ## Recipe: Add a language
 
-> **Current Pratfall release (1.1.0.R2943) gates this.** `LocalizationManager.LoadUserLocalizations` checks `Game.Config.AllowUserLocalization` first — and on the public release that flag is **false**, so the loader silently skips every user-installed locale regardless of filename or content. Wait for the dev to flip the flag, or load translations via `TranslationServer.AddTranslation` directly (advanced; bypasses the manager's bookkeeping). The recipe below is the *intended* path; verify on your target build before shipping by checking `Game.Config.AllowUserLocalization`.
+> **Current Pratfall release (verified `1.1.0.R2973`, 2026-05-18) gates this.** `LocalizationManager.LoadUserLocalizations` checks `Game.Config.AllowUserLocalization` first — and on the public release that flag is **false** (Cecil-verified: `GameConfig` constructor initializes it to `false`), so the loader silently skips every user-installed locale regardless of filename or content. Wait for the dev to flip the flag, or load translations via `TranslationServer.AddTranslation` directly (advanced; bypasses the manager's bookkeeping). The recipe below is the *intended* path; verify on your target build before shipping by checking `Game.Config.AllowUserLocalization`.
 
 Pratfall's `LocalizationManager` has native support for user-installed locales. It scans `<userData>/localization/*.json` (skipping any file whose name starts with `_`) and registers anything it finds in `AvailableLocales` — the same list the in-game language selector reads.
 
@@ -308,7 +308,7 @@ Gotchas:
 
 ### Workaround when the gate is closed
 
-On builds where `Game.Config.AllowUserLocalization` is **false** (including the current 1.1.0.R2943 release), the JSON-file path above is a no-op. To patch translations *into an existing locale* you can bypass `LocalizationManager` entirely and call Godot's `TranslationServer` directly:
+On builds where `Game.Config.AllowUserLocalization` is **false** (including the current `1.1.0.R2973` release), the JSON-file path above is a no-op. To patch translations *into an existing locale* you can bypass `LocalizationManager` entirely and call Godot's `TranslationServer` directly:
 
 ```csharp
 using Godot;
@@ -323,7 +323,7 @@ public static void ModInit()
 }
 ```
 
-**Today (build 1.1.0.R2943)** this works on every build regardless of the gate, but it has a hard limitation: you can only add or override translation keys inside locales the game already knows about. You can't add a brand-new *selectable* language because the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is populated only by the JSON-file path above. As a workaround for getting NEW keys into the active language reliably, Henrique's [PratfallLocalizationMod](https://github.com/HenriqueCamillo/PratfallLocalizationMod) listens to `NotificationTranslationChanged` and re-applies its `AddTranslation` calls after every locale change — works today, but a little fiddly.
+**Today (build `1.1.0.R2973`)** this works on every build regardless of the gate, but it has a hard limitation: you can only add or override translation keys inside locales the game already knows about. You can't add a brand-new *selectable* language because the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is populated only by the JSON-file path above. As a workaround for getting NEW keys into the active language reliably, Henrique's [PratfallLocalizationMod](https://github.com/HenriqueCamillo/PratfallLocalizationMod) listens to `NotificationTranslationChanged` and re-applies its `AddTranslation` calls after every locale change — works today, but a little fiddly.
 
 **Coming in the next Pratfall update** (per Tim in `#mod-dev`, 2026-05-18): the settings menu will rescan Godot's known languages every time it opens, and the launch-time language cache will be removed. After that ships, `TranslationServer.AddTranslation` becomes a first-class path for **adding new selectable languages too** — call it from `ModInit`, and the language shows up in the in-game selector. The JSON-file path will still work for authors who want their locale file alongside the mod folder; both paths will coexist. Re-check this section against the actual update notes when it lands.
 
@@ -777,7 +777,9 @@ Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(myAssembly);
 
 ## Decoded Pratfall surface inventory
 
-Audit of `Pratfall.dll` (2026-05-17 — Pratfall 1.1.0.R2943) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
+Audit of `Pratfall.dll` (2026-05-17 — Pratfall `1.1.0.R2943`) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
+
+**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager](#modmanager-pratfalls-native-mod-loader) section. The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) was not re-audited in full and may have small drift — re-Cecil before relying on a specific signature.
 
 This section is a **reference map**, not a tutorial. The goal: when you're mid-mod and you need to know "is there a manager for X?" or "what events fire when a player dies?", you should be able to find the answer here instead of disassembling `Pratfall.dll` yourself.
 
@@ -915,7 +917,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `InputSettingsHelper` — keybind/gamepad-mapping IO
 - `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
 - `LifecycleHelper` — lifecycle-handler registration helpers
-- **`ModManager`** — Pratfall's native mod loader. Public API: `ShouldLoadMods`, `ShouldHideModLoaderUi`, `EnableMod(modId)`, `DisableMod(modId)`, `LoadAssembly(...)`, etc. ([lifecycle recipe](#lifecycle))
+- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(Action onComplete)`, `LoadedMods` (List<ModManifest>), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mod folder — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (defined but currently unused per Cecil), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
 - `NetworkHelper` — common multiplayer helpers
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)

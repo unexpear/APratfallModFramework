@@ -204,7 +204,7 @@ Multiple patches per mod: declare multiple `[ModPatch]` types in your assembly. 
 
 ## Recipe: Localization
 
-> **Heads up on the current Pratfall release (1.1.0.R2943):** `LoadUserLocalizations` is gated by `Game.Config.AllowUserLocalization`, which is **false** on the shipped public build. The helper writes the file correctly and calls the loader, but the game silently refuses to actually load user locales until the dev flips the flag. The helper detects this case and prints a clear error to the console; your file is still on disk and will load automatically the moment the flag goes true.
+> **Heads up on the current Pratfall release (verified `1.1.0.R2973`, 2026-05-18):** `LoadUserLocalizations` is gated by `Game.Config.AllowUserLocalization`, which is **false** on the shipped public build (Cecil-verified: `GameConfig` constructor initializes the backing field to `false`). The helper writes the file correctly and calls the loader, but the game silently refuses to actually load user locales until the dev flips the flag. The helper detects this case and prints a clear error to the console; your file is still on disk and will load automatically the moment the flag goes true.
 
 `ModLocalizationHelper.Register` wraps `LocalizationManager.LoadUserLocalizations` — writes your translations to `<userData>/localization/<modId>_<locale>.json` with the right naming convention (Pratfall's loader skips files starting with `_` so the helper does NOT prefix one), triggers the rescan, and returns an `IDisposable` that cleans up the file on dispose.
 

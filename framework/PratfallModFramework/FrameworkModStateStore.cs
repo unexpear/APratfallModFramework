@@ -5,7 +5,12 @@ namespace PratfallModFramework;
 
 internal static class FrameworkModStateStore
 {
-    private const string StatePath = "user://modframework-state.json";
+    // Default path (single-install Steam launch). Profile-managed launches
+    // (--qh-mod-directory present) divert to <profile>/modframework-state.json
+    // via FrameworkProfile.ResolveStateFilePath so each r2modman / Thunderstore
+    // profile has independent framework state. The DefaultStatePath constant is
+    // kept for the legacy ReadPersistedState fallback only.
+    private const string DefaultStatePath = "user://modframework-state.json";
 
     public sealed class LoadedState
     {
@@ -43,7 +48,7 @@ internal static class FrameworkModStateStore
                 .ToList()
         };
 
-        var path = ProjectSettings.GlobalizePath(StatePath);
+        var path = FrameworkProfile.ResolveStateFilePath();
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(directory))
             Directory.CreateDirectory(directory);
@@ -53,9 +58,31 @@ internal static class FrameworkModStateStore
 
     private static LoadedState? TryLoadPersistedState()
     {
-        var path = ProjectSettings.GlobalizePath(StatePath);
+        var path = FrameworkProfile.ResolveStateFilePath();
         if (!File.Exists(path))
-            return null;
+        {
+            // Profile-managed launch but the profile is fresh? Fall back to
+            // reading the default user:// state once, so a player can switch
+            // to r2modman without losing their existing approvals on first
+            // run. The profile path will get its own write-on-save copy.
+            if (FrameworkProfile.IsActive)
+            {
+                var fallbackPath = ProjectSettings.GlobalizePath(DefaultStatePath);
+                if (File.Exists(fallbackPath))
+                {
+                    GD.Print($"[ModFramework] FrameworkModStateStore: profile state file missing; one-time read from default location for migration ({fallbackPath})");
+                    path = fallbackPath;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                return null;
+            }
+        }
 
         try
         {

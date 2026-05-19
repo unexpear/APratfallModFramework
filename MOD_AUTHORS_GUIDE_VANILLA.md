@@ -197,6 +197,10 @@ Pratfall's official loader reads `enabled_mods.json` from whatever folder `--qh-
 
 To pass these via Steam: right-click Pratfall → Properties → Launch options → add the flag.
 
+**Heads-up on the launch-args confirmation dialog.** Pre-2026-05-18 builds popped a "Launch Game with custom arguments — Continue / Cancel" dialog on every `--qh-*` launch, which would have made profile-switching painful. **Tim fixed this** in the 2026-05-18 Workshop update; profile-based managers launching via Steam now work without per-launch friction. A separate "launching from the executable" issue Tim flagged is being fixed in a later patch but doesn't affect Steam launches (which is r2modman's path anyway, per Ebkr).
+
+**If you're running Pratfall Mod Framework alongside r2modman**, the framework also honors `--qh-mod-directory`: scans that folder for mods AND writes its own state file (`modframework-state.json` — enabled mods + approved fingerprints) into that folder, so each r2modman profile has independent framework state. Mods dropped as `.zip` files into the profile folder are auto-extracted on framework startup (zip-slip-safe via .NET's `ZipFile.ExtractToDirectory`). One-time migration: on first launch under a new profile, the framework reads the default `user://modframework-state.json` once as a fallback so you don't lose your existing approvals.
+
 ## Recipe: Harmony patches
 
 **Heads up — Pratfall does not ship HarmonyLib.** Vanilla mods that want Harmony-style method patches have to bring their own. The two practical options:

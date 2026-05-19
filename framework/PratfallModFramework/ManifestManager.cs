@@ -12,21 +12,40 @@ public static class ManifestManager
     {
         var allMods = new Dictionary<string, ModManifest>();
 
-        // Path 1: user://mods/ — manually installed by player
+        // Path 0: extract any .zip files dropped into our scan roots before
+        // discovery runs (Thunderstore-style + manual zip drops).
+        ModZipDropInstaller.ExtractAll();
+
+        // Path 1: --qh-mod-directory profile path (r2modman / Thunderstore).
+        // Scanned FIRST so profile-installed mods take precedence over any
+        // collisions with default locations — matches the user's expectation
+        // that "this profile's version of mod X is the one that loads".
+        var profilePath = FrameworkProfile.ProfileModsDirectory;
+        if (!string.IsNullOrEmpty(profilePath) && System.IO.Directory.Exists(profilePath))
+            ScanOsDirectory(profilePath, allMods);
+
+        // Path 2: user://mods/ — manually installed by player
         ScanDirectory("user://mods/", allMods);
 
-        // Path 2: game install directory's mods/ folder (next to Pratfall.exe)
-        var gameDir = System.IO.Path.GetDirectoryName(OS.GetExecutablePath());
-        if (gameDir != null)
+        // Path 3: game install directory's mods/ folder (next to Pratfall.exe).
+        // Skipped when a profile is active — r2modman manages its own folder,
+        // and double-scanning the default path would defeat profile isolation.
+        if (!FrameworkProfile.IsActive)
         {
-            var gameModsDir = System.IO.Path.Combine(gameDir, "mods");
-            if (System.IO.Directory.Exists(gameModsDir))
-                ScanOsDirectory(gameModsDir, allMods);
+            var gameDir = System.IO.Path.GetDirectoryName(OS.GetExecutablePath());
+            if (gameDir != null)
+            {
+                var gameModsDir = System.IO.Path.Combine(gameDir, "mods");
+                if (System.IO.Directory.Exists(gameModsDir))
+                    ScanOsDirectory(gameModsDir, allMods);
+            }
         }
 
-        // Path 3: Steam Workshop content — discovered Workshop-subscribed mods.
+        // Path 4: Steam Workshop content — discovered Workshop-subscribed mods.
         // Replaces what Pratfall's native ModManager used to do for us (which
         // we've turned off as of 2026-05-18 — see OfficialModBridge.cs).
+        // Always scanned, even under a profile — Workshop subscriptions are
+        // global to the Steam account, not per-profile.
         ScanWorkshopMods(allMods);
 
         return allMods.Values.ToList();

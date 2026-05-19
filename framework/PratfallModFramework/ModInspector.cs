@@ -36,6 +36,10 @@ public static class ModInspector
         public string PckFile = "";
         public IReadOnlyList<string> Requires = Array.Empty<string>();
         public IReadOnlyList<string> ConflictsWith = Array.Empty<string>();
+        // Source-of-install info — Workshop-discovered mods get a badge in the
+        // mod inspector + can be linked back to their Steam Workshop item.
+        public bool IsSteamWorkshopMod;
+        public ulong WorkshopId;
     }
 
     public sealed class FileEntry
@@ -71,6 +75,8 @@ public static class ModInspector
                 PckFile = manifest.PckFile ?? "",
                 Requires = manifest.Multiplayer.Requires.ToList(),
                 ConflictsWith = manifest.Multiplayer.ConflictsWith.ToList(),
+                IsSteamWorkshopMod = manifest.IsSteamWorkshopMod,
+                WorkshopId = manifest.WorkshopId,
             },
         };
 

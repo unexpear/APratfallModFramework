@@ -4,6 +4,10 @@ namespace PratfallModFramework;
 
 public static class ManifestManager
 {
+    // Pratfall's Steam app ID — used to locate workshop content under
+    // <steam>/steamapps/workshop/content/<appid>/<workshopid>/.
+    private const string PratfallSteamAppId = "4244510";
+
     public static List<ModManifest> ScanLocalMods()
     {
         var allMods = new Dictionary<string, ModManifest>();
@@ -20,7 +24,115 @@ public static class ManifestManager
                 ScanOsDirectory(gameModsDir, allMods);
         }
 
+        // Path 3: Steam Workshop content — discovered Workshop-subscribed mods.
+        // Replaces what Pratfall's native ModManager used to do for us (which
+        // we've turned off as of 2026-05-18 — see OfficialModBridge.cs).
+        ScanWorkshopMods(allMods);
+
         return allMods.Values.ToList();
+    }
+
+    // Locate every Steam library folder, look for
+    // steamapps/workshop/content/4244510/<workshopid>/manifest.json, and treat
+    // each Workshop subscription as a mod. Marks manifests with
+    // IsSteamWorkshopMod=true and WorkshopId=<folder-name> so the rest of the
+    // framework (settings UI, mod inspector, crash reports) can distinguish
+    // Workshop from local mods.
+    private static void ScanWorkshopMods(Dictionary<string, ModManifest> allMods)
+    {
+        foreach (var libraryFolder in EnumerateSteamLibraryFolders())
+        {
+            var workshopRoot = System.IO.Path.Combine(libraryFolder, "steamapps", "workshop", "content", PratfallSteamAppId);
+            if (!System.IO.Directory.Exists(workshopRoot)) continue;
+
+            foreach (var subDir in System.IO.Directory.GetDirectories(workshopRoot))
+            {
+                var manifestPath = System.IO.Path.Combine(subDir, "manifest.json");
+                if (!System.IO.File.Exists(manifestPath)) continue;
+
+                try
+                {
+                    var json = System.IO.File.ReadAllText(manifestPath);
+                    var folderName = System.IO.Path.GetFileName(subDir);
+                    var manifest = ModManifest.FromJson(
+                        json,
+                        directoryName: folderName,
+                        directoryPath: subDir);
+
+                    // Tag as Workshop. Workshop folders are named after the
+                    // published-file ID — parse to ulong for the WorkshopId
+                    // field (silently leave 0 if folder name isn't numeric, which
+                    // shouldn't happen for real Steam Workshop downloads).
+                    manifest.IsSteamWorkshopMod = true;
+                    if (ulong.TryParse(folderName, out var wsid))
+                        manifest.WorkshopId = wsid;
+
+                    // First Workshop entry wins for a given mod ID; locally-
+                    // installed entries take precedence (they were added in
+                    // earlier passes).
+                    if (!allMods.ContainsKey(manifest.Id))
+                        allMods[manifest.Id] = manifest;
+                }
+                catch (System.Exception e)
+                {
+                    GD.PrintErr($"[ModFramework] Failed to parse Workshop manifest at {manifestPath}: {e.Message}");
+                }
+            }
+        }
+    }
+
+    // Find every Steam library folder on disk by reading
+    // <steam>/steamapps/libraryfolders.vdf. Returns absolute paths to the
+    // library roots (the folders that *contain* steamapps/, not steamapps/
+    // itself). Falls back to the canonical Program Files (x86) Steam path if
+    // the registry lookup fails — covers single-library default installs.
+    private static IEnumerable<string> EnumerateSteamLibraryFolders()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        string? steamPath = null;
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam");
+                steamPath = key?.GetValue("SteamPath") as string;
+            }
+            catch { /* registry unavailable — fall through */ }
+        }
+
+        if (!string.IsNullOrEmpty(steamPath) && seen.Add(steamPath))
+            yield return steamPath;
+
+        // Read libraryfolders.vdf to find non-default library locations
+        // (custom drives, e.g. D:\SteamLibrary).
+        var vdfPath = string.IsNullOrEmpty(steamPath)
+            ? null
+            : System.IO.Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
+        if (vdfPath != null && System.IO.File.Exists(vdfPath))
+        {
+            string[]? lines = null;
+            try { lines = System.IO.File.ReadAllLines(vdfPath); }
+            catch (System.Exception e) { GD.PrintErr($"[ModFramework] Failed to read {vdfPath}: {e.Message}"); }
+
+            if (lines != null)
+            {
+                // libraryfolders.vdf has a simple key/value structure; library paths
+                // appear on lines like:   "path"   "D:\\SteamLibrary"
+                var rx = new System.Text.RegularExpressions.Regex("\"path\"\\s*\"([^\"]+)\"");
+                foreach (var line in lines)
+                {
+                    var m = rx.Match(line);
+                    if (m.Success)
+                    {
+                        // VDF escapes backslashes as \\ — unescape to a real path.
+                        var libPath = m.Groups[1].Value.Replace("\\\\", "\\");
+                        if (System.IO.Directory.Exists(libPath) && seen.Add(libPath))
+                            yield return libPath;
+                    }
+                }
+            }
+        }
     }
 
     private static void ScanOsDirectory(string dirPath, Dictionary<string, ModManifest> allMods)

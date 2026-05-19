@@ -28,6 +28,15 @@ public class ModManifest
     public string DirectoryPath { get; set; } = "";
     public string DirectoryName { get; set; } = "";
     public string LoadPolicy { get; set; } = ModLoadPolicies.Auto;
+    // True when this manifest was discovered under a Steam Workshop content folder
+    // (steamapps/workshop/content/4244510/<id>/). The framework scans Workshop
+    // mods alongside local mods so per-mod features (logs, configs, settings UI,
+    // crash reports) work identically.
+    public bool IsSteamWorkshopMod { get; set; }
+    // Steam Workshop published-file ID. 0 for non-Workshop mods. When set, the
+    // framework can map back to the Steam item (e.g. to show a "browse on
+    // Workshop" link in the Mods dialog, or to detect when the user unsubscribes).
+    public ulong WorkshopId { get; set; }
     public ModEffects Effects { get; set; } = new();
     public ModMultiplayer Multiplayer { get; set; } = new();
 

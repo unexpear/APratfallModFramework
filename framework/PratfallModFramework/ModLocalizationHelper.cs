@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Godot;
+using HarmonyLib;
 
 namespace PratfallModFramework;
 
@@ -48,6 +49,71 @@ namespace PratfallModFramework;
 //   }
 public static class ModLocalizationHelper
 {
+    // ------------------------------------------------------------
+    //  ForceEnableUserLocales — opt-in unlock for user-locale loading
+    // ------------------------------------------------------------
+    // On shipped Pratfall builds (verified `1.1.0.R2973`, 2026-05-18) the
+    // game gates user-locale loading behind `Game.Config.AllowUserLocalization`,
+    // which `GameEntry._Ready` explicitly sets to false at startup (Cecil
+    // instructions: ldc.i4.0 + call set_AllowUserLocalization). So even though
+    // LoadUserLocalizations exists and the file-naming convention is documented,
+    // user locale .json files are silently skipped on the public release.
+    //
+    // Calling ForceEnableUserLocales() installs a Harmony prefix on the
+    // GameConfig.AllowUserLocalization getter that always returns true,
+    // unlocking the loader. Use this if your mod ships new-language locale
+    // files and you've accepted the trade-off: Tim hasn't blessed the user-
+    // locale UX yet (file format / locale-name collision rules / mod-override
+    // priority are all undecided), so the experience may shift when he flips
+    // the flag officially.
+    //
+    // Idempotent — calling more than once is a no-op. The patch persists for
+    // the process lifetime; there is intentionally no uninstall (mods that
+    // call this take responsibility for the lobby-wide consequences of new
+    // locales appearing in the language picker).
+    //
+    // Today (R2973) the workaround for "patch existing locale" cases is to
+    // call TranslationServer.AddTranslation directly; that works without this
+    // patch. ForceEnableUserLocales is for the "add a brand-new selectable
+    // language" case, which TranslationServer alone CAN'T solve (the picker
+    // reads from LocalizationManager.AvailableLocales, populated only when the
+    // gated JSON-file path runs).
+    public static void ForceEnableUserLocales()
+    {
+        if (_forceEnableApplied) return;
+
+        try
+        {
+            var getter = AccessTools.PropertyGetter(typeof(global::GameConfig), "AllowUserLocalization");
+            if (getter == null)
+            {
+                GD.PrintErr("[ModFramework] ModLocalizationHelper.ForceEnableUserLocales: GameConfig.AllowUserLocalization getter not found — Pratfall version may have renamed the property.");
+                return;
+            }
+
+            var harmony = new Harmony("PratfallModFramework.ForceEnableUserLocales");
+            harmony.Patch(getter, prefix: new HarmonyMethod(typeof(ModLocalizationHelper), nameof(AllowUserLocalizationPrefix)));
+            _forceEnableApplied = true;
+            GD.Print("[ModFramework] ModLocalizationHelper: ForceEnableUserLocales is ON — Game.Config.AllowUserLocalization now reports true regardless of GameEntry._Ready's setting. User-installed locales will be loaded.");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] ModLocalizationHelper.ForceEnableUserLocales failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    public static bool IsForceEnableUserLocalesActive => _forceEnableApplied;
+
+    private static bool _forceEnableApplied;
+
+    private static bool AllowUserLocalizationPrefix(ref bool __result)
+    {
+        __result = true;
+        return false; // skip original
+    }
+
+    // ------------------------------------------------------------
+
     // Registers a locale by writing `_<modId>_<localeCode>.json` into the game's
     // user-locale folder and calling LoadUserLocalizations to refresh AvailableLocales.
     // The mod's JSON shape is "key": "translated value" — same as Pratfall's own.

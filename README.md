@@ -10,7 +10,7 @@ Runtime mod framework for [Pratfall](https://store.steampowered.com/app/4244510/
 4. Click **Install**. The installer backs up `Pratfall.dll` to `Pratfall.dll.original` before patching, so it's fully reversible — click **Uninstall** any time, or run Steam Verify and Steam will restore the original automatically.
 5. Launch Pratfall. The native Pratfall **Mod** button (added in Pratfall 1.1.0.R2943) is hidden, and the framework's **Mods** button takes its slot.
 
-To install a mod, drop its folder into `%APPDATA%\Pratfall\mods\<modid>\` (or wait for the Steam Workshop integration). It'll appear in the Mods dialog on next launch.
+To install a mod: drop its folder into `%APPDATA%\Pratfall\mods\<modid>\` and it'll appear in the Mods dialog on next launch. Steam Workshop subscriptions also work — the framework discovers them automatically (at startup, and live mid-session when you subscribe from inside Pratfall).
 
 **v1.1: Mods stay disabled until you check them.** Each mod card has two icons next to its toggle:
 - **ℹ Info** — opens the read-only manifest / file list / declared patches viewer.
@@ -76,8 +76,8 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 ### Known limitations / waiting items
 
 - **No real multiplayer test yet.** All transfer / vote / member-join behavior is verified by solo loopback or debug peer, never by two real Steam clients. Audit cleared the wire format against `Pratfall.ByteBufferWriter`'s 32 KB cap (chunks sized to 14 KB raw → ~20 KB JSON envelope).
-- **`ModManager.EnableMod` returns false on second call within a session after `DisableMod`.** Confirmed game-side issue; Tim is shipping a fix that wraps the second call in try/catch. Workaround: restart Pratfall before re-enabling. The `tmp/stress-mods/` `StressHashGuardMod` and conflict-resolution flow surface this if exercised.
-- **Workshop integration is stubbed.** `WorkshopHook.NotifyItemInstalled(folder, publishedFileId)` is a public entry point waiting for Tim to wire Steam's `OnItemInstalled` callback to it. When invoked, the framework rescans `user://mods/` and surfaces the new mod in the dialog.
+- (was: `ModManager.EnableMod` second-call returns false — *no longer relevant*. The 2026-05-18 Pratfall update + framework turn-off means we no longer call the native `ModManager.EnableMod` at all; our own loader pipeline handles enable/disable. The native bug Tim was going to fix doesn't affect us anymore.)
+- (was: Workshop integration is stubbed — *now shipped*. `WorkshopSubscriber` hooks `Steamworks.SteamUGC.OnItemInstalled` directly. Subscriptions at startup are discovered by `ManifestManager.ScanWorkshopMods` walking every Steam library; live subscribes mid-session fire the SteamUGC event → framework rescans → new mod appears in the Mods dialog without a restart. User still has to click 🔍 to approve before it loads.)
 - (was: PCK side-file transfer not implemented — *now shipped*. The host sends both `<modId>.dll` and `<modId>.pck` (when the manifest declares `pckFile`), and the receiver also writes `manifest.json` next to them from the cached peer snapshot, so the rescan finds the mod end-to-end. v1.1: PCK bytes now contribute to the user-approval fingerprint, and the receive flow waits for both files before marking-checked + enabling.)
 - **Stretch end-to-end** still needs a real multiplayer lobby to verify; the apply path is implemented and unit-clean.
 - (was: Optional malware scan before first enable — *now shipped in v1.1* as the **🔍 IL safety scanner**. Mono.Cecil walks the mod's DLL statically and reports calls to dangerous APIs — Process.Start, raw sockets, HttpClient, Registry, Reflection.Emit, P/Invoke, file deletion, environment probes. Findings show severity (Danger/Warning/Note), the API called, and the call-site method. Running 🔍 also marks the mod's fingerprint as user-checked, releasing the v1.1 user-check gate.)
@@ -85,7 +85,7 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 ### Resolved with the dev (Tim, Robert)
 
 - **Network event IDs `62000-62005`** — confirmed safe forever (game counts up from low numbers, never approaches that range).
-- **Bubble approach blessed.** Per Tim: *"its not meant as a replacement for custom mod loader. its just a way to have an easy way to sideload code/packages."* The framework owns the policy layer; the official loader is the execution layer for official-style mods. Current full-stall of `enabled_mods.json` startup is acceptable long-term.
+- **Custom-loader approach blessed (replaces the earlier bubble approach).** The 2026-05-18 Pratfall update added Steam Workshop + extensive ModManager restructuring; Tim's accompanying Discord note was *"update with the fixes for modding is live so it should be easy to add a custom mod loader."* The framework now Harmony-patches `ModManager.LoadAllModManifests` to skip native discovery entirely and runs its own pipeline (scan + load + lifecycle + Workshop discovery). The earlier "bubble around `enabled_mods.json`" architecture was retired — it depended on private internals that got renamed/privatized in the update.
 - **`RegisterCustomType` for runtime Godot Node registration** — withdrawn, not realistic. Robert's recommended pattern is to load `RandomWeightedDropPool` resources and add to the array directly. `ModDropPoolHelper.Register(poolPath, scene, weight)` and `RegisterIn(pool, scene, weight)` implement that pattern with proper unregister-on-unload.
 - **Analytics suppression for mod exceptions** (Robert's request) — `ModExceptionFilter` is in place and active.
 
@@ -93,58 +93,44 @@ The Release build artifacts land in `framework/Installer/bin/Release/net8.0-wind
 
 [`sample-mods/HelloWorldMod/`](sample-mods/HelloWorldMod/README.md) — minimal DLL mod with `OnLoad`/`OnUnload` and a build target that copies output into `%APPDATA%\Pratfall\mods\HelloWorldMod\`.
 
-## Official Loader Direction
+## Native ModManager Relationship
 
-Pratfall now ships an early built-in mod loader that:
+As of 2026-05-18, the framework **turns off Pratfall's native ModManager** and runs as the sole mod loader. The earlier "bubble around `enabled_mods.json`" approach was retired when Tim's Workshop + modding-fixes update privatized methods we depended on (`GetModManifest` → `GetModManifestFromDirectory`, made private) and Tim explicitly invited custom mod loaders.
 
-- creates `<game>/mods`
-- stores enabled startup mods in `enabled_mods.json`
-- reads a simple manifest with fields such as:
-  - `Name`
-  - `Version`
-  - `Description`
-  - `Author`
-  - `PackageName`
-  - `Assembly`
-- loads `ModEntry.ModInit()`
-- loads a `.pck`
-- instantiates `res://<mod-folder>/root.tscn`
+What the framework does to the native ModManager:
 
-The framework is not planning to compete with that startup path directly.
-The current implementation is a **bubble** around `enabled_mods.json`:
+- Harmony-prefixes `ModManager.LoadAllModManifests(Action onComplete)` to skip native discovery + auto-load. Still invokes `onComplete` so dependent game code doesn't hang.
+- Harmony-prefixes `ModManager.ReadLoadedModsFromFile` to return empty (defense-in-depth against anything else still calling it).
+- Harmony-prefixes `ModManager.WriteLoadedModsToFile` to no-op.
+- Lets `Steam.SetupWorkshopCallbacks` and `CreateModDirectory` run normally (those are infrastructure setup we want).
 
-- the framework owns canonical desired mod state
-- canonical desired state is stored in:
-  - `user://modframework-state.json`
-- the game loader sees an empty startup list during its first `ReadLoadedModsFromFile()` pass
-- the game loader remains the execution layer for official-style mods
-- the framework remains the policy layer for:
-  - menu toggles
-  - delayed load/apply timing
-  - multiplayer compare/vote/reconcile
+What the framework does **for** the native ModManager (state Pratfall still reads):
 
-Current first-pass behavior:
+- Harmony-prefixes `ModManager.get_EnabledModCount` to return our framework's enabled count. `SpeedrunManager.SubmitTimeToLeaderboard` reads this to gate leaderboard submissions (anti-cheat); without the bridge, modded runs would slip through with `count=0`. `GameOverUIController.Show` also reads it for display.
+- Harmony-prefixes `ModManager.get_ShouldHideModLoaderUi` to always return true so Pratfall's native ModButton in the main menu is hidden (the framework's Mods button replaces it).
 
-- official-style mods are discovered and shown in the framework menu
-- toggling an official-style mod updates desired state immediately, but does not auto-start it
-- the `Load Enabled Mods` button applies pending official-style mods through the game's own `EnableMod()`
-- pressing `Host Game` or `Play Offline` also applies pending desired state first
-- the game's own `WriteLoadedModsToFile()` is no-op'ed inside the bubble so it does not overwrite framework policy
+What the framework does for mod discovery (entirely on our own):
 
-Current state:
+- Scans `user://mods/` and `<game>/mods/` for `manifest.json` files.
+- Scans every Steam library folder (registry + `libraryfolders.vdf`) under `steamapps/workshop/content/4244510/<workshopid>/` for Workshop mods. Tags each with `IsSteamWorkshopMod=true` + parsed `WorkshopId`.
+- Subscribes to `Steamworks.SteamUGC.OnItemInstalled` (via a Harmony postfix on `Steam.SetupWorkshopCallbacks` + a direct subscribe in case the postfix never fires) so newly-subscribed Workshop mods appear in the Mods dialog without a game restart.
 
-- smoke-tested in-game with Tim's `example_mod`. Toggling on + Load Enabled Mods causes the game's `ModEntry.ModInit()` to run (verified via `Mod initialized!` in `godot.log`). Pre-session apply via `Host Game` / `Play Offline` also runs the init.
-- known same-session limitation: re-enabling an official-style mod after disabling it returns false from the game's `ModManager.EnableMod`. Tim is fixing this game-side by wrapping in try/catch. Until that ships, the workaround is to restart Pratfall before re-enabling.
+Manifest schema acceptance:
 
-Discovery scope for that bubble is intentionally limited. The framework should only scan Pratfall-relevant roots such as:
+- **Framework schema** (`id`, `name`, `version`, `type`, `effects`, `multiplayer`, etc.) — full feature set.
+- **Pratfall native schema** (`Name`, `Assembly`, `PackageName`, `AutoLoad`, `AddAssemblyToGodot`) — parsed identically; the framework synthesizes a missing `id` from `Name` / folder name. Workshop mods typically ship this schema.
+- `AutoLoad: true` is **deliberately ignored** by the framework — every mod stays disabled until the user explicitly enables + 🔍 approves. The user-check gate is the framework's only defense against unreviewed code execution; auto-load would bypass it.
 
-- the Pratfall install folder
-- the game's `mods/` folder
-- `user://mods`
-- Pratfall-owned Steam/user data
+Canonical desired-state remains stored in `<userData>/modframework-state.json` (enabled mod IDs + approved fingerprints). The native `enabled_mods.json` is read once on first state-load as a back-compat migration path; otherwise ignored.
+
+Discovery scope is intentionally limited to Pratfall-relevant roots:
+
+- the Pratfall install folder's `mods/`
+- `user://mods/` (Godot user-data → `%APPDATA%\Pratfall\mods\`)
+- Steam library `steamapps/workshop/content/4244510/` folders
 - optional explicitly configured Pratfall profile roots
 
-It should not scan unrelated folders on the machine.
+The framework never scans unrelated folders on the machine.
 
 ## Quick Start
 
@@ -235,7 +221,7 @@ Public starter template at [`sample-mods/HelloWorldMod/`](sample-mods/HelloWorld
 Two helpers worth knowing about:
 
 - `ModDropPoolHelper.Register(poolResPath, scene, weight)` — the recommended pattern for content mods (per Robert on the dev side). Loads a `RandomWeightedDropPool` resource, appends a `RandomWeightedScene` entry, returns an `IDisposable` that removes it on dispose. Call from `OnLoad`, dispose from `OnUnload` and the pool is left exactly as it was.
-- `WorkshopHook.OnWorkshopItemInstalled` — subscribe if you want to react when Steam Workshop drops a new mod folder (Tim is wiring the game-side callback).
+- `WorkshopHook.OnWorkshopItemInstalled` — fires when Steam Workshop drops or updates a mod folder. The framework wires it from `WorkshopSubscriber`'s direct Steamworks SDK subscription (live mid-session subscribes appear immediately in the Mods dialog without a restart). Mod authors generally don't need to subscribe — the framework's own pipeline handles it. Available if you have a mod-management use case that needs the raw event.
 
 ### Official Loader Manifest
 
@@ -254,17 +240,14 @@ Official startup-loader example:
 }
 ```
 
-The framework's direction is to understand both shapes.
-That lets official-style mods appear in the Mods menu while the framework still owns delayed load policy and multiplayer reconciliation.
+The framework parses both shapes. After the 2026-05-18 turn-off of Pratfall's native ModManager, the distinction is essentially cosmetic — all mods load through the framework's own pipeline regardless of which schema their manifest uses.
 
-Current first-pass behavior for official-style mods:
+Behavior for Pratfall-native-schema mods (Workshop downloads + any older mods that ship `Assembly`/`PackageName` instead of `id`/`type`):
 
-- they are parsed and shown in the framework menu
-- they use `DirectoryName` as the implicit fallback `id` when no framework `id` exists
-- they are delayed until:
-  - `Load Enabled Mods`
-  - `Host Game`
-  - `Play Offline`
+- They are parsed and shown in the framework's Mods dialog like any other mod.
+- They use `DirectoryName` as the implicit fallback `id` when no framework `id` exists.
+- `AutoLoad: true` is **ignored** (see [Native ModManager Relationship](#native-modmanager-relationship)) — every mod stays disabled until the user enables + 🔍 approves.
+- The Pratfall-loader-only delayed-apply via Load-Enabled-Mods / Host Game / Play Offline no longer exists — the framework loads mods immediately on user enable, just like framework-schema mods.
 
 ### `manifest.json`
 
@@ -462,6 +445,9 @@ Pratfall.exe (patched by Cecil to call Bootstrap.Init on GcManager._Ready)
    ├─ OfficialModBridge          patches game's ModManager.Read/WriteLoadedModsToFile
    ├─ NativeDialogBridge         calls into the game's DialogUIViewController
    ├─ VoteUI                     vote prompt (uses native dialog when available)
-   ├─ WorkshopHook               waiting for Tim's Steam Workshop callback to land
+   ├─ WorkshopHook               public OnWorkshopItemInstalled event for mods that want raw Steam callbacks
+   ├─ WorkshopSubscriber         Harmony postfix on Steam.SetupWorkshopCallbacks + direct Steamworks.SteamUGC subscribe
+   ├─ NativeModUiSuppressor      hides native ModButton + bridges EnabledModCount for anti-cheat
+   ├─ OfficialModBridge          turns OFF native ModManager (LoadAllModManifests/Read/Write all neutered)
    └─ ModAPI                     thin public-API surface for mods
 ```

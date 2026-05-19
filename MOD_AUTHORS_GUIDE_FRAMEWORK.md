@@ -123,9 +123,9 @@ Framework-specific manifest fields:
 - `multiplayer.requires` — list of other mod IDs that must be installed on peers.
 - `multiplayer.conflictsWith` — list of mod IDs your mod is incompatible with. Surfaces in the conflict-resolution prompt.
 
-Fields the framework shares with Pratfall's loader (same default behavior):
-- `AutoLoad` — auto-enable on launch. Both loaders honor it.
-- `AddAssemblyToGodot` — register types with Godot's script bridge. Both loaders default `true`.
+Fields the framework reads but treats differently from Pratfall's loader:
+- `AutoLoad` — Pratfall's native loader auto-enables on launch when true. **The framework deliberately ignores this field** — every mod starts disabled in the Mods dialog and requires explicit user enable + 🔍 approval. See [The user-check gate](#the-user-check-gate) for why.
+- `AddAssemblyToGodot` — register types with Godot's script bridge. Both loaders default `true`. (Set to `false` only if you have a specific reason to skip script registration.)
 
 The mod folder name must be **unique** across all installed mods — both loaders mount each PCK at `res://<DirectoryName>/...`, and two mods sharing a folder name silently overwrite each other's assets. The framework's compatibility checker flags duplicate folder names with a ⚠ badge.
 
@@ -620,7 +620,8 @@ If you want your mod to sync in multiplayer lobbies, the `multiplayer` block in 
 - **OnLoad reentrance.** The framework's enable / disable / re-enable can happen multiple times per session (toggle in the dialog, vote result, conflict resolution). Make both `OnLoad` and `OnUnload` idempotent — every subscription paired with an unsubscribe, every `Register` paired with a `Dispose`.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's entry types — the GC needs to collect your assembly's load context.
 - **HUD-attached singletons are null on the main menu.** `ButtonPrompBarController.Instance` and similar HUD pieces are only present during gameplay. The framework helpers null-check for you; if you bypass the helpers, null-check yourself.
-- **The framework runs alongside Tim's loader, not instead of it.** Your mod loaded via the framework appears in the framework's Mods dialog. If you ALSO ship your mod through Pratfall's `enabled_mods.json` for vanilla users, the framework's `OfficialModBridge` defers — you won't see two copies, but you'll see one Mods dialog row that says "(via official loader)".
+- **The framework turns Pratfall's native ModManager off** and becomes the sole mod loader. (As of the 2026-05-18 Pratfall update — Tim explicitly invited custom loaders.) The framework Harmony-patches `ModManager.LoadAllModManifests` to skip the native discovery + auto-load pipeline; it does its own scan of `user://mods/`, `<game>/mods/`, and Steam Workshop content folders. Practical implications: (1) `AutoLoad: true` in your manifest is ignored — see Setup section; (2) your mod ID is the only key that matters — no separate "official" vs "framework" lanes; (3) the native ModButton + Mod UI in the main menu are hidden in favor of the framework's Mods dialog.
+- **Speedrun leaderboard submissions are blocked while your mod is enabled.** Pratfall's `SpeedrunManager.SubmitTimeToLeaderboard` refuses to submit when `ModManager.EnabledModCount != 0` (anti-cheat). The framework bridges its own enabled-mod count into that getter — so when any framework-loaded mod is enabled, completed runs in that session won't reach the public leaderboard. This is Pratfall's design, not the framework's. If you ship a cosmetic / UI mod where leaderboard-eligibility matters to players, mention in your description that "playing with this mod enabled disqualifies leaderboard submissions for the session."
 - **`assemblySha256` pinning is opt-in.** If you set it and ship a build whose hash doesn't match, the framework refuses to load with a clear error. Useful for paranoid distribution; skip if your build pipeline doesn't produce deterministic SHAs.
 - **`ByteBufferWriter` has a 32 KB string cap.** The framework's P2P transfer chunks at 14 KB raw to stay under, but if you publish custom events via `NetworkEventManager.SendEvent` directly, you're on your own for size.
 

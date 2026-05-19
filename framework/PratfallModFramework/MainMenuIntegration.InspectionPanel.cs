@@ -67,6 +67,20 @@ public static partial class MainMenuIntegration
             if (!string.IsNullOrWhiteSpace(m.PckFile)) AddInspectKV(body, "pck file", m.PckFile);
             if (m.Requires.Count > 0) AddInspectKV(body, "requires", string.Join(", ", m.Requires));
             if (m.ConflictsWith.Count > 0) AddInspectKV(body, "conflicts with", string.Join(", ", m.ConflictsWith));
+            // Source attribution — Workshop mods get a distinct line. WorkshopId
+            // is the Steam published-file ID; users can paste it into a Steam
+            // Workshop URL (steamcommunity.com/sharedfiles/filedetails/?id=<id>)
+            // to view the mod's Workshop page.
+            if (m.IsSteamWorkshopMod)
+            {
+                AddInspectKV(body, "source", m.WorkshopId != 0
+                    ? $"📦 Steam Workshop (id {m.WorkshopId})"
+                    : "📦 Steam Workshop");
+            }
+            else
+            {
+                AddInspectKV(body, "source", "local install");
+            }
         }
         if (!string.IsNullOrEmpty(report.FolderPath)) AddInspectKV(body, "folder", report.FolderPath);
 

@@ -21,19 +21,20 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 13. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
 14. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
 15. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
-16. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
-    - [16.1 "How do I ...?" quick-reference](#how-do-i-)
-    - [16.2 Singletons (73)](#singletons-73)
-    - [16.3 Static helper classes (22)](#static-helper-classes-22)
-    - [16.4 Configs & Settings (26)](#configs--settings-26)
-    - [16.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
-    - [16.6 `GameplayTags.*` (40)](#gameplaytags-40)
-    - [16.7 `Constants.EventId*` (56)](#constantseventid-56)
-    - [16.8 Entity hierarchy & `IEntity` (23 entities, 184 component-accessors)](#entity-hierarchy--ientity)
-    - [16.9 `IComponent` implementors (184)](#icomponent-implementors-184)
-    - [16.10 Public interfaces (13)](#public-interfaces-13)
-    - [16.11 `res://` path conventions](#res-path-conventions)
-    - [16.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
+17. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
+17. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
+    - [17.1 "How do I ...?" quick-reference](#how-do-i-)
+    - [17.2 Singletons (73)](#singletons-73)
+    - [17.3 Static helper classes (22)](#static-helper-classes-22)
+    - [17.4 Configs & Settings (26)](#configs--settings-26)
+    - [17.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
+    - [17.6 `GameplayTags.*` (40)](#gameplaytags-40)
+    - [17.7 `Constants.EventId*` (56)](#constantseventid-56)
+    - [17.8 Entity hierarchy & `IEntity` (23 entities, 184 component-accessors)](#entity-hierarchy--ientity)
+    - [17.9 `IComponent` implementors (184)](#icomponent-implementors-184)
+    - [17.10 Public interfaces (13)](#public-interfaces-13)
+    - [17.11 `res://` path conventions](#res-path-conventions)
+    - [17.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
 17. [Debugging & dev iteration](#debugging--dev-iteration)
 18. [Distribution conventions](#distribution-conventions)
 19. [Godot 4 concepts mod authors should know](#godot-4-concepts)
@@ -775,6 +776,87 @@ Under the hood, Pratfall calls `Godot.Bridge.ScriptManagerBridge.LookupScriptsIn
 Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(myAssembly);
 ```
 
+## Recipe: Unpack + repack PCK files
+
+Pratfall ships its assets as a single Godot PCK (`Pratfall.pck` next to the executable). Mods that need to **inspect** the game's assets (to find `res://` paths, override existing scenes, or reference a built-in texture) or that need to **ship their own assets** (custom scenes, textures, audio) work with PCK files directly.
+
+### Unpacking `Pratfall.pck` to see what's inside
+
+Use [**gdsdecomp**](https://github.com/bruvzg/gdsdecomp) — community-maintained Godot 4 PCK extractor + decompiler. Point it at `<Pratfall install>\Pratfall.pck` and it dumps the whole tree:
+
+- Scenes (`.tscn`, `.scn`) — open these in Godot to see node structure
+- Resources (`.tres`, `.res`) — configs, materials, animations
+- Imported assets (textures, audio, fonts) with their `.import` side files
+- GDScript files **if any** — Pratfall is pure C#, so this is usually empty
+
+What's NOT in the PCK:
+
+- **C# scripts and types** — those live in `Pratfall.dll`. Use a .NET disassembler ([ILSpy](https://github.com/icsharpcode/ILSpy), [dnSpy](https://github.com/dnSpy/dnSpy), or `Mono.Cecil` programmatically) to inspect those.
+- **Native libraries** — `.dll` / `.so` / `.dylib` files sit next to the executable, not inside the PCK.
+
+Typical use cases for unpacking:
+
+- Find the `res://` path of a vanilla scene or texture you want to swap out via `ResourceLoader.LoadOverride(...)` or by mounting your own PCK at the same path.
+- Read a Pratfall `.tres` config to understand its structure before extending it (e.g., `DropPoolConfig`, `LevelConfig`).
+- Locate the right `AudioStream` / `SpriteFrames` resource path to reference in your mod's code.
+
+### Packing your mod's assets into a `.pck`
+
+Your mod project is a Godot project. Asset layout matters because **Pratfall mounts your PCK at `res://<YourModFolderName>/`** — the folder name from your mod's install directory becomes the namespace for everything inside.
+
+1. **Create the mod project** in Godot:
+
+   ```
+   YourModProject/
+   ├── YourModProject.godot
+   ├── YourModFolderName/        ← MUST match your install folder name exactly
+   │   ├── scenes/
+   │   │   └── MyScene.tscn
+   │   ├── textures/
+   │   │   ├── icon.png
+   │   │   └── icon.png.import    ← auto-generated; MUST be included in PCK
+   │   └── audio/
+   │       ├── ding.ogg
+   │       └── ding.ogg.import    ← auto-generated; MUST be included in PCK
+   └── ...
+   ```
+
+2. **Import assets in the Godot editor** before packing — Godot generates a `.import` side file for every audio/texture/font/etc. Without these, the runtime can't actually load the resource even if the raw file is in the PCK. Open the project once, let the editor scan, then save.
+
+3. **Export the PCK** — Godot editor:
+
+   - `Project → Export → Add...`
+   - Choose any preset (PCK doesn't actually need platform-specific binaries; Windows Desktop is fine)
+   - Click **`Export PCK/Zip...`** (NOT "Export Project" — that builds an EXE you don't want)
+   - Save as `YourMod.pck` next to your mod's DLL
+
+4. **Reference the PCK in your mod's manifest**:
+
+   ```json
+   { "Name": "YourMod", "Assembly": "YourMod.dll", "PackageName": "YourMod.pck" }
+   ```
+
+   Or framework schema:
+
+   ```json
+   { "id": "YourMod", "assemblyFile": "YourMod.dll", "pckFile": "YourMod.pck" }
+   ```
+
+5. **Reference assets from your DLL** using the mounted path:
+
+   ```csharp
+   var scene = GD.Load<PackedScene>("res://YourModFolderName/scenes/MyScene.tscn");
+   var icon = GD.Load<Texture2D>("res://YourModFolderName/textures/icon.png");
+   var ding = GD.Load<AudioStream>("res://YourModFolderName/audio/ding.ogg");
+   ```
+
+**PCK packaging gotchas:**
+
+- **Folder name = mount path.** If your install folder is `Author.MyMod` but your PCK has assets under `res://MyMod/`, the resource loader won't find them. The folder name in your Godot project's filesystem MUST match the mod's install directory name.
+- **`.import` side files are mandatory.** They contain texture flags, audio import settings, etc. Forgetting them produces silent runtime load failures ("Could not load resource…").
+- **PCKs cannot be unmounted in Godot 4.** Disabling a mod removes its DLL from the load context but the PCK's assets stay reachable via `res://` until the next game restart. The framework surfaces a "may not fully apply until next launch" notice for mods with a `pckFile`.
+- **One mod, one PCK.** Two mods with assets at the same `res://<DirName>/...` path silently overwrite each other based on PCK mount order — another reason folder names must be unique across all installed mods.
+
 ## Decoded Pratfall surface inventory
 
 Audit of `Pratfall.dll` (2026-05-17 — Pratfall `1.1.0.R2943`) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
@@ -1340,7 +1422,7 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 
 ## Pitfalls
 
-- **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-16.)
+- **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-17.)
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
 - **Don't mutate save-coupled arrays.** `PlayerColorsConfig.Colors`, `GameModeManager.Modes`, `LevelManager.LevelPrefabs` are all indexed by save-game data — mutating them invalidates existing player saves.
 - **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.Instance.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.

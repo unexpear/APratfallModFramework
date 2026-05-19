@@ -49,11 +49,23 @@ internal static class FrameworkModStateStore
         };
 
         var path = FrameworkProfile.ResolveStateFilePath();
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrWhiteSpace(directory))
-            Directory.CreateDirectory(directory);
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+                Directory.CreateDirectory(directory);
 
-        File.WriteAllText(path, JsonSerializer.Serialize(payload, ModStateJson.Options));
+            File.WriteAllText(path, JsonSerializer.Serialize(payload, ModStateJson.Options));
+        }
+        catch (Exception ex)
+        {
+            // Most likely cause: profile folder deleted mid-session (r2modman
+            // profile-switch while game open) or write permission lost. In-memory
+            // state still tracks the user's intent; we just won't persist this
+            // change. Log and continue so the user's mod toggle doesn't surface
+            // as an unhandled crash.
+            GD.PrintErr($"[ModFramework] FrameworkModStateStore: failed to persist state to {path}: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static LoadedState? TryLoadPersistedState()

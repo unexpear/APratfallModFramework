@@ -52,13 +52,19 @@ internal static class ModZipDropInstaller
         // Mirrors ManifestManager.ScanLocalMods scan roots minus the Steam
         // Workshop content folder (Steam owns those folders; we should never
         // write into them, and Workshop downloads aren't .zip-format).
+        //
+        // Dedupes against a normalized-absolute-path set so a misconfigured
+        // --qh-mod-directory equal to user://mods or <game>/mods doesn't get
+        // walked twice — would mean re-enumerating the same zips and getting
+        // confusing "already exists" log lines on the second pass.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var profilePath = FrameworkProfile.ProfileModsDirectory;
-        if (!string.IsNullOrEmpty(profilePath))
+        if (!string.IsNullOrEmpty(profilePath) && TryAdd(seen, profilePath))
             yield return profilePath;
 
         var userModsAbs = ProjectSettings.GlobalizePath("user://mods/");
-        if (!string.IsNullOrWhiteSpace(userModsAbs))
+        if (!string.IsNullOrWhiteSpace(userModsAbs) && TryAdd(seen, userModsAbs))
             yield return userModsAbs;
 
         if (!FrameworkProfile.IsActive)
@@ -67,8 +73,22 @@ internal static class ModZipDropInstaller
             if (!string.IsNullOrEmpty(gameDir))
             {
                 var gameModsDir = Path.Combine(gameDir, "mods");
-                yield return gameModsDir;
+                if (TryAdd(seen, gameModsDir))
+                    yield return gameModsDir;
             }
+        }
+    }
+
+    private static bool TryAdd(HashSet<string> seen, string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return seen.Add(full);
+        }
+        catch
+        {
+            return true; // best-effort: don't block on path-normalization failure
         }
     }
 

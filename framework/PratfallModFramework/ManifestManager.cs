@@ -11,6 +11,12 @@ public static class ManifestManager
     public static List<ModManifest> ScanLocalMods()
     {
         var allMods = new Dictionary<string, ModManifest>();
+        // Tracks normalized absolute scan paths so a misconfigured
+        // --qh-mod-directory that happens to equal user://mods or
+        // <game>/mods doesn't get walked twice (mod IDs would still
+        // de-dupe via allMods, but the directory iteration + manifest
+        // parsing is wasted work + produces confusing log lines).
+        var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Path 0: extract any .zip files dropped into our scan roots before
         // discovery runs (Thunderstore-style + manual zip drops).
@@ -21,11 +27,16 @@ public static class ManifestManager
         // collisions with default locations — matches the user's expectation
         // that "this profile's version of mod X is the one that loads".
         var profilePath = FrameworkProfile.ProfileModsDirectory;
-        if (!string.IsNullOrEmpty(profilePath) && System.IO.Directory.Exists(profilePath))
+        if (!string.IsNullOrEmpty(profilePath) && System.IO.Directory.Exists(profilePath)
+            && TryMarkScanned(profilePath, scannedPaths))
+        {
             ScanOsDirectory(profilePath, allMods);
+        }
 
         // Path 2: user://mods/ — manually installed by player
-        ScanDirectory("user://mods/", allMods);
+        var userModsAbs = ProjectSettings.GlobalizePath("user://mods/");
+        if (!string.IsNullOrWhiteSpace(userModsAbs) && TryMarkScanned(userModsAbs, scannedPaths))
+            ScanDirectory("user://mods/", allMods);
 
         // Path 3: game install directory's mods/ folder (next to Pratfall.exe).
         // Skipped when a profile is active — r2modman manages its own folder,
@@ -36,7 +47,7 @@ public static class ManifestManager
             if (gameDir != null)
             {
                 var gameModsDir = System.IO.Path.Combine(gameDir, "mods");
-                if (System.IO.Directory.Exists(gameModsDir))
+                if (System.IO.Directory.Exists(gameModsDir) && TryMarkScanned(gameModsDir, scannedPaths))
                     ScanOsDirectory(gameModsDir, allMods);
             }
         }
@@ -45,10 +56,32 @@ public static class ManifestManager
         // Replaces what Pratfall's native ModManager used to do for us (which
         // we've turned off as of 2026-05-18 — see OfficialModBridge.cs).
         // Always scanned, even under a profile — Workshop subscriptions are
-        // global to the Steam account, not per-profile.
+        // global to the Steam account, not per-profile. ScanWorkshopMods has
+        // its own per-library-folder loop and skips Steam-managed paths the
+        // user shouldn't be tagging as a profile root, so no dedup needed.
         ScanWorkshopMods(allMods);
 
         return allMods.Values.ToList();
+    }
+
+    // Normalize an absolute path (full path + trailing separator stripped) and
+    // record it. Returns false if we've already scanned an equivalent path —
+    // call sites should skip in that case.
+    private static bool TryMarkScanned(string path, HashSet<string> seen)
+    {
+        try
+        {
+            var full = System.IO.Path.GetFullPath(path).TrimEnd(
+                System.IO.Path.DirectorySeparatorChar,
+                System.IO.Path.AltDirectorySeparatorChar);
+            return seen.Add(full);
+        }
+        catch
+        {
+            // If normalization fails (bad path chars, IO error), be permissive
+            // and allow the scan — worst case is a duplicate walk.
+            return true;
+        }
     }
 
     // Locate every Steam library folder, look for

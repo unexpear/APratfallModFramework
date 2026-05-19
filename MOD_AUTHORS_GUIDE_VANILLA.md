@@ -178,7 +178,7 @@ Pratfall reads these from its command line at startup:
 | Flag | Effect |
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
-| `--qh-skip-mods` | Skips loading any mods at launch. (`ModManager.ShouldLoadMods` returns false.) Debug / recovery use. |
+| `--qh-skip-mods` | **Currently a no-op** despite the flag-reading code being present. `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")` per Cecil, but no code path in Pratfall 1.1.0.R2943 actually reads `ShouldLoadMods` — the getter is defined but unused. Probably intended for a future refactor; document here so debug users don't rely on it. |
 | `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder. Cecil-confirmed in `ModManager.CreateModDirectory`. **Useful for profile-based mod managers** (Thunderstore / r2modman) — see the [profile / mod-manager-compat note below](#profile--mod-manager-compat). |
 | `--qh-skip-preload` | Skips resource preloading on launch. Auto-skipped already when the GPU vendor contains "Intel" (workaround for an Intel preload bug); this flag forces-skips on any GPU. Cecil-confirmed in `Preloader.SkipPreload`. |
 | `--qh-disable-login` | Disables EOS (Epic Online Services) login at launch. Useful for dev iteration when you don't want Steam→EOS authentication to fire. |
@@ -1275,12 +1275,12 @@ There's no single official Pratfall mod host yet. Current state, per the dev tea
 
 | Platform | Status | Notes |
 |---|---|---|
-| **Steam Workshop** | In active development by Tim, "should be ready soon" | Will be the canonical first-party path once it ships. Auto-update + re-install across devices are the big wins. **Caveat: Chinese players may not have Workshop access** (Robert) — consider this if your mod targets that audience. |
+| **Steam Workshop** | **Shipped 2026-05-18.** First-party path. | Auto-update + re-install across devices. Pratfall's native loader handles subscribe / install via `Steamworks.SteamUGC`, and `ModManifest` gained `IsSteamWorkshopMod` + `SteamWorkshopManifest` + `SteamWorkshopItem` properties so mod code can detect Workshop sourcing. **Caveat: Chinese players may not have Workshop access** (Robert) — consider this if your mod targets that audience. |
 | **Nexus Mods** | De facto current host; works today | Manual install only — users download a zip and drop the mod folder into `<GameDir>\mods\`. No auto-update. |
 | **Thunderstore** | Community exists; rep (Ebkr) is engaged with the Pratfall team | Standard format for BepInEx-style games (Risk of Rain 2, Lethal Company, REPO, Content Warning). Pratfall is on Godot+C# which is uncommon for the platform, so existing tooling (r2modman) doesn't natively understand the loader yet. |
 | **GitHub release / direct download** | Universal fallback | Works for any platform Pratfall runs on. Reasonable for early development; not a great long-term distribution channel. |
 
-**Fragmentation matters.** Ebkr (Thunderstore) flagged the risk of mods splintering across platforms — if your players use one platform and your dependencies are on another, the install path breaks. Until Steam Workshop ships, picking ONE host per mod (and saying so in your README) reduces friction. If you publish on multiple, link cross-platform so users can find the same mod from anywhere.
+**Fragmentation matters.** Ebkr (Thunderstore) flagged the risk of mods splintering across platforms — if your players use one platform and your dependencies are on another, the install path breaks. With Steam Workshop live as of 2026-05-18 it's the natural first-party choice for most mods; supplement with Nexus or direct download for players who can't access Workshop. If you publish on multiple, link cross-platform so users can find the same mod from anywhere.
 
 **Pratfall's uncommon stack matters too.** Tim noted that Godot + C# is rare among modded games, so tooling assumptions made for Unity+BepInEx don't always transfer. If you write a Thunderstore-format manifest, expect to also explain manual install for users whose mod manager doesn't auto-handle Pratfall yet.
 

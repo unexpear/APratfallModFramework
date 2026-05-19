@@ -25,14 +25,24 @@ combine. After each pass, capture the relevant log lines from
 - [ ] In `manifest.json`, set `assemblySha256` to the correct hex hash of the DLL. Relaunch. Log shows `Verified mod HelloWorldMod DLL against manifest sha256`.
 - [ ] Change one byte in the DLL (without updating the manifest hash). Relaunch. Log shows `Failed to enable mod ...: DLL hash mismatch ...` and the mod does **not** load.
 
-## 3. Official-loader bubble
+## 3. Pratfall-schema (incl. Workshop) mod loading
 
-- [ ] Install an official-style mod (manifest with `Name`/`Assembly`/`PackageName`, no `id`).
-- [ ] Launch game. Log shows `Delaying official mod <id> until framework apply/start` and `Built-in enabled_mods.json read intercepted; startup official mods are delayed until framework apply`.
-- [ ] Open Mods dialog. Toggle the official mod on. Click **Load Enabled Mods**. Log shows `Enabled official mod <id>`.
-- [ ] Toggle off. Click **Load Enabled Mods** again. Log shows `Disabled official mod <id>` (or known limitation if the game's `DisableMod` doesn't actually unload — note for follow-up).
-- [ ] **Known limitation (verified 2026-05-15 via Example Mod)**: re-enabling an official-style mod after disabling it in the same session prints `[ModFramework] Failed to enable official mod <id>`. The game's `ModManager.EnableMod` returns false on the second call (the game holds onto already-loaded mod state internally). Workaround: restart Pratfall before re-enabling. Track as a v1.1 polish item — likely needs the framework to re-scan the game's mod list or call an internal reset before the second enable attempt.
-- [ ] Click **Play Offline**. Log shows the official mod applies before scene transition.
+(Was: "Official-loader bubble". Bubble retired 2026-05-18 when Tim's Workshop update privatized `GetModManifest` and we switched to the turn-off architecture. Pratfall-schema mods now load through the same framework pipeline as framework-schema mods — there's no separate "delayed apply" flow.)
+
+- [ ] Install a Pratfall-schema mod (manifest with `Name`/`Assembly`/`PackageName`, no `id`). Drop in `<game>\mods\<modid>\` or `%APPDATA%\Pratfall\mods\<modid>\`.
+- [ ] Launch game. Log shows `Native ModManager turned off (custom loader in charge); LoadAllModManifests + read/write neutered` and the mod appears in the framework's Mods dialog with an auto-synthesized `id` (folder name or `Name`).
+- [ ] Open Mods dialog. Toggle the mod on. Click 🔍 to approve fingerprint. Mod's `ModEntry.ModInit` runs (verified via mod-side log line).
+- [ ] Toggle off. Mod unloads cleanly (`AssemblyLoadContext.Unload` called).
+- [ ] Toggle back on. **Should work without restart** (the 2026-05-15 same-session re-enable bug is no longer relevant — we don't call native `ModManager.EnableMod` anymore; our own loader handles the cycle).
+
+## 3a. Workshop discovery (startup + live)
+
+- [ ] Subscribe to a Pratfall Workshop mod via the Steam Workshop page.
+- [ ] Wait for Steam to finish downloading.
+- [ ] Launch Pratfall. Mod appears in framework's Mods dialog (toggled off, awaiting 🔍 approval). Inspector ℹ shows "📦 Steam Workshop (id …)".
+- [ ] With game running, subscribe to a SECOND Workshop mod from the Steam overlay or Workshop website.
+- [ ] After Steam downloads (typically a few seconds), open the Mods dialog. The new mod appears live — no restart required. Log line: `Workshop item installed: appId=… fileId=… — rescanning sources` then `Workshop mod added live: <id> (workshop=…)`.
+- [ ] Toggle on + 🔍 approve. Mod loads.
 
 ## 4. Debug-peer offline-only gating
 
@@ -82,9 +92,9 @@ Requires two PCs.
 
 ## 10. Coordination follow-ups (not blocking, but track)
 
-- [ ] **Event IDs**: framework uses `62000-62005`. Get an officially-allocated range from Tim so future game updates don't clash.
+- [ ] **Event IDs**: framework uses `62000-62006` (62006 added for CSync). Get an officially-allocated range from Tim so future game updates don't clash.
 - [ ] **DialogUI texture harvest**: `MainMenuIntegration` reaches into `DialogUI > .../TextureRect` for the dialog's body texture. If the game restructures `DialogUI`, the harvest fails silently and the dialog falls back to flat. Tim should be aware.
-- [ ] **`enabled_mods.json` interception**: the bubble currently stalls the whole startup list. Confirm with Tim this stays acceptable, or move to a filtered non-empty model.
+- (was: `enabled_mods.json` interception — *no longer relevant* as of 2026-05-18; the framework turns off the native ModManager's `LoadAllModManifests` entirely. `ReadLoadedModsFromFile`/`WriteLoadedModsToFile` are still patched as defense-in-depth in case anything else calls them post-Setup.)
 - [ ] **Per-peer send efficiency**: `Network.EventManager.SendEvent` broadcasts every chunk to every lobby member; non-target peers discard at the receive side. Correct but wasteful — in a 4-player lobby a 2 MB transfer ships 8 MB total over the wire. Not a v1 blocker; consider a targeted-send path if Tim adds one.
 
 ## Known wire-format limits (audited)

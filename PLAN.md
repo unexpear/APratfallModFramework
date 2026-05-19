@@ -61,8 +61,8 @@ The framework is a negotiation layer, not a promise that arbitrary mods are mutu
 ## In Progress
 
 - [ ] Two-player in-game verification of the real vote path using a trusted DLL mod baseline
-- [ ] In-game smoke test of the official-loader bubble using a real official-style sample mod
-- [ ] Decide whether the bubble should later present a filtered non-empty startup list, or stay on the current fully stalled startup-read model
+- [~] ~~In-game smoke test of the official-loader bubble using a real official-style sample mod~~ — **obsolete** as of 2026-05-18: bubble architecture retired, native ModManager turned off. Pratfall-schema mods (including Workshop) now load through our framework's own pipeline.
+- [~] ~~Decide whether the bubble should later present a filtered non-empty startup list~~ — **obsolete**: see above.
 
 ## Next
 
@@ -74,14 +74,9 @@ The framework is a negotiation layer, not a promise that arbitrary mods are mutu
   - passed vote enables the local match on the other side
 - [ ] Verify chunked DLL transfer end-to-end with a real second peer
 - [ ] Verify stretch manifests end-to-end against Pratfall's real multiplayer path
-- [ ] Verify official-style mod apply path end-to-end:
-  - discovered in menu
-  - not auto-started on boot
-  - toggled in desired state
-  - loaded by `Load Enabled Mods`
-  - loaded automatically before `Host Game` / `Play Offline`
-- [ ] Decide whether official-style disable/unload is stable enough for repeated same-session toggles
-- [ ] Coordinate with Tim on a stable network-event-ID range (currently squatting `62000-62005`)
+- [~] ~~Verify official-style mod apply path end-to-end~~ — **obsolete**: there is no separate "official-style apply path" anymore. Pratfall-schema mods load through the same framework pipeline as framework-schema mods; verifying one verifies the other.
+- [~] ~~Decide whether official-style disable/unload is stable enough~~ — **obsolete**: we don't call native EnableMod/DisableMod anymore.
+- [ ] Coordinate with Tim on a stable network-event-ID range (currently squatting `62000-62006` — added 62006 for CSync in Phase 3)
 - [ ] PCK side-file transfer (only DLL is sent today; PCKs must be installed locally)
 - [ ] Optional Windows Defender scan hook before first-enable of a transferred mod
 
@@ -101,7 +96,7 @@ The framework is a negotiation layer, not a promise that arbitrary mods are mutu
 
 - [ ] Stretch is implemented for explicit settings payloads, but still needs real-lobby verification
 - [ ] Public-lobby policy is not finalized (default is `open` trust mode; harden later)
-- [ ] Workshop integration is future work, not on the critical path
+- [x] **Workshop integration shipped (2026-05-18 update)** — Pratfall added Steam Workshop support; framework rides on it: `ManifestManager.ScanWorkshopMods` discovers subscribed Workshop mods by scanning `steamapps/workshop/content/4244510/<id>/` across every Steam library at startup, `WorkshopSubscriber` hooks `Steamworks.SteamUGC.OnItemInstalled` for live mid-session discovery. Each Workshop mod is tagged with `IsSteamWorkshopMod` + `WorkshopId` and goes through the same user-check gate + per-mod features as local mods.
 
 ## Constraints
 

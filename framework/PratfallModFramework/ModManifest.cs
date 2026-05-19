@@ -154,7 +154,18 @@ public class ModManifest
 
     public bool UsesOfficialLoader()
     {
-        return ModLoadPolicies.Normalize(LoadPolicy) == ModLoadPolicies.Official;
+        // Always false as of 2026-05-18: when Tim shipped Workshop + the
+        // modding-fixes update, OfficialModBridge stopped bridging and started
+        // turning the native ModManager OFF (it now no-ops LoadAllModManifests).
+        // Every mod — including Workshop mods, which arrive with Pratfall's
+        // schema and would previously default to LoadPolicy=Official — must
+        // now load through OUR pipeline. Returning false here short-circuits
+        // every `if (UsesOfficialLoader())` branch in ModManager.cs that used
+        // to defer to the bridge; those branches are now dead code that will
+        // get pruned in a follow-up cleanup. The LoadPolicy field itself is
+        // preserved for back-compat (manifests still parse), but it no longer
+        // gates anything at runtime.
+        return false;
     }
 
     private string ResolveImplicitId()

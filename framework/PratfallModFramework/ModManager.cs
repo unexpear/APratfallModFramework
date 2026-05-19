@@ -5,6 +5,25 @@ namespace PratfallModFramework;
 
 public class ModManager : IDisposable
 {
+    // Process-wide singleton handle so framework-side bridges (NativeModUiSuppressor's
+    // EnabledModCount patch, etc.) can reach the live instance without taking a
+    // dependency on Bootstrap. Set during Initialize, cleared during Dispose.
+    public static ModManager? Instance { get; private set; }
+
+    // Number of mods the framework currently considers enabled. Used by the
+    // NativeModUiSuppressor Harmony patch on global::ModManager.EnabledModCount
+    // so Pratfall's SpeedrunManager anti-cheat gate sees the truth (we turned
+    // off the native loader, so its own count would otherwise read 0 forever).
+    public int EnabledModCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (var v in _modEnabled.Values) if (v) count++;
+            return count;
+        }
+    }
+
     // Cached per CA1869 — JsonSerializerOptions is expensive to construct and
     // safe to share across threads when not mutated after construction.
     private static readonly System.Text.Json.JsonSerializerOptions s_indentedJsonOptions =
@@ -50,6 +69,7 @@ public class ModManager : IDisposable
     public void Initialize(SceneTree tree)
     {
         GD.Print("[ModFramework] ModManager.Initialize()");
+        Instance = this;
         _tree = tree;
         // Hide the game's native ModButton (added 2026-05-15) — our framework dialog
         // supersedes it. Apply early so the menu picks it up on first _EnterTree.
@@ -1687,6 +1707,7 @@ public class ModManager : IDisposable
             _voteUI = null;
         }
         _networkLayer.Dispose();
+        if (ReferenceEquals(Instance, this)) Instance = null;
         GC.SuppressFinalize(this);
     }
 }

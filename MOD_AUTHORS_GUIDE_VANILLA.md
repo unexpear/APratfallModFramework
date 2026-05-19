@@ -850,12 +850,26 @@ Your mod project is a Godot project. Asset layout matters because **Pratfall mou
    var ding = GD.Load<AudioStream>("res://YourModFolderName/audio/ding.ogg");
    ```
 
-**PCK packaging gotchas:**
+### Auto-instantiated root scene (`root.tscn`)
+
+Cecil of `ModManager.LoadPackage` (R2973): after mounting the PCK, Pratfall tries to load `res://<DirectoryName>/root.tscn` and, if it exists and parses as a `PackedScene`, **instantiates it and adds the result as a child of the game root**. The instantiated node is stored on the manifest so `ModManager.UnloadPackage` can `Free()` it on disable.
+
+This means:
+
+- If your mod ships `res://<YourModFolderName>/root.tscn`, it auto-runs on enable — useful for mods that want to inject a scene into the world without writing C# (the auto-instantiated node + its `_Ready` handle the wiring).
+- If your mod does NOT ship `root.tscn`, the PCK still mounts cleanly — the load step silently no-ops on the missing scene. Your assets are still reachable via `res://<DirName>/...` paths from your DLL.
+
+### Overriding Pratfall's own assets
+
+`LoadResourcePack` is called with `replace_files=true` (Cecil-verified, IL `ldc.i4.1` before the call). So if your PCK contains a file at the same `res://` path as one already in `Pratfall.pck`, **your version wins**. That's the supported mechanism for asset overrides — swap a texture, replace a sound, override a scene — without needing C# patches. Be conservative: a poorly-targeted override (matching a path you didn't mean to) can break vanilla content silently.
+
+### PCK packaging gotchas
 
 - **Folder name = mount path.** If your install folder is `Author.MyMod` but your PCK has assets under `res://MyMod/`, the resource loader won't find them. The folder name in your Godot project's filesystem MUST match the mod's install directory name.
+- **PCK filename = `PackageName` field exactly.** Pratfall concats `manifest.Directory + "/" + manifest.PackageName` — so `PackageName` must include the `.pck` extension and match the filename on disk.
 - **`.import` side files are mandatory.** They contain texture flags, audio import settings, etc. Forgetting them produces silent runtime load failures ("Could not load resource…").
-- **PCKs cannot be unmounted in Godot 4.** Disabling a mod removes its DLL from the load context but the PCK's assets stay reachable via `res://` until the next game restart. The framework surfaces a "may not fully apply until next launch" notice for mods with a `pckFile`.
-- **One mod, one PCK.** Two mods with assets at the same `res://<DirName>/...` path silently overwrite each other based on PCK mount order — another reason folder names must be unique across all installed mods.
+- **PCKs cannot be unmounted in Godot 4.** `UnloadPackage` only `Free()`s the auto-instantiated root.tscn node — the PCK's files stay mounted in `res://` until the next game restart. The framework surfaces a "may not fully apply until next launch" notice for mods with a `pckFile`.
+- **One mod, one PCK.** Two mods with assets at the same `res://<DirName>/...` path silently overwrite each other based on PCK mount order (`replace_files=true` again) — another reason folder names must be unique across all installed mods.
 
 ## Decoded Pratfall surface inventory
 

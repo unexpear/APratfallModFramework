@@ -170,7 +170,18 @@ Each path computes the mod's fingerprint (`SHA256("dll:" + DllSha256 + "|pck:" +
 
 The gate doesn't apply to:
 - Manifest-only mods (no DLL — nothing to gate).
-- Official-loader mods bridged through `OfficialModBridge`. The framework defers to Pratfall's enabled-state file for those.
+
+**No auto-load** — even mods whose manifest declares `"AutoLoad": true` (Pratfall's native schema) are NOT auto-enabled by the framework. The user-check gate is the framework's only defense against unreviewed code execution, and auto-load would bypass it. Every mod stays toggled OFF in the Mods dialog until the user explicitly enables it AND clicks 🔍 to approve the fingerprint. If you author a mod that expects to "just work" on first launch, document that users need to enable it once after install.
+
+### Workshop mods (live discovery)
+
+The framework discovers Steam Workshop mods two ways:
+
+1. **At startup** — `ManifestManager.ScanWorkshopMods` walks every Steam library folder (registry + `libraryfolders.vdf`) and scans `steamapps\workshop\content\4244510\<workshopid>\` for manifests. Subscriptions present at launch appear in the Mods dialog immediately.
+
+2. **Live, mid-session** — `WorkshopSubscriber` hooks `Steamworks.SteamUGC.OnItemInstalled` (via a Harmony postfix on `Steam.SetupWorkshopCallbacks` so it runs after Steam is fully initialized). When the user subscribes to a Workshop mod from inside Pratfall (or accepts an update download), Steam fires the event → framework re-scans → the new mod appears in the Mods dialog **without a restart**. The user still has to click 🔍 to approve it before it loads — live discovery does not auto-trust.
+
+Workshop mods are tagged with `manifest.IsSteamWorkshopMod = true` and `manifest.WorkshopId = <published-file-id>` so the inspector + mod cards can distinguish them from local mods. They get the full framework feature set (per-mod logger, config, crash reports, settings UI, network sync) identically to local mods.
 
 ## Recipe: ModPatch
 

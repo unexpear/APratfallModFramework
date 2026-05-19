@@ -75,6 +75,7 @@ public class ModManager : IDisposable
         // supersedes it. Apply early so the menu picks it up on first _EnterTree.
         NativeModUiSuppressor.Apply();
         OfficialModBridge.Install();
+        WorkshopSubscriber.Apply();
         SessionStartHooks.Install(kind =>
         {
             ApplyDesiredModsForSession();
@@ -162,6 +163,80 @@ public class ModManager : IDisposable
 
     public bool IsModEnabled(string id) => _modEnabled.GetValueOrDefault(id, false);
     public bool IsModDesiredEnabled(string id) => _desiredEnabled.GetValueOrDefault(id, false);
+
+    // Called by WorkshopSubscriber when Steamworks fires OnItemInstalled for a
+    // newly-subscribed (or freshly re-downloaded) Workshop mod. Re-scans local
+    // sources to pick up the new folder, integrates the manifest into our
+    // known-mods list, and refreshes any open Mods dialog so the user sees the
+    // mod appear without needing to restart Pratfall.
+    //
+    // Workshop mods still go through the same user-approval gate as any other
+    // mod: they appear as session-unavailable with a 🔍 button until the user
+    // clicks to approve the fingerprint. Live discovery does NOT auto-enable
+    // or auto-trust — it just makes the mod visible.
+    public void NotifyWorkshopItemInstalled(ulong workshopId)
+    {
+        try
+        {
+            var rescanned = ManifestManager.ScanLocalMods();
+
+            // Find the entry that matches this workshop ID. ManifestManager
+            // tags Workshop-discovered mods with WorkshopId; pre-existing
+            // mods (in another scan path) will have WorkshopId=0.
+            ModManifest? newMod = null;
+            foreach (var mod in rescanned)
+            {
+                if (mod.WorkshopId == workshopId) { newMod = mod; break; }
+            }
+
+            if (newMod == null)
+            {
+                GD.PrintErr($"[ModFramework] Workshop install for {workshopId} reported but no matching folder found after rescan — Steam may have downloaded to an unexpected library path");
+                return;
+            }
+
+            // If we already know about this mod ID (re-subscribe / re-download),
+            // refresh the cached manifest and clear any stale fingerprint cache
+            // so the user-check picks up the new bytes.
+            bool isNew = true;
+            for (int i = 0; i < _localMods.Count; i++)
+            {
+                if (string.Equals(_localMods[i].Id, newMod.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    _localMods[i] = newMod;
+                    _modCurrentFingerprint.Remove(newMod.Id);
+                    isNew = false;
+                    break;
+                }
+            }
+
+            if (isNew)
+            {
+                newMod.Normalize();
+                _localMods.Add(newMod);
+                _desiredEnabled[newMod.Id] = false;     // user approves explicitly
+                _modEnabled[newMod.Id] = false;
+                _modSessionAvailable[newMod.Id] = !UsesFrameworkAssemblyLoader(newMod);
+                ModExceptionFilter.RegisterKnownModAssembly(newMod.Id);
+                if (!string.IsNullOrWhiteSpace(newMod.AssemblyFile))
+                    ModExceptionFilter.RegisterKnownModAssembly(Path.GetFileNameWithoutExtension(newMod.AssemblyFile));
+                GD.Print($"[ModFramework] Workshop mod added live: {newMod.Id} (workshop={workshopId})");
+            }
+            else
+            {
+                GD.Print($"[ModFramework] Workshop mod refreshed live: {newMod.Id} (workshop={workshopId})");
+            }
+
+            // Trigger Mods dialog rebuild if it's open. Best-effort — UI may not
+            // be installed yet (very early Workshop install during boot).
+            try { MainMenuIntegration.RefreshModsDialogIfOpen(); }
+            catch (System.Exception ex) { GD.PrintErr($"[ModFramework] Mods-dialog refresh after Workshop install threw: {ex.GetType().Name}: {ex.Message}"); }
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] NotifyWorkshopItemInstalled({workshopId}) failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
 
     public void ToggleMod(string id, bool enable)
     {

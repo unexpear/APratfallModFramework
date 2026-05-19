@@ -10,6 +10,22 @@ namespace PratfallModFramework;
 // conflict prompts (layer 130).
 public static partial class MainMenuIntegration
 {
+    // Called externally (e.g. by ModManager when WorkshopSubscriber reports a
+    // live Workshop install) to repaint the Mods dialog if the user has it
+    // open. Implementation: close + reopen. The reopen re-reads the mod list
+    // so newly-discovered mods appear immediately. No-op when dialog is closed
+    // or scene tree isn't available.
+    public static void RefreshModsDialogIfOpen()
+    {
+        if (_tree == null) return;
+        var existing = _tree.Root.GetNodeOrNull("ModFrameworkDialogLayer");
+        if (existing == null) return; // dialog not open — nothing to refresh
+        existing.QueueFree();
+        // Defer the reopen by one frame so QueueFree completes before we
+        // re-add a layer with the same name.
+        Callable.From(() => OnModsButtonPressed()).CallDeferred();
+    }
+
     private static void OnModsButtonPressed()
     {
         GD.Print("[ModFramework] Mods button pressed");

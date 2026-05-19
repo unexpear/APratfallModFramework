@@ -395,6 +395,12 @@ public class MainForm : Form
         var frameworkDest = Path.Combine(dataDir, "PratfallModFramework.dll");
         var bootstrapDest = Path.Combine(dataDir, "PratfallBootstrapLoader.dll");
 
+        if (IsPratfallRunning())
+        {
+            Log("Error: Pratfall.exe is currently running. Close the game before installing.");
+            throw new InvalidOperationException("Pratfall is currently running.");
+        }
+
         Invoke(() => _progressBar.Value = 10);
         Log("Backing up original Pratfall.dll...");
 
@@ -483,36 +489,112 @@ public class MainForm : Form
         var backupPath = Path.Combine(dataDir, "Pratfall.dll.original");
         var frameworkPath = Path.Combine(dataDir, "PratfallModFramework.dll");
         var bootstrapPath = Path.Combine(dataDir, "PratfallBootstrapLoader.dll");
+        var sentinelPath = Path.Combine(_gameDir, "__PRATFALL_MOD_FRAMEWORK_LOADED.txt");
+        var frameworkModFolder = Path.Combine(_gameDir, "mods", "PratfallModFramework");
 
-        Invoke(() => _progressBar.Value = 20);
+        // Sanity-check the path is actually a Pratfall install before touching anything.
+        var exePath = Path.Combine(_gameDir, "Pratfall.exe");
+        if (!File.Exists(exePath))
+        {
+            Log($"Error: Pratfall.exe not found at {_gameDir}. Aborting — refusing to operate on a non-Pratfall folder.");
+            throw new InvalidOperationException("Selected folder is not a Pratfall install.");
+        }
+
+        // If the game is running, every DLL operation will throw "file in use" with
+        // an unhelpful message. Detect early and tell the user what to do.
+        if (IsPratfallRunning())
+        {
+            Log("Error: Pratfall.exe is currently running. Close the game before uninstalling.");
+            throw new InvalidOperationException("Pratfall is currently running.");
+        }
+
+        Invoke(() => _progressBar.Value = 15);
         Log("Restoring original Pratfall.dll...");
 
         if (File.Exists(backupPath))
         {
-            if (File.Exists(dllPath))
-                File.Delete(dllPath);
-            File.Move(backupPath, dllPath);
+            // File.Move with overwrite is atomic on Windows since .NET 8 — no window
+            // where the game has no DLL at all (which the old Delete+Move pattern had).
+            File.Move(backupPath, dllPath, overwrite: true);
             Log("Original Pratfall.dll restored");
         }
         else
         {
-            Log("No backup found. Use Steam -> Verify integrity to restore.");
+            Log("No backup found. Use Steam -> Verify integrity to restore Pratfall.dll.");
         }
+
+        Invoke(() => _progressBar.Value = 35);
+        DeleteIfExists(frameworkPath, "Framework DLL");
+        DeleteIfExists(bootstrapPath, "BootstrapLoader DLL");
 
         Invoke(() => _progressBar.Value = 50);
-        if (File.Exists(frameworkPath))
-        {
-            File.Delete(frameworkPath);
-            Log("Framework DLL removed");
-        }
-        if (File.Exists(bootstrapPath))
-        {
-            File.Delete(bootstrapPath);
-            Log("BootstrapLoader DLL removed");
-        }
+        // Clean up framework's own install artifacts in the game folder. We
+        // never touch the mods/ folder generally — only OUR PratfallModFramework
+        // subfolder, which the installer creates and owns.
+        DeleteIfExists(sentinelPath, "Framework-loaded sentinel");
+        DeleteFolderIfExists(frameworkModFolder, "Framework's own mods/ entry");
+
+        Invoke(() => _progressBar.Value = 70);
+        // Clean up framework's runtime state in %AppData%\Pratfall. These are
+        // OUR files (all prefixed modframework-*); user-installed mods and the
+        // game's own save data live in different folders and we don't touch them.
+        var appDataPratfall = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Pratfall");
+        DeleteIfExists(Path.Combine(appDataPratfall, "modframework-state.json"), "Framework state");
+        DeleteIfExists(Path.Combine(appDataPratfall, "modframework-debug-peer.json"), "Debug-peer config");
+        DeleteFolderIfExists(Path.Combine(appDataPratfall, "modframework-crash-reports"), "Crash reports");
+        // Per-mod config + logs live under user_data/ (the path Pratfall reports
+        // via GetUserDataPath at runtime, which on Windows is the AppData/Pratfall
+        // root by default).
+        var userData = Path.Combine(appDataPratfall, "user_data");
+        DeleteFolderIfExists(Path.Combine(userData, "modframework-config"), "Per-mod configs");
+        DeleteFolderIfExists(Path.Combine(userData, "modframework-logs"), "Per-mod logs");
 
         Invoke(() => _progressBar.Value = 100);
-        Log("Uninstall complete. Game restored to original state.");
+        Log("Uninstall complete. Game restored to vanilla; no framework files remain.");
+    }
+
+    private void DeleteIfExists(string path, string description)
+    {
+        if (!File.Exists(path)) return;
+        try
+        {
+            File.Delete(path);
+            Log($"{description} removed");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not remove {description} ({Path.GetFileName(path)}): {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DeleteFolderIfExists(string path, string description)
+    {
+        if (!Directory.Exists(path)) return;
+        try
+        {
+            Directory.Delete(path, recursive: true);
+            Log($"{description} folder removed");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not remove {description} folder ({Path.GetFileName(path)}): {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static bool IsPratfallRunning()
+    {
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("Pratfall"))
+            {
+                p.Dispose();
+                return true;
+            }
+            return false;
+        }
+        catch { return false; }
     }
 
     private void PatchDll(string dllPath, string dataDir, string bootstrapDllPath, string frameworkDllPath)

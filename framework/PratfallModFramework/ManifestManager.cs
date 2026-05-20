@@ -28,27 +28,47 @@ public static class ManifestManager
         // that "this profile's version of mod X is the one that loads".
         var profilePath = FrameworkProfile.ProfileModsDirectory;
         if (!string.IsNullOrEmpty(profilePath) && System.IO.Directory.Exists(profilePath)
-            && TryMarkScanned(profilePath, scannedPaths))
+            && PathUtil.TryAddNormalized(scannedPaths, profilePath))
         {
             ScanOsDirectory(profilePath, allMods);
         }
 
-        // Path 2: user://mods/ — manually installed by player
+        // Path 2: user://mods/ — manually installed by player. Globalize to an
+        // OS-absolute path so we can use the same scanner as the profile path.
+        // CreateDirectory is idempotent — creates the folder on first launch so
+        // zip-drops have somewhere to land and the dialog works without forcing
+        // the player to mkdir manually.
         var userModsAbs = ProjectSettings.GlobalizePath("user://mods/");
-        if (!string.IsNullOrWhiteSpace(userModsAbs) && TryMarkScanned(userModsAbs, scannedPaths))
-            ScanDirectory("user://mods/", allMods);
+        if (!string.IsNullOrEmpty(userModsAbs) && PathUtil.TryAddNormalized(scannedPaths, userModsAbs))
+        {
+            try { System.IO.Directory.CreateDirectory(userModsAbs); }
+            catch (System.Exception ex) { GD.PrintErr($"[ModFramework] Failed to ensure user mods folder {userModsAbs}: {ex.Message}"); }
+            if (System.IO.Directory.Exists(userModsAbs))
+                ScanOsDirectory(userModsAbs, allMods);
+        }
 
-        // Path 3: game install directory's mods/ folder (next to Pratfall.exe).
-        // Skipped when a profile is active — r2modman manages its own folder,
-        // and double-scanning the default path would defeat profile isolation.
+        // Path 3: Pratfall install folder, recursively. A subfolder is treated as
+        // a mod if it contains manifest.json; we don't recurse further once found
+        // (a mod's internal folders aren't sub-mods). Subfolders WITHOUT a manifest
+        // are walked so mods can live at any path — <game>/MyMod/, <game>/community/MyMod/,
+        // <game>/mods/MyMod/, etc. Hard-excludes the game runtime folder
+        // (data_Pratfall_*) which has hundreds of native + .NET files but never a
+        // legitimate mod. Bounded depth 5 — defensive against pathological nesting.
+        //
+        // Skipped when a profile is active — r2modman manages its own folder, and
+        // walking the install root would leak the user's standalone-install mods
+        // into the profile.
+        //
+        // Stays inside <game>/ — never escapes the install root. Other roots
+        // (user://mods/, Workshop content) are scanned by their own dedicated
+        // paths above/below.
         if (!FrameworkProfile.IsActive)
         {
             var gameDir = System.IO.Path.GetDirectoryName(OS.GetExecutablePath());
-            if (gameDir != null)
+            if (!string.IsNullOrEmpty(gameDir) && System.IO.Directory.Exists(gameDir)
+                && PathUtil.TryAddNormalized(scannedPaths, gameDir))
             {
-                var gameModsDir = System.IO.Path.Combine(gameDir, "mods");
-                if (System.IO.Directory.Exists(gameModsDir) && TryMarkScanned(gameModsDir, scannedPaths))
-                    ScanOsDirectory(gameModsDir, allMods);
+                ScanInstallRootRecursive(gameDir, allMods);
             }
         }
 
@@ -56,32 +76,21 @@ public static class ManifestManager
         // Replaces what Pratfall's native ModManager used to do for us (which
         // we've turned off as of 2026-05-18 — see OfficialModBridge.cs).
         // Always scanned, even under a profile — Workshop subscriptions are
-        // global to the Steam account, not per-profile. ScanWorkshopMods has
-        // its own per-library-folder loop and skips Steam-managed paths the
-        // user shouldn't be tagging as a profile root, so no dedup needed.
+        // global to the Steam account, not per-profile. No dedup against
+        // scannedPaths: ScanWorkshopMods walks Steam library roots directly to
+        // steamapps/workshop/content/<appid>/, which never overlaps the
+        // profile / user / install roots Paths 1-3 cover.
         ScanWorkshopMods(allMods);
 
-        return allMods.Values.ToList();
-    }
+        // Collision precedence note: first-listed-wins for a given mod ID. Under
+        // the recursive install-root scan (Path 3), "first" within that path is
+        // BFS-order — alphabetically-earliest sibling at the shallowest depth.
+        // Across paths: Path 1 beats 2 beats 3 beats 4. So if MyMod exists at
+        // BOTH <game>/community/MyMod/ AND <game>/mods/MyMod/, the alphabetic-
+        // earlier `community/` wins. Predictable but not obvious — moving or
+        // renaming a folder can flip which version loads.
 
-    // Normalize an absolute path (full path + trailing separator stripped) and
-    // record it. Returns false if we've already scanned an equivalent path —
-    // call sites should skip in that case.
-    private static bool TryMarkScanned(string path, HashSet<string> seen)
-    {
-        try
-        {
-            var full = System.IO.Path.GetFullPath(path).TrimEnd(
-                System.IO.Path.DirectorySeparatorChar,
-                System.IO.Path.AltDirectorySeparatorChar);
-            return seen.Add(full);
-        }
-        catch
-        {
-            // If normalization fails (bad path chars, IO error), be permissive
-            // and allow the scan — worst case is a duplicate walk.
-            return true;
-        }
+        return allMods.Values.ToList();
     }
 
     // Locate every Steam library folder, look for
@@ -172,6 +181,9 @@ public static class ManifestManager
         }
     }
 
+    // Shallow scan: parse every immediate subdir under dirPath as a candidate
+    // mod folder. Used for r2modman profile + user://mods/ — flat layouts
+    // where mods are direct children of the root.
     private static void ScanOsDirectory(string dirPath, Dictionary<string, ModManifest> allMods)
     {
         foreach (var subDir in System.IO.Directory.GetDirectories(dirPath))
@@ -183,32 +195,68 @@ public static class ManifestManager
         }
     }
 
-    private static void ScanDirectory(string basePath, Dictionary<string, ModManifest> allMods)
+    // Recursive scan from the Pratfall install root. A folder with manifest.json
+    // is treated as a mod (parsed + added, no further descent into its
+    // internals). Folders without are walked up to InstallRootScanMaxDepth
+    // (5 levels) so mods can live at flexible paths — <game>/MyMod/,
+    // <game>/community/MyMod/, <game>/mods/MyMod/, etc. Hard-excludes the game
+    // runtime folder (data_Pratfall_*) which has hundreds of native + .NET
+    // files but never a legitimate mod. Iterative BFS — no stack blowup on
+    // deep trees + the depth cap also protects against symlink loops.
+    private const int InstallRootScanMaxDepth = 5;
+
+    private static void ScanInstallRootRecursive(string root, Dictionary<string, ModManifest> allMods)
     {
-        var dir = DirAccess.Open(basePath);
-        if (dir == null)
-        {
-            DirAccess.MakeDirRecursiveAbsolute(ProjectSettings.GlobalizePath(basePath));
-            return;
-        }
-        dir.ListDirBegin();
-        while (true)
-        {
-            var entry = dir.GetNext();
-            if (string.IsNullOrEmpty(entry)) break;
-            if (entry == "." || entry == "..") continue;
-            if (!dir.CurrentIsDir()) continue;
+        var queue = new Queue<(string Path, int Depth)>();
+        queue.Enqueue((root, 0));
 
-            var manifest = TryParseModManifestFromGodotPath(basePath, entry);
-            if (manifest == null) continue;
+        while (queue.Count > 0)
+        {
+            var (current, depth) = queue.Dequeue();
 
-            // Prefer user:// version if same mod exists elsewhere; otherwise
-            // first-wins. (basePath is the only "do we override?" signal; the
-            // sole caller passes "user://mods/".)
-            if (!allMods.ContainsKey(manifest.Id) || basePath.StartsWith("user://", StringComparison.Ordinal))
-                allMods[manifest.Id] = manifest;
+            // The install root itself isn't a mod (Pratfall.exe lives there);
+            // skip the manifest check for it and just walk children. String.Equals
+            // (Ordinal) rather than ReferenceEquals — works the same today since
+            // we only enqueue `root` once, but stays correct if a future refactor
+            // ever re-creates the root string from path components.
+            if (!string.Equals(current, root, StringComparison.Ordinal))
+            {
+                var manifest = TryParseModManifestFromOsPath(current);
+                if (manifest != null)
+                {
+                    if (!allMods.ContainsKey(manifest.Id))
+                        allMods[manifest.Id] = manifest;
+                    continue; // found a mod; don't recurse into its internals
+                }
+            }
+
+            if (depth >= InstallRootScanMaxDepth) continue;
+
+            try
+            {
+                foreach (var child in System.IO.Directory.EnumerateDirectories(current))
+                {
+                    if (IsExcludedInstallSubfolder(System.IO.Path.GetFileName(child))) continue;
+                    queue.Enqueue((child, depth + 1));
+                }
+            }
+            catch (System.Exception ex)
+            {
+                // Permission denied, transient IO error, etc. Log + continue —
+                // a deeper folder we couldn't read shouldn't kill the whole scan.
+                GD.PrintErr($"[ModFramework] Skipping unreadable dir {current}: {ex.Message}");
+            }
         }
-        dir.ListDirEnd();
+    }
+
+    private static bool IsExcludedInstallSubfolder(string folderName)
+    {
+        // Pratfall ships its Godot/.NET runtime + native DLLs (and OUR framework
+        // DLLs) under data_Pratfall_<platform>_<arch>/. Prefix-match so future
+        // Pratfall platform variants (linux_x86_64, macos_arm64, etc.) are
+        // covered without needing a new release of the framework just to know
+        // about a new exclude.
+        return folderName.StartsWith("data_Pratfall_", StringComparison.OrdinalIgnoreCase);
     }
 
     // Shared core: parse manifest.json under an OS-absolute subdir.
@@ -234,35 +282,4 @@ public static class ManifestManager
         }
     }
 
-    // Shared core: parse manifest.json under a Godot-virtual subdir (user:// or res://).
-    // Mirrors TryParseModManifestFromOsPath but uses Godot.FileAccess for the
-    // read so it works on packed res:// paths in addition to the OS filesystem.
-    private static ModManifest? TryParseModManifestFromGodotPath(string basePath, string entry)
-    {
-        var manifestPath = $"{basePath}{entry}/manifest.json";
-        if (!global::Godot.FileAccess.FileExists(manifestPath)) return null;
-        try
-        {
-            var json = global::Godot.FileAccess.GetFileAsString(manifestPath);
-            return ModManifest.FromJson(
-                json,
-                directoryName: entry,
-                directoryPath: ProjectSettings.GlobalizePath($"{basePath}{entry}"));
-        }
-        catch (System.Exception ex)
-        {
-            GD.PrintErr($"[ModFramework] Failed to parse manifest in {manifestPath}: {ex.Message}");
-            return null;
-        }
-    }
-
-    public static List<string> GetModIds(List<ModManifest> manifests)
-    {
-        return manifests.Select(m => m.Id).ToList();
-    }
-
-    public static List<string> DetectMissingMods(List<string> localIds, List<string> peerIds)
-    {
-        return peerIds.Except(localIds).ToList();
-    }
 }

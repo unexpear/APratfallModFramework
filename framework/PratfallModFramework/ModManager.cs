@@ -48,6 +48,12 @@ public class ModManager : IDisposable
     // Cached current fingerprint per mod id, computed lazily; cleared when files
     // change on disk (transfer, workshop install).
     private readonly Dictionary<string, string> _modCurrentFingerprint = new(StringComparer.OrdinalIgnoreCase);
+    // Mod IDs that were in the last session's persisted KnownModIds but aren't in
+    // the current local scan. Surfaces in the Mods dialog as a heads-up so the
+    // player notices when a mod silently disappears between launches (Workshop
+    // unsubscribe, manual folder delete, r2modman profile resync). Populated in
+    // Initialize, never mutated after — list reflects the snapshot taken at boot.
+    private readonly HashSet<string> _missingSinceLastSession = new(StringComparer.OrdinalIgnoreCase);
     // Most-recent manifest snapshot per peer, keyed by user id. Used by the compatibility
     // checker to evaluate the UNION of local + remote mod sets.
     private readonly Dictionary<string, ModPeerSnapshot> _peerSnapshots = new(StringComparer.OrdinalIgnoreCase);
@@ -87,6 +93,20 @@ public class ModManager : IDisposable
         foreach (var fp in loadedState.CheckedModFingerprints)
             _checkedFingerprints.Add(fp);
 
+        // Missing-mod detection: mods that were on disk last session but aren't
+        // any more. Most likely cause is the player unsubscribed a Workshop mod
+        // (or manually deleted a folder) between launches. Surfaces in the Mods
+        // dialog as a "last session had these — gone now" notice. First-ever
+        // launches see an empty KnownModIds and naturally no missing notice.
+        var currentIds = new HashSet<string>(_localMods.Select(m => m.Id), StringComparer.OrdinalIgnoreCase);
+        foreach (var id in loadedState.KnownModIds)
+        {
+            if (!currentIds.Contains(id))
+                _missingSinceLastSession.Add(id);
+        }
+        if (_missingSinceLastSession.Count > 0)
+            GD.Print($"[ModFramework] {_missingSinceLastSession.Count} mod(s) present last session but missing now: {string.Join(", ", _missingSinceLastSession)}");
+
         foreach (var mod in _localMods)
         {
             mod.Normalize();
@@ -113,7 +133,8 @@ public class ModManager : IDisposable
             onToggleMod: (id, enabled) => ToggleMod(id, enabled),
             getModIssueTooltip: BuildModIssueTooltip,
             inspectMod: id => InspectMod(id),
-            scanMod: id => ScanMod(id));
+            scanMod: id => ScanMod(id),
+            getMissingSinceLastSession: () => MissingSinceLastSession);
 
         try { ModExceptionFilter.Install(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] Exception filter failed: {ex.Message}"); }
@@ -163,6 +184,12 @@ public class ModManager : IDisposable
 
     public bool IsModEnabled(string id) => _modEnabled.GetValueOrDefault(id, false);
     public bool IsModDesiredEnabled(string id) => _desiredEnabled.GetValueOrDefault(id, false);
+
+    // Mod IDs the framework saw last launch but doesn't see now. Snapshot taken
+    // in Initialize. Returned as IReadOnlyCollection (live HashSet reference);
+    // the caller doesn't mutate it. UI (Mods dialog) reads this to show a
+    // "last session had these — they're gone now" notice.
+    public IReadOnlyCollection<string> MissingSinceLastSession => _missingSinceLastSession;
 
     // Called by WorkshopSubscriber when Steamworks fires OnItemInstalled for a
     // newly-subscribed (or freshly re-downloaded) Workshop mod. Re-scans local
@@ -270,6 +297,11 @@ public class ModManager : IDisposable
     {
         _networkLayer.Shutdown();
         UnloadAllMods();
+        // Symmetric teardown of subscribers that Apply()'d during Initialize. If a
+        // future re-init path is added, calling Apply() again after Shutdown should
+        // re-attach cleanly.
+        try { WorkshopSubscriber.Shutdown(); }
+        catch (Exception ex) { GD.PrintErr($"[ModFramework] WorkshopSubscriber.Shutdown threw: {ex.GetType().Name}: {ex.Message}"); }
         GD.Print("[ModFramework] Framework shut down");
     }
 

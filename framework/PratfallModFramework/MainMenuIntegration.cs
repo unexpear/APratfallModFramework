@@ -37,6 +37,10 @@ public static partial class MainMenuIntegration
     // Static IL safety scan (Cecil-backed). Side effect: marks the mod's fingerprint as
     // user-checked, since running the scan IS the user-consent action.
     private static Func<string, ModScanner.Report?>? _scanMod;
+    // Mod IDs that were known at last launch but aren't in the current scan.
+    // Surfaced as a small notice in the Mods dialog so the player notices a
+    // silent unsubscribe / folder delete between sessions.
+    private static Func<IReadOnlyCollection<string>>? _getMissingSinceLastSession;
 
     public static void Install(SceneTree tree,
         Action? onModsPressed = null,
@@ -46,7 +50,8 @@ public static partial class MainMenuIntegration
         Action<string, bool>? onToggleMod = null,
         Func<string, string?>? getModIssueTooltip = null,
         Func<string, ModInspector.Report?>? inspectMod = null,
-        Func<string, ModScanner.Report?>? scanMod = null)
+        Func<string, ModScanner.Report?>? scanMod = null,
+        Func<IReadOnlyCollection<string>>? getMissingSinceLastSession = null)
     {
         _tree = tree;
         _onModsButtonPressed = onModsPressed;
@@ -57,6 +62,7 @@ public static partial class MainMenuIntegration
         _getModIssueTooltip = getModIssueTooltip;
         _inspectMod = inspectMod;
         _scanMod = scanMod;
+        _getMissingSinceLastSession = getMissingSinceLastSession;
         if (_installed) return;
         _installed = true;
         GD.Print("[ModFramework] MainMenuIntegration installed, waiting for main menu...");

@@ -29,6 +29,10 @@ private-mods/
 CLAUDE_CODE_CONTINUATION.md
 AGENTS.md
 
+# Hands-on verification backlog (local scratchpad — items we shipped without
+# running in real Pratfall, batched up to re-test before declaring "done")
+NEEDS_VERIFICATION.md
+
 # Game install / user data leaking in
 data_Pratfall_windows_x86_64/
 *.pck

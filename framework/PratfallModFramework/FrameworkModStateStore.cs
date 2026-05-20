@@ -20,18 +20,16 @@ internal static class FrameworkModStateStore
         // every executable file in the mod (DLL + PCK if any), so any byte change in
         // either re-locks the gate. Hash-based — a mod update forces a re-check.
         public HashSet<string> CheckedModFingerprints { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // Mods we knew about last session, by ID. Compared against the current scan
+        // to detect "this mod was here last launch, isn't now" — surfaces as a
+        // dropped-mods notice in the Mods dialog. Populated from the persisted
+        // file; never empty after a non-first-run launch.
+        public HashSet<string> KnownModIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     public static LoadedState LoadState(IReadOnlyCollection<ModManifest> manifests)
     {
-        var loaded = TryLoadPersistedState();
-        if (loaded != null)
-            return loaded;
-
-        // First-run / no prior state: seed enabled set from physical official-loader
-        // state only. Framework-loaded mods stay disabled until the user explicitly
-        // checks or toggles them on.
-        return new LoadedState { EnabledIds = SeedInitialEnabledIds(manifests) };
+        return TryLoadPersistedState() ?? new LoadedState();
     }
 
     public static void SaveState(IEnumerable<string> knownModIds, IEnumerable<string> enabledIds, IEnumerable<string> checkedModFingerprints)
@@ -70,31 +68,8 @@ internal static class FrameworkModStateStore
 
     private static LoadedState? TryLoadPersistedState()
     {
-        var path = FrameworkProfile.ResolveStateFilePath();
-        if (!File.Exists(path))
-        {
-            // Profile-managed launch but the profile is fresh? Fall back to
-            // reading the default user:// state once, so a player can switch
-            // to r2modman without losing their existing approvals on first
-            // run. The profile path will get its own write-on-save copy.
-            if (FrameworkProfile.IsActive)
-            {
-                var fallbackPath = ProjectSettings.GlobalizePath(DefaultStatePath);
-                if (File.Exists(fallbackPath))
-                {
-                    GD.Print($"[ModFramework] FrameworkModStateStore: profile state file missing; one-time read from default location for migration ({fallbackPath})");
-                    path = fallbackPath;
-                }
-                else
-                {
-                    return null;
-                }
-            }
-            else
-            {
-                return null;
-            }
-        }
+        var path = ResolvePathOrNull();
+        if (path == null) return null;
 
         try
         {
@@ -108,8 +83,16 @@ internal static class FrameworkModStateStore
                     .Where(h => !string.IsNullOrWhiteSpace(h))
                     .Select(h => h.Trim().ToUpperInvariant()),
                 StringComparer.OrdinalIgnoreCase);
+            var known = new HashSet<string>(
+                ModManifestJson.NormalizeIdentifiers(payload.KnownModIds ?? new List<string>()),
+                StringComparer.OrdinalIgnoreCase);
 
-            return new LoadedState { EnabledIds = enabled, CheckedModFingerprints = checkedHashes };
+            return new LoadedState
+            {
+                EnabledIds = enabled,
+                CheckedModFingerprints = checkedHashes,
+                KnownModIds = known,
+            };
         }
         catch (Exception ex)
         {
@@ -118,18 +101,23 @@ internal static class FrameworkModStateStore
         }
     }
 
-    private static HashSet<string> SeedInitialEnabledIds(IReadOnlyCollection<ModManifest> manifests)
+    // Resolves which state-file path to read on this launch. Returns null if no
+    // state file exists at all (first-ever launch, or first launch under a fresh
+    // r2modman profile with no default-location fallback to migrate from). The
+    // migration fallback only kicks in for profile-managed launches — single-
+    // install users always go straight to the user:// state.
+    private static string? ResolvePathOrNull()
     {
-        var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var primary = FrameworkProfile.ResolveStateFilePath();
+        if (File.Exists(primary)) return primary;
 
-        var officialEnabledDirectories = OfficialModBridge.ReadPhysicalEnabledDirectories();
-        foreach (var manifest in manifests.Where(manifest => manifest.UsesOfficialLoader()))
-        {
-            if (officialEnabledDirectories.Contains(manifest.DirectoryName))
-                enabled.Add(manifest.Id);
-        }
+        if (!FrameworkProfile.IsActive) return null;
 
-        return enabled;
+        var fallback = ProjectSettings.GlobalizePath(DefaultStatePath);
+        if (!File.Exists(fallback)) return null;
+
+        GD.Print($"[ModFramework] FrameworkModStateStore: profile state file missing; one-time read from default location for migration ({fallback})");
+        return fallback;
     }
 
     private sealed class PersistedState
@@ -141,10 +129,16 @@ internal static class FrameworkModStateStore
 
     private static class ModStateJson
     {
-        public static readonly JsonSerializerOptions Options = new()
+        // Cloned from JsonSerializerOptions.Default so the TypeInfoResolver is
+        // populated. Matches the same pattern ModConfig.WriteFile uses — Pratfall's
+        // runtime config can disable reflection-based JSON serialization, and a
+        // fresh `new JsonSerializerOptions { ... }` would then throw "must specify
+        // TypeInfoResolver" on first use. Cloning Default sidesteps that whether
+        // the runtime has reflection on or off.
+        public static readonly JsonSerializerOptions Options = new(JsonSerializerOptions.Default)
         {
             PropertyNameCaseInsensitive = true,
-            WriteIndented = true
+            WriteIndented = true,
         };
     }
 }

@@ -11,8 +11,9 @@ namespace PratfallModFramework;
 //      Steam Workshop content).
 //   2. The location for OUR state file (modframework-state.json — enabled mods,
 //      approved fingerprints), so each r2modman profile gets independent
-//      framework state. Without this, switching profiles would share enabled-
-//      mod selections across profiles (the footgun option-A would have).
+//      framework state. Otherwise switching profiles would silently share
+//      enabled-mod selections across profiles (a half-measure we explicitly
+//      avoided when designing this).
 //
 // When the flag isn't set (the default for normal Steam launches), all paths
 // resolve to their original locations and nothing changes for single-install
@@ -26,35 +27,34 @@ namespace PratfallModFramework;
 //   - SystemArguments is Pratfall-internal; using OS.GetCmdlineArgs keeps
 //     us out of game-private API.
 //
-// Cached on first access — CLI args don't change at runtime, so re-parsing
-// every call is wasteful.
+// Resolved exactly once via Lazy<T>. CLI args don't change at runtime so
+// re-parsing every call is wasteful, and Lazy's default
+// LazyThreadSafetyMode (ExecutionAndPublication) guarantees that even if a
+// future caller hits this from a non-main thread, the parse runs at most
+// once and all readers see the same fully-published result (avoids the
+// torn-read window a plain `if (!_resolved)` pattern would have).
 internal static class FrameworkProfile
 {
     private const string FlagName = "--qh-mod-directory";
 
-    private static string? _profileModsDirectory;
-    private static bool _resolved;
+    private static readonly Lazy<string?> _profileModsDirectory =
+        new(ParseFlagWithLog);
 
     // The path passed to --qh-mod-directory, or null if the flag wasn't set
     // or its value was empty/whitespace. Absolute path; not Godot-virtual.
-    public static string? ProfileModsDirectory
-    {
-        get
-        {
-            if (!_resolved)
-            {
-                _profileModsDirectory = ParseFlag();
-                _resolved = true;
-                if (_profileModsDirectory != null)
-                    GD.Print($"[ModFramework] FrameworkProfile: --qh-mod-directory detected -> {_profileModsDirectory} (treated as additional scan root + state-file location)");
-            }
-            return _profileModsDirectory;
-        }
-    }
+    public static string? ProfileModsDirectory => _profileModsDirectory.Value;
 
     // True iff a profile path is in effect. Convenience for `if (FrameworkProfile.IsActive) { ... }`
     // call sites that don't need the actual string.
     public static bool IsActive => ProfileModsDirectory != null;
+
+    private static string? ParseFlagWithLog()
+    {
+        var result = ParseFlag();
+        if (result != null)
+            GD.Print($"[ModFramework] FrameworkProfile: --qh-mod-directory detected -> {result} (treated as additional scan root + state-file location)");
+        return result;
+    }
 
     private static string? ParseFlag()
     {
@@ -69,14 +69,23 @@ internal static class FrameworkProfile
                 //   --qh-mod-directory=<path>     (equals-separated; common in shell scripting)
                 if (args[i] == FlagName && i + 1 < args.Length)
                 {
-                    var v = args[i + 1].Trim();
-                    return string.IsNullOrEmpty(v) ? null : v;
+                    var value = args[i + 1].Trim();
+                    if (string.IsNullOrEmpty(value)) return null;
+                    // Guard against `--qh-mod-directory --next-flag` (next arg looks
+                    // like another flag rather than a real path). Real paths can't
+                    // start with `--` on any OS, so this is unambiguously a mistake.
+                    if (value.StartsWith("--", StringComparison.Ordinal))
+                    {
+                        GD.PrintErr($"[ModFramework] FrameworkProfile: --qh-mod-directory value looks like another flag ('{value}'); ignoring");
+                        return null;
+                    }
+                    return value;
                 }
                 const string eqPrefix = FlagName + "=";
                 if (args[i].StartsWith(eqPrefix, StringComparison.Ordinal))
                 {
-                    var v = args[i].Substring(eqPrefix.Length).Trim();
-                    return string.IsNullOrEmpty(v) ? null : v;
+                    var value = args[i].Substring(eqPrefix.Length).Trim();
+                    return string.IsNullOrEmpty(value) ? null : value;
                 }
             }
         }

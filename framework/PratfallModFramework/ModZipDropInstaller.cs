@@ -9,8 +9,9 @@ namespace PratfallModFramework;
 // `MyMod.zip` into `%APPDATA%\Pratfall\mods\` would see nothing happen.
 //
 // Behavior per zip:
-//   1. Validate the source path is inside one of our trusted scan roots
-//      (defense against being pointed at arbitrary directories).
+//   1. Only scan roots from EnumerateScanRoots() are inspected — Steam
+//      Workshop content is deliberately excluded (Steam owns those folders
+//      and Workshop downloads aren't .zip-format).
 //   2. Extract to a same-named folder NEXT TO the zip (zip `MyMod.zip` →
 //      folder `MyMod/` in the same parent). Skip if the destination folder
 //      already exists — never overwrite an existing mod install silently.
@@ -30,6 +31,7 @@ internal static class ModZipDropInstaller
 {
     public static void ExtractAll()
     {
+        int extracted = 0, skipped = 0, failed = 0;
         foreach (var root in EnumerateScanRoots())
         {
             try
@@ -37,7 +39,12 @@ internal static class ModZipDropInstaller
                 if (!Directory.Exists(root)) continue;
                 foreach (var zipPath in Directory.EnumerateFiles(root, "*.zip", SearchOption.TopDirectoryOnly))
                 {
-                    TryExtractOne(zipPath);
+                    switch (TryExtractOne(zipPath))
+                    {
+                        case ExtractResult.Extracted: extracted++; break;
+                        case ExtractResult.Skipped:   skipped++;   break;
+                        case ExtractResult.Failed:    failed++;    break;
+                    }
                 }
             }
             catch (Exception ex)
@@ -45,6 +52,8 @@ internal static class ModZipDropInstaller
                 GD.PrintErr($"[ModFramework] ModZipDropInstaller: enumerate failed for {root}: {ex.GetType().Name}: {ex.Message}");
             }
         }
+        if (extracted + skipped + failed > 0)
+            GD.Print($"[ModFramework] ModZipDropInstaller: {extracted} extracted, {skipped} skipped, {failed} failed");
     }
 
     private static IEnumerable<string> EnumerateScanRoots()
@@ -60,11 +69,11 @@ internal static class ModZipDropInstaller
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var profilePath = FrameworkProfile.ProfileModsDirectory;
-        if (!string.IsNullOrEmpty(profilePath) && TryAdd(seen, profilePath))
+        if (!string.IsNullOrEmpty(profilePath) && PathUtil.TryAddNormalized(seen, profilePath))
             yield return profilePath;
 
         var userModsAbs = ProjectSettings.GlobalizePath("user://mods/");
-        if (!string.IsNullOrWhiteSpace(userModsAbs) && TryAdd(seen, userModsAbs))
+        if (!string.IsNullOrWhiteSpace(userModsAbs) && PathUtil.TryAddNormalized(seen, userModsAbs))
             yield return userModsAbs;
 
         if (!FrameworkProfile.IsActive)
@@ -73,30 +82,18 @@ internal static class ModZipDropInstaller
             if (!string.IsNullOrEmpty(gameDir))
             {
                 var gameModsDir = Path.Combine(gameDir, "mods");
-                if (TryAdd(seen, gameModsDir))
+                if (PathUtil.TryAddNormalized(seen, gameModsDir))
                     yield return gameModsDir;
             }
         }
     }
 
-    private static bool TryAdd(HashSet<string> seen, string path)
-    {
-        try
-        {
-            var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return seen.Add(full);
-        }
-        catch
-        {
-            return true; // best-effort: don't block on path-normalization failure
-        }
-    }
+    private enum ExtractResult { Extracted, Skipped, Failed }
 
-    private static void TryExtractOne(string zipPath)
+    private static ExtractResult TryExtractOne(string zipPath)
     {
         string? parent = null;
         string? folderName = null;
-        string? destPath = null;
         try
         {
             parent = Path.GetDirectoryName(zipPath);
@@ -104,10 +101,10 @@ internal static class ModZipDropInstaller
             if (string.IsNullOrWhiteSpace(parent) || string.IsNullOrWhiteSpace(folderName))
             {
                 GD.PrintErr($"[ModFramework] ModZipDropInstaller: bad zip path {zipPath}");
-                return;
+                return ExtractResult.Failed;
             }
 
-            destPath = Path.Combine(parent, folderName);
+            var destPath = Path.Combine(parent, folderName);
             if (Directory.Exists(destPath))
             {
                 // Don't overwrite an existing install — could be a different
@@ -115,33 +112,58 @@ internal static class ModZipDropInstaller
                 // and leave both the zip and the existing folder alone; user
                 // can resolve manually if they intended an update.
                 GD.Print($"[ModFramework] ModZipDropInstaller: target folder already exists, skipping ({destPath}). Remove the folder if you want the zip extracted.");
-                return;
+                return ExtractResult.Skipped;
             }
 
             // Extract to a temp folder next to the destination, then rename.
             // Means a partial / failed extraction never leaves a broken mod
-            // folder in place. Temp folder uses a guid to avoid collisions.
-            var tempDest = Path.Combine(parent, $".pmfw-zipdrop-{folderName}-{Guid.NewGuid():N}");
+            // folder in place. 8 hex chars of guid is enough collision space
+            // per folderName; keeps the temp-path short so deeply-nested
+            // profile paths don't trip Windows MAX_PATH (260) limit.
+            var guidSuffix = Guid.NewGuid().ToString("N").Substring(0, 8);
+            var tempDest = Path.Combine(parent, $".pmfw-zipdrop-{folderName}-{guidSuffix}");
             ZipFile.ExtractToDirectory(zipPath, tempDest); // throws on zip-slip in .NET 7+
             Directory.Move(tempDest, destPath);
 
-            File.Delete(zipPath);
+            // Extract succeeded — count it. If the cleanup-delete fails (file
+            // lock, AV scanner, permission), the orphan zip will be skipped
+            // on next launch (destPath exists check above) but we don't want
+            // to roll back the successful move. Log the delete failure
+            // separately so the user has a hint about cleaning up.
+            try { File.Delete(zipPath); }
+            catch (Exception delEx)
+            {
+                GD.PrintErr($"[ModFramework] ModZipDropInstaller: extracted ok but couldn't delete source zip {zipPath}: {delEx.GetType().Name}: {delEx.Message} — remove it manually");
+            }
+
             GD.Print($"[ModFramework] ModZipDropInstaller: extracted {Path.GetFileName(zipPath)} -> {destPath}/");
+            return ExtractResult.Extracted;
         }
         catch (Exception ex)
         {
             GD.PrintErr($"[ModFramework] ModZipDropInstaller: failed to extract {zipPath}: {ex.GetType().Name}: {ex.Message}");
-            // Best-effort cleanup of the temp dest if rename didn't happen.
-            // Original zip stays in place for a future retry.
-            try
-            {
-                if (parent != null && folderName != null)
-                {
-                    foreach (var leftover in Directory.EnumerateDirectories(parent, $".pmfw-zipdrop-{folderName}-*"))
-                        Directory.Delete(leftover, recursive: true);
-                }
-            }
-            catch { /* cleanup best-effort */ }
+            CleanupOrphanTempFolders(parent, folderName);
+            return ExtractResult.Failed;
+        }
+    }
+
+    // Best-effort: walk the parent directory for any leftover temp folders
+    // from a failed extract and remove them. Original zip stays in place for
+    // a future retry. Swallows all exceptions because this is a defensive
+    // cleanup pass — if it can't run, the leftover folder is mildly ugly
+    // but harmless (won't conflict with the next attempt since the guid
+    // suffix is fresh each time).
+    private static void CleanupOrphanTempFolders(string? parent, string? folderName)
+    {
+        if (parent == null || folderName == null) return;
+        try
+        {
+            foreach (var leftover in Directory.EnumerateDirectories(parent, $".pmfw-zipdrop-{folderName}-*"))
+                Directory.Delete(leftover, recursive: true);
+        }
+        catch (Exception)
+        {
+            // intentional swallow: defensive cleanup, not load-bearing
         }
     }
 }

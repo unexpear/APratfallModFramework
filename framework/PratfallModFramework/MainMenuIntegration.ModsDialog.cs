@@ -121,6 +121,28 @@ public static partial class MainMenuIntegration
         subtitle.AddThemeColorOverride("font_color", new Color(0.79f, 0.89f, 0.91f));
         panel.AddChild(subtitle);
 
+        // Missing-since-last-session notice. Persists in the framework state file
+        // as KnownModIds (every mod ID we saw last launch); compared against the
+        // current scan at boot. Empty on first ever launch and any session where
+        // nothing dropped between launches.
+        var missingSinceLastSession = _getMissingSinceLastSession?.Invoke();
+        if (missingSinceLastSession != null && missingSinceLastSession.Count > 0)
+        {
+            var missingNotice = new Label
+            {
+                Text = missingSinceLastSession.Count == 1
+                    ? $"⚠ 1 mod was here last session but is missing now: {string.Join(", ", missingSinceLastSession)}"
+                    : $"⚠ {missingSinceLastSession.Count} mods were here last session but are missing now: {string.Join(", ", missingSinceLastSession)}",
+                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+                TooltipText = "Most likely cause: Workshop unsubscribe, manual folder delete, or r2modman profile change. If unintended, reinstall or re-subscribe.",
+                MouseFilter = Control.MouseFilterEnum.Pass,
+            };
+            ApplyFont(missingNotice, Math.Max(_buttonFontSize - 1, 14));
+            missingNotice.AddThemeColorOverride("font_color", new Color(0.98f, 0.78f, 0.45f));
+            panel.AddChild(missingNotice);
+        }
+
         var scroll = new ScrollContainer
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,

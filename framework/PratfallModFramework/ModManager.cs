@@ -1147,35 +1147,32 @@ public class ModManager : IDisposable
                 // changed). Without this, the user can toggle the new mod ON in the
                 // dialog but EnableMod has no DLL path to load. They'd be forced to
                 // restart.
-                if (UsesFrameworkAssemblyLoader(mod))
+                if (!UsesFrameworkAssemblyLoader(mod))
                 {
-                    var dllPath = TryFindModDll(mod);
-                    if (dllPath != null)
-                    {
-                        if (!_modDllPaths.TryGetValue(mod.Id, out var existing) || existing != dllPath)
-                        {
-                            _modDllPaths[mod.Id] = dllPath;
-                            // Path or bytes may have changed under us; force re-fingerprint.
-                            _modCurrentFingerprint.Remove(mod.Id);
-                        }
-                        else
-                        {
-                            // Same path — bytes may still have changed if Workshop overwrote
-                            // an existing mod in place. Cheap to invalidate; recomputed lazily.
-                            _modCurrentFingerprint.Remove(mod.Id);
-                        }
+                    // Manifest-only / Godot-script mod — no assembly to resolve.
+                    // Mark session-available only if we don't already have a value;
+                    // don't clobber an existing user-check state from earlier.
+                    if (!_modSessionAvailable.ContainsKey(mod.Id))
                         _modSessionAvailable[mod.Id] = true;
-                    }
-                    else
-                    {
-                        if (!_modSessionAvailable.ContainsKey(mod.Id))
-                            _modSessionAvailable[mod.Id] = false;
-                    }
+                    continue;
                 }
-                else if (!_modSessionAvailable.ContainsKey(mod.Id))
+
+                var dllPath = TryFindModDll(mod);
+                if (dllPath == null)
                 {
-                    _modSessionAvailable[mod.Id] = true;
+                    // DLL not yet on disk (download still in flight?). Leave any
+                    // existing session-availability state alone; default to false.
+                    if (!_modSessionAvailable.ContainsKey(mod.Id))
+                        _modSessionAvailable[mod.Id] = false;
+                    continue;
                 }
+
+                // Record current path (no-op if unchanged) + always invalidate
+                // the cached fingerprint. Whether the path moved or bytes were
+                // overwritten in place, recomputing on next access is cheap.
+                _modDllPaths[mod.Id] = dllPath;
+                _modCurrentFingerprint.Remove(mod.Id);
+                _modSessionAvailable[mod.Id] = true;
             }
             GD.Print($"[ModFramework] Workshop install integrated; {_localMods.Count} local mods after rescan");
         }

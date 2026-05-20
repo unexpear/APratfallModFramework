@@ -99,36 +99,21 @@ public static class ManifestManager
 
             foreach (var subDir in System.IO.Directory.GetDirectories(workshopRoot))
             {
-                var manifestPath = System.IO.Path.Combine(subDir, "manifest.json");
-                if (!System.IO.File.Exists(manifestPath)) continue;
+                var manifest = TryParseModManifestFromOsPath(subDir);
+                if (manifest == null) continue;
 
-                try
-                {
-                    var json = System.IO.File.ReadAllText(manifestPath);
-                    var folderName = System.IO.Path.GetFileName(subDir);
-                    var manifest = ModManifest.FromJson(
-                        json,
-                        directoryName: folderName,
-                        directoryPath: subDir);
+                // Tag as Workshop. Workshop folders are named after the
+                // published-file ID — parse to ulong for the WorkshopId field
+                // (silently leave 0 if folder name isn't numeric, which
+                // shouldn't happen for real Steam Workshop downloads).
+                manifest.IsSteamWorkshopMod = true;
+                if (ulong.TryParse(manifest.DirectoryName, out var wsid))
+                    manifest.WorkshopId = wsid;
 
-                    // Tag as Workshop. Workshop folders are named after the
-                    // published-file ID — parse to ulong for the WorkshopId
-                    // field (silently leave 0 if folder name isn't numeric, which
-                    // shouldn't happen for real Steam Workshop downloads).
-                    manifest.IsSteamWorkshopMod = true;
-                    if (ulong.TryParse(folderName, out var wsid))
-                        manifest.WorkshopId = wsid;
-
-                    // First Workshop entry wins for a given mod ID; locally-
-                    // installed entries take precedence (they were added in
-                    // earlier passes).
-                    if (!allMods.ContainsKey(manifest.Id))
-                        allMods[manifest.Id] = manifest;
-                }
-                catch (System.Exception e)
-                {
-                    GD.PrintErr($"[ModFramework] Failed to parse Workshop manifest at {manifestPath}: {e.Message}");
-                }
+                // First Workshop entry wins for a given mod ID; locally-
+                // installed entries take precedence (added in earlier passes).
+                if (!allMods.ContainsKey(manifest.Id))
+                    allMods[manifest.Id] = manifest;
             }
         }
     }
@@ -174,11 +159,11 @@ public static class ManifestManager
                 var rx = new System.Text.RegularExpressions.Regex("\"path\"\\s*\"([^\"]+)\"");
                 foreach (var line in lines)
                 {
-                    var m = rx.Match(line);
-                    if (m.Success)
+                    var match = rx.Match(line);
+                    if (match.Success)
                     {
                         // VDF escapes backslashes as \\ — unescape to a real path.
-                        var libPath = m.Groups[1].Value.Replace("\\\\", "\\");
+                        var libPath = match.Groups[1].Value.Replace("\\\\", "\\");
                         if (System.IO.Directory.Exists(libPath) && seen.Add(libPath))
                             yield return libPath;
                     }
@@ -191,23 +176,10 @@ public static class ManifestManager
     {
         foreach (var subDir in System.IO.Directory.GetDirectories(dirPath))
         {
-            var manifestPath = System.IO.Path.Combine(subDir, "manifest.json");
-            if (!System.IO.File.Exists(manifestPath)) continue;
-
-            try
-            {
-                var json = System.IO.File.ReadAllText(manifestPath);
-                var manifest = ModManifest.FromJson(
-                    json,
-                    directoryName: System.IO.Path.GetFileName(subDir),
-                    directoryPath: subDir);
-                if (!allMods.ContainsKey(manifest.Id))
-                    allMods[manifest.Id] = manifest;
-            }
-            catch (System.Exception e)
-            {
-                GD.PrintErr($"[ModFramework] Failed to parse manifest at {manifestPath}: {e.Message}");
-            }
+            var manifest = TryParseModManifestFromOsPath(subDir);
+            if (manifest == null) continue;
+            if (!allMods.ContainsKey(manifest.Id))
+                allMods[manifest.Id] = manifest;
         }
     }
 
@@ -227,26 +199,61 @@ public static class ManifestManager
             if (entry == "." || entry == "..") continue;
             if (!dir.CurrentIsDir()) continue;
 
-            var manifestPath = $"{basePath}{entry}/manifest.json";
-            if (!global::Godot.FileAccess.FileExists(manifestPath)) continue;
+            var manifest = TryParseModManifestFromGodotPath(basePath, entry);
+            if (manifest == null) continue;
 
-            try
-            {
-                var json = global::Godot.FileAccess.GetFileAsString(manifestPath);
-                var manifest = ModManifest.FromJson(
-                    json,
-                    directoryName: entry,
-                    directoryPath: ProjectSettings.GlobalizePath($"{basePath}{entry}"));
-                // Prefer user:// version if same mod exists in res://
-                if (!allMods.ContainsKey(manifest.Id) || basePath.StartsWith("user://", StringComparison.Ordinal))
-                    allMods[manifest.Id] = manifest;
-            }
-            catch (System.Exception e)
-            {
-                GD.PrintErr($"[ModFramework] Failed to parse manifest in {manifestPath}: {e.Message}");
-            }
+            // Prefer user:// version if same mod exists elsewhere; otherwise
+            // first-wins. (basePath is the only "do we override?" signal; the
+            // sole caller passes "user://mods/".)
+            if (!allMods.ContainsKey(manifest.Id) || basePath.StartsWith("user://", StringComparison.Ordinal))
+                allMods[manifest.Id] = manifest;
         }
         dir.ListDirEnd();
+    }
+
+    // Shared core: parse manifest.json under an OS-absolute subdir.
+    // Returns null + logs on missing-file or parse-error. DirectoryName +
+    // DirectoryPath are set on the manifest; post-parse tagging
+    // (IsSteamWorkshopMod etc.) is the caller's responsibility.
+    private static ModManifest? TryParseModManifestFromOsPath(string subDir)
+    {
+        var manifestPath = System.IO.Path.Combine(subDir, "manifest.json");
+        if (!System.IO.File.Exists(manifestPath)) return null;
+        try
+        {
+            var json = System.IO.File.ReadAllText(manifestPath);
+            return ModManifest.FromJson(
+                json,
+                directoryName: System.IO.Path.GetFileName(subDir),
+                directoryPath: subDir);
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Failed to parse manifest at {manifestPath}: {ex.Message}");
+            return null;
+        }
+    }
+
+    // Shared core: parse manifest.json under a Godot-virtual subdir (user:// or res://).
+    // Mirrors TryParseModManifestFromOsPath but uses Godot.FileAccess for the
+    // read so it works on packed res:// paths in addition to the OS filesystem.
+    private static ModManifest? TryParseModManifestFromGodotPath(string basePath, string entry)
+    {
+        var manifestPath = $"{basePath}{entry}/manifest.json";
+        if (!global::Godot.FileAccess.FileExists(manifestPath)) return null;
+        try
+        {
+            var json = global::Godot.FileAccess.GetFileAsString(manifestPath);
+            return ModManifest.FromJson(
+                json,
+                directoryName: entry,
+                directoryPath: ProjectSettings.GlobalizePath($"{basePath}{entry}"));
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Failed to parse manifest in {manifestPath}: {ex.Message}");
+            return null;
+        }
     }
 
     public static List<string> GetModIds(List<ModManifest> manifests)

@@ -126,11 +126,11 @@ public static class ModCrashReporter
                 try
                 {
                     var json = File.ReadAllText(manifestPath);
-                    var m = ModManifest.FromJson(json, directoryName: Path.GetFileName(sub), directoryPath: sub);
-                    if (string.Equals(m.Id, modId, StringComparison.OrdinalIgnoreCase) ||
+                    var manifest = ModManifest.FromJson(json, directoryName: Path.GetFileName(sub), directoryPath: sub);
+                    if (string.Equals(manifest.Id, modId, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(Path.GetFileName(sub), modId, StringComparison.OrdinalIgnoreCase))
                     {
-                        return m;
+                        return manifest;
                     }
                 }
                 catch

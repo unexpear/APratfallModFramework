@@ -136,6 +136,18 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: document strict-majority pass rule, ties-fail behavior, no-timeout behavior, case-insensitive voter dedup, and ClearAllVotes external reset contract.
   Re-trigger: pre-v1.0 documentation pass.
 
+### SessionStartHooks.cs
+
+- Finding: Missing Shutdown method; inconsistent with WorkshopSubscriber, NativeModUiSuppressor, and OfficialModBridge.
+  Why deferred: lifecycle change; patches currently survive process lifetime, and adding unpatch behavior changes shutdown semantics.
+  Fix sketch: add Shutdown that calls harmony.UnpatchAll(harmony.Id), nulls _beforeSessionStart, and resets _installed; wire into ModManager.Shutdown.
+  Re-trigger: cross-cutting HarmonyPatchSet lifecycle pass.
+
+- Finding: No outer try/catch on Install.
+  Why deferred: lifecycle-adjacent; changes initialization failure semantics if future Pratfall signatures drift.
+  Fix sketch: wrap harmony.Patch calls in try/catch matching OfficialModBridge.Install; log and leave _installed false on failure.
+  Re-trigger: alongside Shutdown method addition.
+
 ### ModNetworkLayer.cs
 
 - Finding: Broadcast/Send methods share repeated happy-path shape (transport check, hooked check, localUserId check, Normalize, wrapper Create, SendReliableGlobalEvent).
@@ -210,7 +222,7 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 - Finding: No format-contract regression coverage.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.
-  Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity).
+  Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity), (f) lifecycle-hook coverage: SessionStartHooks install idempotence, Host/Offline dispatch, callback exception isolation, last-install-wins behavior, Bootstrap startup/shutdown sentinel behavior, and ModManager subsystem teardown order.
   Re-trigger: before any persistence / wire / report-format / path-sanitization / log-format refactor. Gates these deferred refactors:
     - ModConfig CreateConfigDocumentTemplate + EnsureFilePath extractions
     - ModNetworkContracts NetworkEvent dedup + 32700-byte cap helper
@@ -232,6 +244,11 @@ or intentionally rejected. Do not keep a completed-history trail.
   Why deferred: not readability work; AssemblyLoadContext unload behavior is fragile and needs explicit tests before any loader refactor.
   Fix sketch: add tests for Harmony apply/remove across load/unload cycle, OnUnload fires exactly once after OnLoad throw, reload-same-id leaves no stale state, shared assembly refs use host context not ALC, SnapshotLoadedAssemblies doesn't prevent unload, ALC.Unload + GC actually frees the assembly (use WeakReference + force GC to verify).
   Re-trigger: before any ModAssemblyLoader refactor (gates the deferred Harmony-per-patch try/catch item).
+
+- Finding: MOD_AUTHORS_GUIDE_FRAMEWORK.md lacks an exception-handling-in-framework-helpers section.
+  Why deferred: needs full helper-cluster audit to classify each helper callback by frequency.
+  Fix sketch: add "Exception handling in framework helpers" section explaining frequency-based exception routing — rare lifecycle callbacks (OnLoad, OnUnload, settings widget creation) route to ModCrashReporter; high-frequency callbacks (game events, button presses, per-frame work) log to godot.log only to avoid crash-report flooding. Include per-helper classification table.
+  Re-trigger: after ModButtonPromptHelper, ModDropPoolHelper, and ModSaveDataHelper audits complete.
 
 - Finding: No vote-tally regression coverage.
   Why deferred: not readability work; needed before vote behavior refactors.

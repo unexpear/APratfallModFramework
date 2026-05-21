@@ -5,8 +5,8 @@ namespace PratfallModFramework;
 
 public enum SessionKind
 {
-    Offline,
-    Host,
+    Offline = 0,
+    Host = 1,
 }
 
 internal static class SessionStartHooks

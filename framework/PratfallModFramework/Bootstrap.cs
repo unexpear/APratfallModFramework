@@ -70,10 +70,10 @@ public static class Bootstrap
             // If file already exists from a previous run, clear read-only so we can overwrite it.
             if (System.IO.File.Exists(path))
             {
-                try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch { }
+                try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch (Exception) { }
             }
             System.IO.File.WriteAllBytes(path, System.Array.Empty<byte>());
-            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.ReadOnly); } catch { }
+            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.ReadOnly); } catch (Exception) { }
             GD.Print($"[ModFramework] Wrote loaded-sentinel at {path}");
         }
         catch (System.Exception ex)
@@ -88,10 +88,10 @@ public static class Bootstrap
         {
             var path = ResolveSentinelPath();
             if (path == null || !System.IO.File.Exists(path)) return;
-            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch { }
+            try { System.IO.File.SetAttributes(path, System.IO.FileAttributes.Normal); } catch (Exception) { }
             System.IO.File.Delete(path);
         }
-        catch
+        catch (Exception)
         {
             // Best-effort cleanup. If the file persists across launches, the next
             // WriteLoadedSentinel call will refresh its mtime.

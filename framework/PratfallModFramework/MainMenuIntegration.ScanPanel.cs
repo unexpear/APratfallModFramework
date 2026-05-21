@@ -99,16 +99,7 @@ public static partial class MainMenuIntegration
                 AddInspectMuted(body, err);
         }
 
-        var closeBtn = new Button
-        {
-            Text = "Close",
-            FocusMode = Control.FocusModeEnum.All,
-            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
-            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
-        };
-        ApplyButtonTheme(closeBtn);
-        closeBtn.Pressed += () => canvasLayer.QueueFree();
-        panel.AddChild(closeBtn);
+        var closeBtn = CreateAuxDialogCloseButton(panel, canvasLayer);
 
         overlay.GuiInput += (InputEvent ev) =>
         {
@@ -120,22 +111,22 @@ public static partial class MainMenuIntegration
         closeBtn.CallDeferred("grab_focus");
     }
 
-    private static void AddScanGroup(VBoxContainer body, ModScanner.Report report, ModScanner.Severity sev, string headerText, Color color)
+    private static void AddScanGroup(VBoxContainer body, ModScanner.Report report, ModScanner.Severity severity, string headerText, Color color)
     {
-        var hits = report.Findings.Where(f => f.Sev == sev).ToList();
+        var hits = report.Findings.Where(f => f.Sev == severity).ToList();
         if (hits.Count == 0) return;
 
         AddInspectHeader(body, $"{headerText} ({hits.Count})");
 
         // Sub-group by Category so duplicate API hits roll up
-        foreach (var grp in hits.GroupBy(f => f.Category).OrderBy(g => g.Key, StringComparer.Ordinal))
+        foreach (var categoryGroup in hits.GroupBy(f => f.Category).OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             // Category header line
-            AddScanLine(body, $"  • {grp.Key} — {grp.First().Note}", color);
+            AddScanLine(body, $"  • {categoryGroup.Key} — {categoryGroup.First().Note}", color);
 
             // First few call sites under each category (cap to keep panel readable)
             const int callSiteCap = 6;
-            var sites = grp.Select(f => $"      {f.ApiCalled}  ←  {f.CallSite}").Distinct().ToList();
+            var sites = categoryGroup.Select(f => $"      {f.ApiCalled}  ←  {f.CallSite}").Distinct().ToList();
             foreach (var site in sites.Take(callSiteCap))
                 AddInspectMuted(body, site);
             if (sites.Count > callSiteCap)

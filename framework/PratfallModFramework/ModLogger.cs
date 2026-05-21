@@ -69,7 +69,7 @@ public static class ModLogger
                 Directory.CreateDirectory(dir);
             return dir;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }
@@ -133,7 +133,7 @@ public static class ModLogger
                 }
                 File.AppendAllText(_logFilePath, line + System.Environment.NewLine, Encoding.UTF8);
             }
-            catch
+            catch (Exception)
             {
                 // Don't let logging failures cascade. The console tee + ring buffer
                 // are the safety net if the file path is unavailable.

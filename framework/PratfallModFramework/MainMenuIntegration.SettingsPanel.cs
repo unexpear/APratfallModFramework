@@ -87,16 +87,7 @@ public static partial class MainMenuIntegration
             }
         }
 
-        var closeBtn = new Button
-        {
-            Text = "Close",
-            FocusMode = Control.FocusModeEnum.All,
-            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
-            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
-        };
-        ApplyButtonTheme(closeBtn);
-        closeBtn.Pressed += () => canvasLayer.QueueFree();
-        panel.AddChild(closeBtn);
+        var closeBtn = CreateAuxDialogCloseButton(panel, canvasLayer);
 
         overlay.GuiInput += (InputEvent ev) =>
         {
@@ -167,11 +158,11 @@ public static partial class MainMenuIntegration
     // entry's current BoxedValue (used after Reset).
     private static Control CreateWidgetForEntry(IConfigEntry entry, out Action refresh)
     {
-        var t = entry.ValueType;
+        var valueType = entry.ValueType;
         var constraint = entry.Description?.Constraint;
 
         // bool → ToggleSwitch (our existing custom widget)
-        if (t == typeof(bool))
+        if (valueType == typeof(bool))
         {
             var current = (bool)(entry.BoxedValue ?? false);
             var toggle = new ToggleSwitch(current);
@@ -181,7 +172,7 @@ public static partial class MainMenuIntegration
         }
 
         // string with AcceptableValueList → OptionButton (dropdown)
-        if (t == typeof(string) && constraint?.AllowedValues is { Count: > 0 } strChoices)
+        if (valueType == typeof(string) && constraint?.AllowedValues is { Count: > 0 } strChoices)
         {
             var opt = new OptionButton();
             ApplyButtonTheme(opt);
@@ -197,7 +188,7 @@ public static partial class MainMenuIntegration
         }
 
         // string (no constraint) → LineEdit
-        if (t == typeof(string))
+        if (valueType == typeof(string))
         {
             var line = new LineEdit
             {
@@ -210,10 +201,10 @@ public static partial class MainMenuIntegration
         }
 
         // enum → OptionButton populated from Enum.GetNames
-        if (t.IsEnum)
+        if (valueType.IsEnum)
         {
-            var names = Enum.GetNames(t);
-            var values = Enum.GetValues(t);
+            var names = Enum.GetNames(valueType);
+            var values = Enum.GetValues(valueType);
             var opt = new OptionButton();
             ApplyButtonTheme(opt);
             foreach (var n in names) opt.AddItem(n);
@@ -227,19 +218,19 @@ public static partial class MainMenuIntegration
             };
             refresh = () =>
             {
-                var cur = entry.BoxedValue?.ToString();
+                var currentName = entry.BoxedValue?.ToString();
                 for (int i = 0; i < names.Length; i++)
-                    if (string.Equals(names[i], cur, StringComparison.Ordinal)) { opt.Selected = i; break; }
+                    if (string.Equals(names[i], currentName, StringComparison.Ordinal)) { opt.Selected = i; break; }
             };
             return opt;
         }
 
         // numeric with AcceptableValueRange → HSlider + value label
-        if (IsNumericType(t) && constraint is { Lower: not null, Upper: not null })
+        if (IsNumericType(valueType) && constraint is { Lower: not null, Upper: not null })
         {
             var min = Convert.ToDouble(constraint.Lower);
             var max = Convert.ToDouble(constraint.Upper);
-            var step = (t == typeof(int) || t == typeof(long)) ? 1.0 : Math.Max((max - min) / 100.0, 0.01);
+            var step = (valueType == typeof(int) || valueType == typeof(long)) ? 1.0 : Math.Max((max - min) / 100.0, 0.01);
             var current = Convert.ToDouble(entry.BoxedValue ?? 0);
 
             var slider = new HSlider
@@ -253,7 +244,7 @@ public static partial class MainMenuIntegration
             };
             var valueLabel = new Label
             {
-                Text = FormatNumericValue(current, t),
+                Text = FormatNumericValue(current, valueType),
                 CustomMinimumSize = new Vector2(60, 0),
                 HorizontalAlignment = HorizontalAlignment.Right,
             };
@@ -261,8 +252,8 @@ public static partial class MainMenuIntegration
             valueLabel.AddThemeColorOverride("font_color", new Color(0.75f, 0.9f, 0.93f));
             slider.ValueChanged += d =>
             {
-                valueLabel.Text = FormatNumericValue(d, t);
-                SafeSet(entry, ConvertNumeric(d, t));
+                valueLabel.Text = FormatNumericValue(d, valueType);
+                SafeSet(entry, ConvertNumeric(d, valueType));
             };
 
             var wrapper = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
@@ -274,32 +265,32 @@ public static partial class MainMenuIntegration
             {
                 var v = Convert.ToDouble(entry.BoxedValue ?? 0);
                 slider.Value = v;
-                valueLabel.Text = FormatNumericValue(v, t);
+                valueLabel.Text = FormatNumericValue(v, valueType);
             };
             return wrapper;
         }
 
         // numeric (no constraint) → SpinBox
-        if (IsNumericType(t))
+        if (IsNumericType(valueType))
         {
             var spin = new SpinBox
             {
                 MinValue = double.MinValue / 2,
                 MaxValue = double.MaxValue / 2,
-                Step = (t == typeof(int) || t == typeof(long)) ? 1 : 0.1,
+                Step = (valueType == typeof(int) || valueType == typeof(long)) ? 1 : 0.1,
                 Value = Convert.ToDouble(entry.BoxedValue ?? 0),
                 CustomMinimumSize = new Vector2(150, 0),
             };
-            spin.ValueChanged += d => SafeSet(entry, ConvertNumeric(d, t));
+            spin.ValueChanged += d => SafeSet(entry, ConvertNumeric(d, valueType));
             refresh = () => spin.Value = Convert.ToDouble(entry.BoxedValue ?? 0);
             return spin;
         }
 
         // Fallback for unknown types — read-only label, no edit.
-        var fallback = new Label { Text = $"(unsupported type: {t.Name})" };
+        var fallback = new Label { Text = $"(unsupported type: {valueType.Name})" };
         ApplyFont(fallback, Math.Max(_buttonFontSize - 2, 12));
         fallback.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.55f));
-        refresh = () => fallback.Text = $"(unsupported type: {t.Name})";
+        refresh = () => fallback.Text = $"(unsupported type: {valueType.Name})";
         return fallback;
     }
 

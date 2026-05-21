@@ -43,7 +43,7 @@ public class ModAssemblyLoader
         }
 
         var alc = new ModLoadContext(assemblyPath);
-        var asm = alc.LoadFromAssemblyPath(assemblyPath);
+        var assembly = alc.LoadFromAssemblyPath(assemblyPath);
 
         // Register the assembly with Godot's script bridge so mod-defined Node /
         // Resource types are usable from .tscn / PackedScene.Instantiate. Matches
@@ -52,17 +52,17 @@ public class ModAssemblyLoader
         // patches and OnLoad may still work.
         if (addAssemblyToGodot)
         {
-            try { Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(asm); }
+            try { Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(assembly); }
             catch (Exception ex) { LogError($"[ModFramework] Failed to register {id} scripts with Godot: {ex.Message}"); }
         }
 
         var harmony = new Harmony(id);
-        int patchesApplied = ApplyDeclaredPatches(id, asm, harmony);
-        var unloadCallbacks = InvokeLoadCallbacks(id, asm);
+        int patchesApplied = ApplyDeclaredPatches(id, assembly, harmony);
+        var unloadCallbacks = InvokeLoadCallbacks(id, assembly);
 
-        _loaded.Add(new LoadedMod(id, alc, harmony, asm, patchesApplied, unloadCallbacks));
+        _loaded.Add(new LoadedMod(id, alc, harmony, assembly, patchesApplied, unloadCallbacks));
         Log($"[ModFramework] Loaded mod {id} ({patchesApplied} patches)");
-        return asm;
+        return assembly;
     }
 
     private static string ComputeFileSha256Hex(string path)

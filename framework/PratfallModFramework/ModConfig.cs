@@ -107,7 +107,7 @@ public static class ModConfig
                 Directory.CreateDirectory(dir);
             return dir;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }
@@ -272,7 +272,7 @@ public sealed class ModConfigFile
             // Corrupt file — back it up so we don't lose the user's data, fall back to empty.
             GD.PrintErr($"[ModFramework] ModConfig {_modId}: corrupt config file at {_filePath} " +
                         $"({ex.GetType().Name}: {ex.Message}). Backing up + falling back to defaults.");
-            try { File.Copy(_filePath, _filePath + ".bad", overwrite: true); } catch { }
+            try { File.Copy(_filePath, _filePath + ".bad", overwrite: true); } catch (Exception) { }
             _loadedJson = new JsonObject { ["_schema_version"] = CurrentSchemaVersion };
         }
     }
@@ -385,9 +385,9 @@ public sealed class ConfigEntry<T> : IConfigEntry, IConfigEntryInternal
     // the value comes from a host-sync apply — we don't want to echo it back).
     internal void SetInternal(T newValue, bool persist, bool fireOnChange, bool fromSync = false)
     {
-        if (Description?.Constraint is IConstraint c && !c.IsValid(newValue!))
+        if (Description?.Constraint is IConstraint constraint && !constraint.IsValid(newValue!))
             throw new ArgumentOutOfRangeException(nameof(newValue),
-                $"Value {newValue} fails constraint {c.GetType().Name} on [{Section}].{Key}");
+                $"Value {newValue} fails constraint {constraint.GetType().Name} on [{Section}].{Key}");
 
         var old = _value;
         _value = newValue;

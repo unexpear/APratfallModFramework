@@ -14,7 +14,6 @@ internal sealed class ModP2PTransfer
     // the transfer stalls forever. Raw 14 KB -> ~19 KB base64 -> ~20 KB JSON envelope,
     // leaving ~12 KB of headroom for the SHA-256 + JSON keys on the final chunk.
     private const int ChunkSize = 14 * 1024;
-    private const int MaxJsonEnvelopeBytes = 30 * 1024; // sanity-check guard on the wire payload
     private const int MaxModBytes = 20 * 1024 * 1024;
 
     private readonly Dictionary<string, OutgoingTransfer> _outgoing = new(StringComparer.OrdinalIgnoreCase);
@@ -88,7 +87,7 @@ internal sealed class ModP2PTransfer
         {
             var idx = (_outgoingCursor + probe) % _outgoingOrder.Count;
             var key = _outgoingOrder[idx];
-            if (!_outgoing.TryGetValue(key, out var t) || t.NextChunkIndex >= t.TotalChunks)
+            if (!_outgoing.TryGetValue(key, out var outgoing) || outgoing.NextChunkIndex >= outgoing.TotalChunks)
             {
                 _outgoing.Remove(key);
                 _outgoingOrder.RemoveAt(idx);
@@ -98,31 +97,31 @@ internal sealed class ModP2PTransfer
                 continue;
             }
 
-            var offset = t.NextChunkIndex * ChunkSize;
-            var len = Math.Min(ChunkSize, t.Bytes.Length - offset);
+            var offset = outgoing.NextChunkIndex * ChunkSize;
+            var len = Math.Min(ChunkSize, outgoing.Bytes.Length - offset);
             var slice = new byte[len];
-            Array.Copy(t.Bytes, offset, slice, 0, len);
+            Array.Copy(outgoing.Bytes, offset, slice, 0, len);
 
             var chunk = new ModTransferChunk
             {
-                ModId = t.ModId,
-                ModVersion = t.ModVersion,
-                ChunkIndex = t.NextChunkIndex,
-                TotalChunks = t.TotalChunks,
-                TotalBytes = t.Bytes.Length,
+                ModId = outgoing.ModId,
+                ModVersion = outgoing.ModVersion,
+                ChunkIndex = outgoing.NextChunkIndex,
+                TotalChunks = outgoing.TotalChunks,
+                TotalBytes = outgoing.Bytes.Length,
                 ChunkBase64 = Convert.ToBase64String(slice),
-                IsLast = t.NextChunkIndex == t.TotalChunks - 1,
-                Sha256Hex = (t.NextChunkIndex == t.TotalChunks - 1) ? t.Sha256Hex : "",
-                FileSuffix = t.FileSuffix,
+                IsLast = outgoing.NextChunkIndex == outgoing.TotalChunks - 1,
+                Sha256Hex = (outgoing.NextChunkIndex == outgoing.TotalChunks - 1) ? outgoing.Sha256Hex : "",
+                FileSuffix = outgoing.FileSuffix,
             };
 
-            t.NextChunkIndex++;
-            OnSendProgress?.Invoke(t.ModId, (float)t.NextChunkIndex / t.TotalChunks);
+            outgoing.NextChunkIndex++;
+            OnSendProgress?.Invoke(outgoing.ModId, (float)outgoing.NextChunkIndex / outgoing.TotalChunks);
 
             // Advance cursor so the NEXT TickOutgoing serves a different transfer if any.
             _outgoingCursor = (idx + 1) % Math.Max(_outgoingOrder.Count, 1);
 
-            if (t.NextChunkIndex >= t.TotalChunks)
+            if (outgoing.NextChunkIndex >= outgoing.TotalChunks)
             {
                 _outgoing.Remove(key);
                 _outgoingOrder.RemoveAt(idx);
@@ -130,19 +129,19 @@ internal sealed class ModP2PTransfer
                 else if (idx < _outgoingCursor) _outgoingCursor--;
                 else if (_outgoingCursor >= _outgoingOrder.Count) _outgoingCursor = 0;
             }
-            return new PendingChunk(t.TargetUserId, chunk);
+            return new PendingChunk(outgoing.TargetUserId, chunk);
         }
         return null;
     }
 
     public enum ReceiveResult
     {
-        Continue,
-        CompletedAndPersisted,
-        FailedSizeExceeded,
-        FailedHashMismatch,
-        FailedWriteError,
-        FailedDecodeError,
+        Continue = 0,
+        CompletedAndPersisted = 1,
+        FailedSizeExceeded = 2,
+        FailedHashMismatch = 3,
+        FailedWriteError = 4,
+        FailedDecodeError = 5,
     }
 
     // Receive a chunk; when ALL chunks arrive (in any order, with possible duplicates)
@@ -161,7 +160,7 @@ internal sealed class ModP2PTransfer
         // separate active transfers and don't collide in the incoming dictionary.
         var key = BuildKey(sourceUserId, chunk.ModId, chunk.FileSuffix);
 
-        if (!_incoming.TryGetValue(key, out var t))
+        if (!_incoming.TryGetValue(key, out var incoming))
         {
             if (chunk.TotalBytes > MaxModBytes)
             {
@@ -173,65 +172,65 @@ internal sealed class ModP2PTransfer
                 GD.PrintErr($"[ModFramework] Reject incoming {chunk.ModId}: invalid TotalChunks={chunk.TotalChunks}");
                 return ReceiveResult.FailedDecodeError;
             }
-            t = new IncomingTransfer(sourceUserId, chunk.ModId, chunk.ModVersion, chunk.TotalBytes, chunk.TotalChunks);
-            _incoming[key] = t;
+            incoming = new IncomingTransfer(sourceUserId, chunk.ModId, chunk.ModVersion, chunk.TotalBytes, chunk.TotalChunks);
+            _incoming[key] = incoming;
         }
 
         // Validate index against the agreed-upon shape. A peer that sends contradictory
         // metadata across chunks is misbehaving — drop the whole transfer.
-        if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= t.TotalChunks ||
-            chunk.TotalChunks != t.TotalChunks || chunk.TotalBytes != t.TotalBytes)
+        if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= incoming.TotalChunks ||
+            chunk.TotalChunks != incoming.TotalChunks || chunk.TotalBytes != incoming.TotalBytes)
         {
-            GD.PrintErr($"[ModFramework] Reject {chunk.ModId} chunk: bad index/shape (idx={chunk.ChunkIndex}, total={chunk.TotalChunks}/{t.TotalChunks}, bytes={chunk.TotalBytes}/{t.TotalBytes})");
+            GD.PrintErr($"[ModFramework] Reject {chunk.ModId} chunk: bad index/shape (idx={chunk.ChunkIndex}, total={chunk.TotalChunks}/{incoming.TotalChunks}, bytes={chunk.TotalBytes}/{incoming.TotalBytes})");
             _incoming.Remove(key);
             return ReceiveResult.FailedDecodeError;
         }
 
         // Duplicate chunk: ignore. Idempotent — protects against retransmits.
-        if (t.ChunksByIndex[chunk.ChunkIndex] != null)
+        if (incoming.ChunksByIndex[chunk.ChunkIndex] != null)
             return ReceiveResult.Continue;
 
         byte[] decoded;
         try { decoded = Convert.FromBase64String(chunk.ChunkBase64); }
         catch (FormatException) { _incoming.Remove(key); return ReceiveResult.FailedDecodeError; }
 
-        if (t.ReceivedBytes + decoded.Length > MaxModBytes)
+        if (incoming.ReceivedBytes + decoded.Length > MaxModBytes)
         {
             _incoming.Remove(key);
             return ReceiveResult.FailedSizeExceeded;
         }
 
-        t.ChunksByIndex[chunk.ChunkIndex] = decoded;
-        t.ReceivedBytes += decoded.Length;
-        t.ReceivedChunks++;
+        incoming.ChunksByIndex[chunk.ChunkIndex] = decoded;
+        incoming.ReceivedBytes += decoded.Length;
+        incoming.ReceivedChunks++;
 
         // The last chunk is the only one carrying the full-payload SHA-256. Remember it
         // even if it arrived early (out-of-order delivery is allowed).
         if (chunk.IsLast || !string.IsNullOrEmpty(chunk.Sha256Hex))
-            t.FinalSha256Hex = chunk.Sha256Hex ?? "";
+            incoming.FinalSha256Hex = chunk.Sha256Hex ?? "";
 
-        OnReceiveProgress?.Invoke(chunk.ModId, t.TotalBytes == 0 ? 1f : Math.Clamp((float)t.ReceivedBytes / t.TotalBytes, 0f, 1f));
+        OnReceiveProgress?.Invoke(chunk.ModId, incoming.TotalBytes == 0 ? 1f : Math.Clamp((float)incoming.ReceivedBytes / incoming.TotalBytes, 0f, 1f));
 
         // Wait until every chunk has arrived AND we've seen the trailer with the hash.
-        if (t.ReceivedChunks < t.TotalChunks || string.IsNullOrEmpty(t.FinalSha256Hex))
+        if (incoming.ReceivedChunks < incoming.TotalChunks || string.IsNullOrEmpty(incoming.FinalSha256Hex))
             return ReceiveResult.Continue;
 
         // Reassemble in index order.
         var totalLen = 0;
-        for (var i = 0; i < t.TotalChunks; i++) totalLen += t.ChunksByIndex[i]!.Length;
+        for (var i = 0; i < incoming.TotalChunks; i++) totalLen += incoming.ChunksByIndex[i]!.Length;
         var bytes = new byte[totalLen];
         var offset = 0;
-        for (var i = 0; i < t.TotalChunks; i++)
+        for (var i = 0; i < incoming.TotalChunks; i++)
         {
-            var part = t.ChunksByIndex[i]!;
+            var part = incoming.ChunksByIndex[i]!;
             Buffer.BlockCopy(part, 0, bytes, offset, part.Length);
             offset += part.Length;
         }
 
         var actualHash = Convert.ToHexString(SHA256.HashData(bytes));
-        if (!string.Equals(actualHash, t.FinalSha256Hex, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(actualHash, incoming.FinalSha256Hex, StringComparison.OrdinalIgnoreCase))
         {
-            GD.PrintErr($"[ModFramework] Hash mismatch for {chunk.ModId} from {sourceUserId}: expected {t.FinalSha256Hex} got {actualHash}");
+            GD.PrintErr($"[ModFramework] Hash mismatch for {chunk.ModId} from {sourceUserId}: expected {incoming.FinalSha256Hex} got {actualHash}");
             _incoming.Remove(key);
             return ReceiveResult.FailedHashMismatch;
         }

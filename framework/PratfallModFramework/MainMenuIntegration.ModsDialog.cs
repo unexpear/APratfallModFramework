@@ -66,6 +66,12 @@ public static partial class MainMenuIntegration
         var dialogSize = GetDialogSize();
         var panel = CreateFallbackDialogHost(overlay, dialogSize);
         var focusables = new List<Control>();
+        // Hoist once — GetReferenceButtonHeight walks the tree (MainMenuUI → Options),
+        // and OnModsButtonPressed asks for it 5 times (Apply button, 3 icon buttons,
+        // Close button). Single snapshot is also defensive: a layout pass between
+        // adjacent calls would otherwise let sibling sizes compute against different
+        // values.
+        var referenceButtonHeight = GetReferenceButtonHeight();
 
         var header = new HBoxContainer
         {
@@ -92,7 +98,7 @@ public static partial class MainMenuIntegration
                 SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
             };
             ApplyButtonTheme(applyButton);
-            applyButton.CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight(), 48f));
+            applyButton.CustomMinimumSize = new Vector2(220f, Math.Max(referenceButtonHeight, 48f));
             applyButton.Pressed += _onApplySelectedMods;
             header.AddChild(applyButton);
             focusables.Add(applyButton);
@@ -277,23 +283,16 @@ public static partial class MainMenuIntegration
                 // No side effects — just shows what the mod claims to be.
                 if (_inspectMod != null)
                 {
-                    var infoBtn = new Button
-                    {
-                        Text = "ℹ",
-                        FocusMode = Control.FocusModeEnum.All,
-                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
-                        TooltipText = "Mod info (manifest, files, hashes, declared patches)",
-                    };
-                    ApplyButtonTheme(infoBtn);
-                    infoBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
                     var capturedIdInfo = mod.Id;
-                    infoBtn.Pressed += () =>
-                    {
-                        var report = _inspectMod(capturedIdInfo);
-                        if (report != null && _tree != null)
-                            ShowInspectionPanel(_tree, report);
-                    };
-                    topRow.AddChild(infoBtn);
+                    AddCardIconButton(topRow, "ℹ",
+                        "Mod info (manifest, files, hashes, declared patches)",
+                        () =>
+                        {
+                            var report = _inspectMod(capturedIdInfo);
+                            if (report != null && _tree != null)
+                                ShowInspectionPanel(_tree, report);
+                        },
+                        referenceButtonHeight);
                 }
 
                 // 🔍 — IL safety scanner. Walks the mod's DLL and reports concerning
@@ -301,23 +300,16 @@ public static partial class MainMenuIntegration
                 // fingerprint as checked (releases the load gate).
                 if (_scanMod != null)
                 {
-                    var scanBtn = new Button
-                    {
-                        Text = "🔍",
-                        FocusMode = Control.FocusModeEnum.All,
-                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
-                        TooltipText = "Scan this mod for dangerous API usage (Process, network, registry, P/Invoke, …)",
-                    };
-                    ApplyButtonTheme(scanBtn);
-                    scanBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
                     var capturedIdScan = mod.Id;
-                    scanBtn.Pressed += () =>
-                    {
-                        var report = _scanMod(capturedIdScan);
-                        if (report != null && _tree != null)
-                            ShowScanPanel(_tree, report);
-                    };
-                    topRow.AddChild(scanBtn);
+                    AddCardIconButton(topRow, "🔍",
+                        "Scan this mod for dangerous API usage (Process, network, registry, P/Invoke, …)",
+                        () =>
+                        {
+                            var report = _scanMod(capturedIdScan);
+                            if (report != null && _tree != null)
+                                ShowScanPanel(_tree, report);
+                        },
+                        referenceButtonHeight);
                 }
 
                 // ⚙ — per-mod settings panel. Only shown if the mod has actually
@@ -325,33 +317,26 @@ public static partial class MainMenuIntegration
                 // that don't use ModConfig don't get a button (zero clutter).
                 if (ModConfig.GetAllEntries(mod.Id).Count > 0)
                 {
-                    var settingsBtn = new Button
-                    {
-                        Text = "⚙",
-                        FocusMode = Control.FocusModeEnum.All,
-                        SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
-                        TooltipText = "Mod settings (auto-generated from ModConfig)",
-                    };
-                    ApplyButtonTheme(settingsBtn);
-                    settingsBtn.CustomMinimumSize = new Vector2(46f, Math.Max(GetReferenceButtonHeight() * 0.7f, 36f));
                     var capturedIdSettings = mod.Id;
                     var capturedNameSettings = string.IsNullOrWhiteSpace(mod.Name) ? mod.Id : mod.Name;
-                    settingsBtn.Pressed += () =>
-                    {
-                        if (_tree != null)
-                            ShowSettingsPanel(_tree, capturedIdSettings, capturedNameSettings);
-                    };
-                    topRow.AddChild(settingsBtn);
+                    AddCardIconButton(topRow, "⚙",
+                        "Mod settings (auto-generated from ModConfig)",
+                        () =>
+                        {
+                            if (_tree != null)
+                                ShowSettingsPanel(_tree, capturedIdSettings, capturedNameSettings);
+                        },
+                        referenceButtonHeight);
                 }
 
                 var toggle = new ToggleSwitch(_isModEnabled?.Invoke(mod.Id) ?? false);
-                var captured = mod.Id;
-                _dialogToggles[captured] = toggle;
-                toggle.Toggled += (pressed) => _onToggleMod?.Invoke(captured, pressed);
+                var capturedToggleId = mod.Id;
+                _dialogToggles[capturedToggleId] = toggle;
+                toggle.Toggled += (pressed) => _onToggleMod?.Invoke(capturedToggleId, pressed);
                 toggle.TreeExited += () =>
                 {
-                    if (_dialogToggles.TryGetValue(captured, out var current) && current == toggle)
-                        _dialogToggles.Remove(captured);
+                    if (_dialogToggles.TryGetValue(capturedToggleId, out var current) && current == toggle)
+                        _dialogToggles.Remove(capturedToggleId);
                 };
                 toggle.FocusEntered += () => scroll.EnsureControlVisible(toggle);
                 focusables.Add(toggle);
@@ -380,7 +365,7 @@ public static partial class MainMenuIntegration
             SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
             CustomMinimumSize = new Vector2(
                 Mathf.Clamp(dialogSize.X * 0.34f, 210f, 320f),
-                Math.Max(GetReferenceButtonHeight(), 52f)),
+                Math.Max(referenceButtonHeight, 52f)),
         };
         ApplyButtonTheme(closeBtn);
         closeBtn.FocusMode = Control.FocusModeEnum.All;
@@ -389,6 +374,28 @@ public static partial class MainMenuIntegration
         focusables.Add(closeBtn);
         WireVerticalFocus(focusables);
         (focusables.FirstOrDefault() ?? closeBtn).CallDeferred("grab_focus");
+    }
+
+    // Card row icon button — info / scan / settings on each mod card. All three
+    // share text (emoji), tooltip, fixed 46x(refHeight*0.7) sizing, themed button
+    // surface, ShrinkEnd horizontal flag, and All focus mode. Caller passes the
+    // referenceButtonHeight snapshot from the OnModsButtonPressed hoist so we
+    // don't re-walk the tree for every card. Caller does NOT add to focusables —
+    // the icon buttons are off the keyboard chain (toggle + Apply + Close are
+    // the chain).
+    private static void AddCardIconButton(HBoxContainer parent, string emoji, string tooltip, Action onPressed, float referenceButtonHeight)
+    {
+        var button = new Button
+        {
+            Text = emoji,
+            FocusMode = Control.FocusModeEnum.All,
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
+            TooltipText = tooltip,
+        };
+        ApplyButtonTheme(button);
+        button.CustomMinimumSize = new Vector2(46f, Math.Max(referenceButtonHeight * 0.7f, 36f));
+        button.Pressed += onPressed;
+        parent.AddChild(button);
     }
 
     // Pushes a mod's enabled state into the matching toggle widget in the open Mods

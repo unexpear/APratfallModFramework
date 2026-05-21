@@ -19,14 +19,23 @@ namespace PratfallModFramework;
 //    our framework has loaded mods. Without this bridge, mods-loaded players
 //    would submit "vanilla" runs to the leaderboard. GameOverUIController.Show
 //    also reads this for display; the same patch fixes both call sites.
+//    Fails CLOSED on any error (returns 1) so the anti-cheat gate stays
+//    active even if our bridge throws — better to incorrectly refuse a
+//    legit submit than incorrectly allow a modded run onto the leaderboard.
 //
 // Both patches are no-ops if the targeted symbol isn't found, so future
 // Pratfall versions that rename / remove these won't crash the framework —
-// they'll just lose that specific bridge.
+// they'll just lose that specific bridge. Symmetric teardown via Shutdown()
+// so a future re-init flow can cleanly re-attach.
 internal static class NativeModUiSuppressor
 {
     private static Harmony? _harmony;
     private static bool _applied;
+    // One-shot guard so a recurring failure in EnabledModCountPrefix (e.g.
+    // _modEnabled mid-mutation during a Workshop install while SpeedrunManager
+    // checks) logs ONCE per session instead of flooding godot.log. Doesn't
+    // suppress the fail-safe itself — every call still returns the safe 1.
+    private static bool _enabledCountFailureLogged;
 
     public static void Apply()
     {
@@ -67,6 +76,25 @@ internal static class NativeModUiSuppressor
         }
     }
 
+    // Symmetric teardown — unpatches Harmony + resets state so a fresh Apply()
+    // after Shutdown re-installs cleanly. Called from ModManager.Shutdown
+    // alongside the WorkshopSubscriber.Shutdown call. Safe to call multiple
+    // times; safe to call when Apply was never run.
+    public static void Shutdown()
+    {
+        if (_harmony != null)
+        {
+            try { _harmony.UnpatchAll(_harmony.Id); }
+            catch (System.Exception ex)
+            {
+                GD.PrintErr($"[ModFramework] NativeModUiSuppressor.Shutdown: Harmony unpatch threw: {ex.GetType().Name}: {ex.Message}");
+            }
+            _harmony = null;
+        }
+        _applied = false;
+        _enabledCountFailureLogged = false;
+    }
+
     private static bool ShouldHideModLoaderUiPrefix(ref bool __result)
     {
         __result = true;
@@ -77,16 +105,23 @@ internal static class NativeModUiSuppressor
     // real count; if the framework isn't initialized yet (this getter can be
     // called early during boot) returning 0 is the correct "no mods loaded yet"
     // answer. If anything goes wrong, fail SAFE — report >0 so anti-cheat refuses
-    // to submit rather than letting a modded run onto the leaderboard.
+    // to submit rather than letting a modded run onto the leaderboard. The
+    // failure path also logs once per session so a real bug is debuggable
+    // without flooding godot.log if it recurs on every getter call.
     private static bool EnabledModCountPrefix(ref int __result)
     {
         try
         {
             __result = PratfallModFramework.ModManager.Instance?.EnabledModCount ?? 0;
         }
-        catch
+        catch (System.Exception ex)
         {
             __result = 1;
+            if (!_enabledCountFailureLogged)
+            {
+                _enabledCountFailureLogged = true;
+                GD.PrintErr($"[ModFramework] NativeModUiSuppressor: EnabledModCount bridge failed (returning fail-safe 1; speedrun submits will be refused while this persists): {ex.GetType().Name}: {ex.Message}");
+            }
         }
         return false; // skip original
     }

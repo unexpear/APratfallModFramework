@@ -14,7 +14,12 @@ namespace PratfallModFramework;
 // without resolving references, so it's safe to scan unsigned/untrusted bytes.
 public static class ModScanner
 {
-    public enum Severity { Info, Warning, Danger }
+    public enum Severity
+    {
+        Info = 0,
+        Warning = 1,
+        Danger = 2,
+    }
 
     public sealed class Finding
     {
@@ -34,11 +39,11 @@ public static class ModScanner
         public bool ScannedSuccessfully;
         public int MethodsScanned;
 
-        public int CountOf(Severity s) => Findings.Count(f => f.Sev == s);
+        public int CountOf(Severity severity) => Findings.Count(f => f.Sev == severity);
     }
 
     // Pattern: namespace prefix → category, severity, note, optional method-name filter.
-    private sealed record Rule(string NsPrefix, string? TypeName, string? MethodName, Severity Sev, string Category, string Note);
+    private sealed record Rule(string NamespacePrefix, string? TypeName, string? MethodName, Severity Sev, string Category, string Note);
 
     private static readonly List<Rule> Rules = new()
     {
@@ -133,43 +138,53 @@ public static class ModScanner
             {
                 foreach (var method in type.Methods)
                 {
-                    report.MethodsScanned++;
-
-                    // P/Invoke surface: the method itself is a native binding.
-                    if (method.HasPInvokeInfo)
-                    {
-                        report.Findings.Add(new Finding
-                        {
-                            Sev = Severity.Danger,
-                            Category = "P/Invoke (Native Binding)",
-                            ApiCalled = $"[DllImport] {method.PInvokeInfo.Module.Name}!{method.PInvokeInfo.EntryPoint ?? method.Name}",
-                            CallSite = FormatCallSite(type, method),
-                            Note = "Mod declares a direct binding to a native DLL function — can do anything the OS allows.",
-                        });
-                    }
-
-                    if (method.Body == null) continue;
-
-                    foreach (var ins in method.Body.Instructions)
-                    {
-                        if (ins.OpCode != OpCodes.Call && ins.OpCode != OpCodes.Callvirt &&
-                            ins.OpCode != OpCodes.Newobj && ins.OpCode != OpCodes.Ldftn) continue;
-                        if (ins.Operand is not MethodReference mref) continue;
-
-                        var match = MatchRule(mref);
-                        if (match == null) continue;
-
-                        report.Findings.Add(new Finding
-                        {
-                            Sev = match.Sev,
-                            Category = match.Category,
-                            ApiCalled = $"{mref.DeclaringType.FullName}::{mref.Name}",
-                            CallSite = FormatCallSite(type, method),
-                            Note = match.Note,
-                        });
-                    }
+                    ScanMethod(type, method, report);
                 }
             }
+        }
+    }
+
+    // Per-method scan: counts the method, surfaces direct P/Invoke bindings, then
+    // walks the IL body looking for calls/newobjs/ldftns whose target matches any
+    // rule in `Rules`. Extracted from ScanWithCecil so the outer scanner reads as
+    // a flat module→type→method walk instead of burying the actual analysis at
+    // 4 levels of nesting.
+    private static void ScanMethod(TypeDefinition type, MethodDefinition method, Report report)
+    {
+        report.MethodsScanned++;
+
+        // P/Invoke surface: the method itself is a native binding.
+        if (method.HasPInvokeInfo)
+        {
+            report.Findings.Add(new Finding
+            {
+                Sev = Severity.Danger,
+                Category = "P/Invoke (Native Binding)",
+                ApiCalled = $"[DllImport] {method.PInvokeInfo.Module.Name}!{method.PInvokeInfo.EntryPoint ?? method.Name}",
+                CallSite = FormatCallSite(type, method),
+                Note = "Mod declares a direct binding to a native DLL function — can do anything the OS allows.",
+            });
+        }
+
+        if (method.Body == null) return;
+
+        foreach (var instruction in method.Body.Instructions)
+        {
+            if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt &&
+                instruction.OpCode != OpCodes.Newobj && instruction.OpCode != OpCodes.Ldftn) continue;
+            if (instruction.Operand is not MethodReference methodReference) continue;
+
+            var match = MatchRule(methodReference);
+            if (match == null) continue;
+
+            report.Findings.Add(new Finding
+            {
+                Sev = match.Sev,
+                Category = match.Category,
+                ApiCalled = $"{methodReference.DeclaringType.FullName}::{methodReference.Name}",
+                CallSite = FormatCallSite(type, method),
+                Note = match.Note,
+            });
         }
     }
 
@@ -182,13 +197,13 @@ public static class ModScanner
         var typeName = declaringType.Name;
         var methodName = mref.Name;
 
-        foreach (var r in Rules)
+        foreach (var rule in Rules)
         {
             // Namespace prefix match (e.g. "System.Net.Sockets" matches anything under it)
-            if (!ns.StartsWith(r.NsPrefix, StringComparison.Ordinal)) continue;
-            if (r.TypeName != null && !string.Equals(typeName, r.TypeName, StringComparison.Ordinal)) continue;
-            if (r.MethodName != null && !string.Equals(methodName, r.MethodName, StringComparison.Ordinal)) continue;
-            return r;
+            if (!ns.StartsWith(rule.NamespacePrefix, StringComparison.Ordinal)) continue;
+            if (rule.TypeName != null && !string.Equals(typeName, rule.TypeName, StringComparison.Ordinal)) continue;
+            if (rule.MethodName != null && !string.Equals(methodName, rule.MethodName, StringComparison.Ordinal)) continue;
+            return rule;
         }
         return null;
     }

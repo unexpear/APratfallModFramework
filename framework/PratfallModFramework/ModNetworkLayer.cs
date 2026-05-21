@@ -465,7 +465,7 @@ public sealed class ModNetworkLayer : IDisposable
         {
             return Network.LobbyManager;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }
@@ -477,7 +477,7 @@ public sealed class ModNetworkLayer : IDisposable
         {
             return Network.EventManager;
         }
-        catch
+        catch (Exception)
         {
             return null;
         }

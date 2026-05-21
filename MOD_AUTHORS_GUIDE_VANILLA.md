@@ -21,7 +21,7 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 13. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
 14. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
 15. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
-17. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
+16. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
 17. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
     - [17.1 "How do I ...?" quick-reference](#how-do-i-)
     - [17.2 Singletons (73)](#singletons-73)
@@ -35,11 +35,14 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [17.10 Public interfaces (13)](#public-interfaces-13)
     - [17.11 `res://` path conventions](#res-path-conventions)
     - [17.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
-17. [Debugging & dev iteration](#debugging--dev-iteration)
-18. [Distribution conventions](#distribution-conventions)
-19. [Godot 4 concepts mod authors should know](#godot-4-concepts)
-20. [Pitfalls + things to know](#pitfalls)
-21. [Resources](#resources)
+18. [Debugging & dev iteration](#debugging--dev-iteration)
+19. [Distribution conventions](#distribution-conventions)
+    - [Where to publish](#where-to-publish-as-of-2026-05-18)
+    - [Uploading to Steam Workshop (`SteamWorkshopUploader.exe`)](#uploading-to-steam-workshop)
+    - [Steam Workshop preview image (`Preview.png` / `Preview.jpg`)](#steam-workshop-preview-image)
+20. [Godot 4 concepts mod authors should know](#godot-4-concepts)
+21. [Pitfalls + things to know](#pitfalls)
+22. [Resources](#resources)
 
 ---
 
@@ -258,7 +261,7 @@ If you genuinely need Harmony patches (transpilers, prefix-with-skip, advanced a
 
 ## Recipe: Add a language
 
-> **Current Pratfall release (verified `1.1.0.R2973`, 2026-05-18) gates this.** `LocalizationManager.LoadUserLocalizations` checks `Game.Config.AllowUserLocalization` first — and on the public release that flag is **false** (Cecil-verified: `GameConfig` constructor initializes it to `false`), so the loader silently skips every user-installed locale regardless of filename or content. Wait for the dev to flip the flag, or load translations via `TranslationServer.AddTranslation` directly (advanced; bypasses the manager's bookkeeping). The recipe below is the *intended* path; verify on your target build before shipping by checking `Game.Config.AllowUserLocalization`.
+> **Current Pratfall release (verified `1.1.0.R2973`, 2026-05-18) gates the JSON-file path.** `LocalizationManager.LoadUserLocalizations` checks `Game.Config.AllowUserLocalization` first — and on the public release that flag is **false** (Cecil-verified: `GameConfig` constructor initializes it to `false`), so the loader silently skips every user-installed locale `.json` file. Tim has said he plans to enable the flag (see `#mod-dev`, 2026-05-18). **`TranslationServer.AddTranslation` is NOT gated** and works today as a first-class path (see [below](#today-build-110r2973)).
 
 Pratfall's `LocalizationManager` has native support for user-installed locales. It scans `<userData>/localization/*.json` (skipping any file whose name starts with `_`) and registers anything it finds in `AvailableLocales` — the same list the in-game language selector reads.
 
@@ -328,9 +331,15 @@ public static void ModInit()
 }
 ```
 
-**Today (build `1.1.0.R2973`)** this works on every build regardless of the gate, but it has a hard limitation: you can only add or override translation keys inside locales the game already knows about. You can't add a brand-new *selectable* language because the in-game language selector reads from `LocalizationManager.AvailableLocales`, which is populated only by the JSON-file path above. As a workaround for getting NEW keys into the active language reliably, Henrique's [PratfallLocalizationMod](https://github.com/HenriqueCamillo/PratfallLocalizationMod) listens to `NotificationTranslationChanged` and re-applies its `AddTranslation` calls after every locale change — works today, but a little fiddly.
+**`TranslationServer.AddTranslation` is a first-class path for adding new selectable languages** as of `1.1.0.R2973` — confirmed Cecil + by mod authors (Henrique reported he removed his earlier `NotificationTranslationChanged` workaround once the build shipped). The chain that makes this work:
 
-**Coming in the next Pratfall update** (per Tim in `#mod-dev`, 2026-05-18): the settings menu will rescan Godot's known languages every time it opens, and the launch-time language cache will be removed. After that ships, `TranslationServer.AddTranslation` becomes a first-class path for **adding new selectable languages too** — call it from `ModInit`, and the language shows up in the in-game selector. The JSON-file path will still work for authors who want their locale file alongside the mod folder; both paths will coexist. Re-check this section against the actual update notes when it lands.
+1. Your mod calls `TranslationServer.AddTranslation(translation)` — adds to Godot's internal locale list.
+2. `LocalizationManager.UpdateAvailableLocales()` reads `TranslationServer.GetLoadedLocales()` and assigns it to `LocalizationManager.AvailableLocales`.
+3. `GeneralOptionsContentUIView.UpdateText` reads `AvailableLocales` to render the in-game language picker — your new language appears.
+
+So calling `AddTranslation` from your `ModInit` is enough; the picker refreshes when the player opens settings (no manual `NotificationTranslationChanged` listener required anymore). Henrique's [PratfallLocalizationMod](https://github.com/HenriqueCamillo/PratfallLocalizationMod) is the canonical reference and now uses this simpler path.
+
+**JSON-file path coexists.** When `Game.Config.AllowUserLocalization` flips to `true` (Tim has said he plans to enable it), `LoadUserLocalizations` will also feed `TranslationServer.AddTranslation` internally — so the JSON-file convention and the direct-call path both end up populating the same underlying server. Pick whichever fits your distribution model.
 
 ## Recipe: Persist mod data
 
@@ -1304,7 +1313,15 @@ Pass these via Steam → right-click Pratfall → Properties → Launch options,
 | `--qh-skip-mods` | Pratfall flag — skips all mod loading. Use to bisect "is this bug from my mod or vanilla?". |
 | `--qh-disable-mod-ui` | Pratfall flag — hides the Mods button. Useful when running with a framework that injects its own UI. |
 
-There is no `--console` flag on Windows for Godot 4 to attach a live stdout console. To see live output, launch the executable from a terminal: `Pratfall.exe > out.log 2>&1` from cmd/PowerShell, then tail `out.log`. Steam's launch-options can take stdout redirection but it's finicky — direct-launch from the install dir is the reliable path.
+There is no `--console` flag on Windows for Godot 4 to attach a live stdout console. Two practical workarounds:
+
+1. **Launch from a terminal and redirect.** Run `Pratfall.exe > out.log 2>&1` from cmd / PowerShell, then tail `out.log` in another window. Steam's launch-options can take stdout redirection but it's finicky — direct-launch from the install dir is the reliable path.
+2. **`override.cfg` for immediate stdout flush** (per Tim, in [the official modding guide](https://github.com/quad-head)). Create `override.cfg` next to `Pratfall.exe` with:
+   ```ini
+   [application]
+   run/flush_stdout_on_print=true
+   ```
+   Forces Godot to flush every `GD.Print` to stdout immediately rather than buffering. Tim notes a performance impact — dev-only, remove before shipping.
 
 ### Iteration loop
 
@@ -1388,6 +1405,47 @@ There's no single official Pratfall mod host yet. Current state, per the dev tea
 
 **Pratfall's uncommon stack matters too.** Tim noted that Godot + C# is rare among modded games, so tooling assumptions made for Unity+BepInEx don't always transfer. If you write a Thunderstore-format manifest, expect to also explain manual install for users whose mod manager doesn't auto-handle Pratfall yet.
 
+### Uploading to Steam Workshop
+
+Pratfall ships **`SteamWorkshopUploader.exe`** in the `<game>/mods/` folder. It's a small native CLI tool (~800 KB) that:
+
+1. Auto-detects mod folders in its own directory (every sibling of the `.exe` is a candidate).
+2. Prompts you to pick one by number.
+3. Walks you through the create-or-update flow with the Workshop terms-of-service link first.
+
+To use it:
+
+```
+cd <game>/mods/
+SteamWorkshopUploader.exe
+```
+
+Output starts with:
+```
+By submitting this item, you agree to the workshop terms of service: http://steamcommunity.com/sharedfiles/workshoplegalagreement
+Select a mod directory:
+1. example_mod
+Enter number to upload mod:
+```
+
+The tool takes no CLI args — interaction is purely via stdin. On first upload it creates the Workshop item; subsequent runs against the same folder update the existing item (it tracks the Workshop ID per-mod, likely written back into the mod folder somewhere).
+
+**Constraints:**
+- The mod has to live under `<game>/mods/` to be detected by the uploader. Mods installed under `%APPDATA%\Pratfall\mods\` or other framework-supported locations need to be copied / symlinked to `<game>/mods/` before upload.
+- Steam must be running and you must be signed in.
+- The first upload creates a new Workshop item under YOUR Steam account; subsequent uploads update it. You can't transfer ownership.
+
+### Steam Workshop preview image
+
+The uploader auto-picks up a preview image from your mod folder if you ship one. Per [Tim's modding guide](https://github.com/quad-head):
+
+- Name: `Preview.png`, `Preview.jpg`, or a similar variant (the tool detects common image filenames)
+- Location: top of your mod folder, next to `manifest.json`
+- Size limit: **1 MB** (Steam Workshop hard cap)
+- Aspect: Steam Workshop thumbnails render at roughly 4:3 in the storefront; square (1:1) works too. Use 512×512 or 600×600 for a sharp result without bloating the file size.
+
+If you ship no preview image, your Workshop listing falls back to a default placeholder until you upload one — which means a worse first impression in the Workshop browser. Always include one.
+
 ## Godot 4 concepts
 
 A few things mod authors hit if they're new to Godot. None of this is Pratfall-specific.
@@ -1407,6 +1465,47 @@ constructor → _EnterTree → _Ready → _Process (every frame) / _PhysicsProce
 - `_ExitTree` fires when removed from the tree.
 
 If you override these on a class shipped in your mod, mark them `public override void` — Godot calls through reflection.
+
+### Godot ref lifetime — don't trust C# null checks
+
+Godot's C# bindings expose `Node`, `Control`, `Button`, `CanvasLayer`, `Texture2D`, etc. as C# objects backed by underlying C++ objects. The two have **independent lifetimes**: the C++ object can be freed (via `QueueFree`, scene change, `Free`, parent's deletion) while the C# object lingers in memory until the next GC pass. A plain null check passes, but accessing any member throws `ObjectDisposedException` or "called method on already-freed object."
+
+```csharp
+// WRONG — passes the null check, crashes on the next line
+if (cachedButton != null)
+    cachedButton.Text = "Click me";
+
+// RIGHT — IsInstanceValid checks the underlying C++ object
+if (Godot.GodotObject.IsInstanceValid(cachedButton))
+    cachedButton.Text = "Click me";
+```
+
+> Per Tim (#mod-dev, 2026-05-20): "the biggest tip I can give you is to not do null checks on objects instead check if its null with `IsInstanceValid()`. the c# object might still exist because it hasn't been garbage collected yet but the c++ object is already gone."
+
+A tiny extension keeps the check from being verbose at every call site:
+
+```csharp
+public static class GodotRefExtensions
+{
+    public static bool IsAlive(this Godot.GodotObject? obj)
+        => obj != null && Godot.GodotObject.IsInstanceValid(obj);
+}
+
+// Usage:
+if (cachedButton.IsAlive())
+    cachedButton.Text = "Click me";
+```
+
+**When to be paranoid**:
+- Refs held in dictionaries, static fields, or any storage that outlives the current frame
+- Refs captured in lambdas wired to `Pressed`, `Timeout`, `Toggled`, etc. — the event may fire after the node has been freed
+- Refs passed to `CallDeferred` — the deferred call may run after the target is freed
+- Refs returned by `FindChild` / `GetNode` once and cached
+- Anything that crosses a `QueueFree`, scene-load, or dialog-close boundary
+
+**When you can skip it**:
+- Refs allocated and used within the same method with no async path between create and use
+- Refs on objects you fully control and just created (nothing else could have freed them yet)
 
 ### `PackedScene.Instantiate()` returns a detached node
 
@@ -1461,5 +1560,6 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 ## Resources
 
 - **Tim's example mod** — [`quad-head/pratfall-example-mod`](https://github.com/quad-head/pratfall-example-mod) — the canonical reference.
+- **Robert's infinite-flare-mod** — [`quad-head/pratfall-infinite-flare-mod`](https://github.com/quad-head/pratfall-infinite-flare-mod) — a small, focused real-world example (one Harmony patch that overrides a single value). Good first read after the canonical example to see what a minimal shipped mod actually looks like.
 - **Discord** — `#mod-dev` channel of the Pratfall dev server (Tim, Robert, and active modders coordinate there).
 - **The Pratfall Mod Framework** — [MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md) — adds a safety gate, IL scanner, multiplayer sync, and helpers that wrap the patterns in this guide.

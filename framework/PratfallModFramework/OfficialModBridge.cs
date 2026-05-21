@@ -1,6 +1,5 @@
 using HarmonyLib;
 using Godot;
-using System.Text.Json;
 
 namespace PratfallModFramework;
 
@@ -33,6 +32,7 @@ namespace PratfallModFramework;
 // used to bridge to native ModManager are now no-ops returning success.
 internal static class OfficialModBridge
 {
+    private static Harmony? _harmony;
     private static bool _installed;
     private static bool _hasLoggedReadInterception;
 
@@ -41,62 +41,73 @@ internal static class OfficialModBridge
         if (_installed)
             return;
 
-        var harmony = new Harmony("PratfallModFramework.OfficialModBridge");
-
-        var loadAll = AccessTools.Method(typeof(global::ModManager), "LoadAllModManifests");
-        if (loadAll != null)
+        try
         {
-            harmony.Patch(loadAll, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(LoadAllModManifestsPrefix)));
+            _harmony = new Harmony("PratfallModFramework.OfficialModBridge");
+
+            var loadAll = AccessTools.Method(typeof(global::ModManager), "LoadAllModManifests");
+            if (loadAll != null)
+            {
+                _harmony.Patch(loadAll, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(LoadAllModManifestsPrefix)));
+            }
+            else
+            {
+                GD.PrintErr("[ModFramework] OfficialModBridge: LoadAllModManifests not found — Pratfall version may have changed signatures");
+            }
+
+            var read = AccessTools.Method(typeof(global::ModManager), "ReadLoadedModsFromFile");
+            if (read != null)
+                _harmony.Patch(read, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(ReadLoadedModsFromFilePrefix)));
+
+            var write = AccessTools.Method(typeof(global::ModManager), "WriteLoadedModsToFile");
+            if (write != null)
+                _harmony.Patch(write, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(WriteLoadedModsToFilePrefix)));
+
+            _installed = true;
+            GD.Print("[ModFramework] Native ModManager turned off (custom loader in charge); LoadAllModManifests + read/write neutered");
         }
-        else
+        catch (Exception ex)
         {
-            GD.PrintErr("[ModFramework] OfficialModBridge: LoadAllModManifests not found — Pratfall version may have changed signatures");
+            // Don't let a single patch failure (e.g. Pratfall signature drift on a
+            // future update) take the framework down. We log and continue degraded —
+            // the native loader will still run in parallel and may double-load or
+            // mis-report, but the framework's own loader keeps working. Symptoms
+            // surface as duplicate mod entries / wrong EnabledModCount; check the
+            // error below to diagnose.
+            GD.PrintErr($"[ModFramework] OfficialModBridge.Install failed — native ModManager NOT turned off, may interfere with framework loader: {ex.GetType().Name}: {ex.Message}");
         }
+    }
 
-        var read = AccessTools.Method(typeof(global::ModManager), "ReadLoadedModsFromFile");
-        if (read != null)
-            harmony.Patch(read, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(ReadLoadedModsFromFilePrefix)));
-
-        var write = AccessTools.Method(typeof(global::ModManager), "WriteLoadedModsToFile");
-        if (write != null)
-            harmony.Patch(write, prefix: new HarmonyMethod(typeof(OfficialModBridge), nameof(WriteLoadedModsToFilePrefix)));
-
-        _installed = true;
-        GD.Print("[ModFramework] Native ModManager turned off (custom loader in charge); LoadAllModManifests + read/write neutered");
+    // Symmetric teardown — unpatches Harmony + resets state so a fresh Install()
+    // after Shutdown re-installs cleanly. Matches the pattern WorkshopSubscriber
+    // and NativeModUiSuppressor use. Safe to call multiple times; safe to call
+    // when Install was never run.
+    public static void Shutdown()
+    {
+        if (_harmony != null)
+        {
+            try { _harmony.UnpatchAll(_harmony.Id); }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[ModFramework] OfficialModBridge.Shutdown: Harmony unpatch threw: {ex.GetType().Name}: {ex.Message}");
+            }
+            _harmony = null;
+        }
+        _installed = false;
+        _hasLoggedReadInterception = false;
     }
 
     // No-op bridges retained so existing call sites in ModManager.cs continue
     // to compile and behave correctly. Returning true means "no native conflict"
-    // — our internal state is the source of truth.
+    // — our internal state is the source of truth. Note: all call sites are
+    // currently gated by `ModManifest.UsesOfficialLoader()` which always returns
+    // false post-2026-05-18, so these never actually execute. Both the bridges
+    // and the dead call sites are queued for removal in a follow-up cleanup pass
+    // (tracked in ModManifest.UsesOfficialLoader's comment).
     public static bool EnableMod(ModManifest manifest) => true;
     public static bool DisableMod(ModManifest manifest) => true;
     public static bool IsEnabled(ModManifest manifest) => false; // we manage enabled state ourselves; don't conflate with native
     public static bool CanResolveManifest(ModManifest manifest) => true; // any mod our framework knows about is valid
-
-    public static HashSet<string> ReadPhysicalEnabledDirectories()
-    {
-        // Native ModManager's enabled_mods.json may still exist from a prior
-        // session before we patched things; read it defensively so FrameworkModStateStore
-        // can offer a "migrate from native" path if needed. Returns empty set when
-        // the file isn't present (the new normal once we're in charge).
-        var path = GetPhysicalEnabledModsFilePath();
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        try
-        {
-            var directories = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path), BubbleJson.Options)
-                ?? new List<string>();
-            return new HashSet<string>(
-                ModManifestJson.NormalizeIdentifiers(directories),
-                StringComparer.OrdinalIgnoreCase);
-        }
-        catch (Exception ex)
-        {
-            GD.PrintErr($"[ModFramework] Failed to read built-in enabled_mods.json: {ex.Message}");
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        }
-    }
 
     // Prefix: skip native LoadAllModManifests entirely. Signature mirrors
     // Pratfall's:  static void LoadAllModManifests(Action onComplete).
@@ -128,22 +139,5 @@ internal static class OfficialModBridge
     private static bool WriteLoadedModsToFilePrefix()
     {
         return false; // skip original
-    }
-
-    private static string? GetPhysicalEnabledModsFilePath()
-    {
-        var gameDir = Path.GetDirectoryName(OS.GetExecutablePath());
-        if (string.IsNullOrWhiteSpace(gameDir))
-            return null;
-
-        return Path.Combine(gameDir, "mods", "enabled_mods.json");
-    }
-
-    private static class BubbleJson
-    {
-        public static readonly JsonSerializerOptions Options = new()
-        {
-            PropertyNameCaseInsensitive = true
-        };
     }
 }

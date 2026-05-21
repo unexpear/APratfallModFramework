@@ -215,6 +215,52 @@ public static partial class MainMenuIntegration
         body.AddChild(lbl);
     }
 
+    // Fourth member of the AddInspect family — a label with a tooltip and
+    // mouse-stop filter (so the tooltip actually shows on hover). Same font /
+    // color as the other inspect rows. Used for per-file and per-patch rows in
+    // ShowInspectionPanel, where the tooltip carries the full SHA-256 / declaring
+    // type info that the visible text truncates.
+    private static void AddInspectTooltipLine(VBoxContainer body, string text, string tooltip)
+    {
+        var line = new Label
+        {
+            Text = text,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            TooltipText = tooltip,
+            MouseFilter = Control.MouseFilterEnum.Stop,
+        };
+        ApplyFont(line, Math.Max(_buttonFontSize - 1, 13));
+        line.AddThemeColorOverride("font_color", new Color(0.85f, 0.92f, 0.95f));
+        body.AddChild(line);
+    }
+
+    // Standard "Close" button for the auxiliary dialogs (Scan, Inspection,
+    // Settings). All three use the same 220×max(refHeight*0.85, 44) shape
+    // and the same "Pressed → QueueFree the host CanvasLayer" semantic.
+    //
+    // Excluded by design: ModsDialog's Close button is the PRIMARY dialog
+    // close (bigger: clamped 210-320 × full refHeight) — different visual
+    // class, stays inline. If a future dialog needs different cleanup (not
+    // just QueueFree), it should also stay inline rather than hide that
+    // divergence behind this helper.
+    //
+    // Caller does grab_focus explicitly on the returned Button — initial
+    // focus is a UX decision per dialog, not a construction concern.
+    private static Button CreateAuxDialogCloseButton(VBoxContainer parent, CanvasLayer layerToFree, string label = "Close")
+    {
+        var closeBtn = new Button
+        {
+            Text = label,
+            FocusMode = Control.FocusModeEnum.All,
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
+            CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f)),
+        };
+        ApplyButtonTheme(closeBtn);
+        closeBtn.Pressed += () => layerToFree.QueueFree();
+        parent.AddChild(closeBtn);
+        return closeBtn;
+    }
+
     private static VBoxContainer CreateFallbackDialogHost(Control overlay, Vector2 dialogSize, bool compact = false)
     {
         // Light scrim like Options — the game world stays visible behind the dialog.
@@ -280,25 +326,39 @@ public static partial class MainMenuIntegration
     private static Node? FindButtonContainer(Node root)
     {
         // Search for containers that have buttons with text "Host", "Offline", "Options"
-        var containers = FindNodesOfType<VBoxContainer>(root);
-        foreach (var c in containers)
+        foreach (var candidate in FindNodesOfType<VBoxContainer>(root))
         {
-            bool hasHost = FindChildByText(c, "Host Game") != null || FindChildByText(c, "Host") != null;
-            bool hasOffline = FindChildByText(c, "Play Offline") != null || FindChildByText(c, "Offline") != null;
-            bool hasOptions = FindChildByText(c, "Options") != null;
-            if (hasHost && hasOffline && hasOptions)
-                return c;
+            if (LooksLikeButtonContainer(candidate))
+            {
+                return candidate;
+            }
         }
-        var hcontainers = FindNodesOfType<HBoxContainer>(root);
-        foreach (var c in hcontainers)
+        foreach (var candidate in FindNodesOfType<HBoxContainer>(root))
         {
-            bool hasHost = FindChildByText(c, "Host Game") != null || FindChildByText(c, "Host") != null;
-            bool hasOffline = FindChildByText(c, "Play Offline") != null || FindChildByText(c, "Offline") != null;
-            bool hasOptions = FindChildByText(c, "Options") != null;
-            if (hasHost && hasOffline && hasOptions)
-                return c;
+            if (LooksLikeButtonContainer(candidate))
+            {
+                return candidate;
+            }
         }
         return null;
+    }
+
+    // The main-menu buttons container has no consistent name across Pratfall versions,
+    // so we identify it by content: any container holding Host/Offline/Options buttons
+    // (with their known text variants) is the right one.
+    private static bool LooksLikeButtonContainer(Node candidate)
+    {
+        bool hasHost =
+            FindChildByText(candidate, "Host Game") != null ||
+            FindChildByText(candidate, "Host") != null;
+
+        bool hasOffline =
+            FindChildByText(candidate, "Play Offline") != null ||
+            FindChildByText(candidate, "Offline") != null;
+
+        bool hasOptions = FindChildByText(candidate, "Options") != null;
+
+        return hasHost && hasOffline && hasOptions;
     }
 
     private static void DumpButtonsRecursive(Node node, int depth)
@@ -347,21 +407,21 @@ public static partial class MainMenuIntegration
     private static void DumpTree(Node node, int depth, string label)
     {
         int btnCount = 0;
-        foreach (var c in node.GetChildren())
+        foreach (var child in node.GetChildren())
         {
             string info;
-            if (c is Button b) { info = $"Button[\"{b.Text}\"]"; btnCount++; }
-            else if (c is Label l) info = $"Label[\"{l.Text}\"]";
-            else if (c is Panel p) info = "Panel";
-            else if (c is ColorRect cr) info = "ColorRect";
-            else if (c is VBoxContainer) info = "VBoxContainer";
-            else if (c is HBoxContainer) info = "HBoxContainer";
-            else if (c is GridContainer) info = "GridContainer";
-            else if (c is Control) info = "Control";
-            else if (c is CanvasLayer) info = "CanvasLayer";
-            else info = c.GetType().Name;
-            GD.Print($"[ModFramework] {new string(' ', depth * 2)}{c.Name} ({info})");
-            DumpTree(c, depth + 1, "");
+            if (child is Button button) { info = $"Button[\"{button.Text}\"]"; btnCount++; }
+            else if (child is Label childLabel) info = $"Label[\"{childLabel.Text}\"]";
+            else if (child is Panel panel) info = "Panel";
+            else if (child is ColorRect colorRect) info = "ColorRect";
+            else if (child is VBoxContainer) info = "VBoxContainer";
+            else if (child is HBoxContainer) info = "HBoxContainer";
+            else if (child is GridContainer) info = "GridContainer";
+            else if (child is Control) info = "Control";
+            else if (child is CanvasLayer) info = "CanvasLayer";
+            else info = child.GetType().Name;
+            GD.Print($"[ModFramework] {new string(' ', depth * 2)}{child.Name} ({info})");
+            DumpTree(child, depth + 1, "");
         }
         if (depth == 0 && label == "root")
             GD.Print($"[ModFramework] Total buttons in tree: {btnCount}");

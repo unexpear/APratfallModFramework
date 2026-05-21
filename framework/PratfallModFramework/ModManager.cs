@@ -159,6 +159,11 @@ public class ModManager : IDisposable
 
         LoadLocalAssemblyMods();
         PersistDesiredEnabledState();
+        // Mirror our scanned + loaded mod set into the native ModManager.Mods /
+        // LoadedMods lists so vanilla mods written against Tim's recommended
+        // `ModManager.Mods[i].Directory` pattern still work under our framework.
+        // See NativeModListMirror for the full mapping + rationale.
+        SyncNativeModList();
         _networkLayer.Initialize(tree, BuildLocalState);
 
         // Poll forever so the Mods button is re-injected after the main menu reloads
@@ -184,6 +189,23 @@ public class ModManager : IDisposable
 
     public bool IsModEnabled(string id) => _modEnabled.GetValueOrDefault(id, false);
     public bool IsModDesiredEnabled(string id) => _desiredEnabled.GetValueOrDefault(id, false);
+
+    // Snapshot current state into the native ModManager.Mods + LoadedMods lists so
+    // vanilla mods using Tim's recommended pattern (`ModManager.Mods[i].Directory`,
+    // `ModManager.LoadedMods.Contains(dir)`, etc.) see what our framework sees.
+    // Cheap call: O(n) over _localMods. Sync sites: Initialize end, Enable/Disable,
+    // mod-transfer integration, Workshop install. NativeModListMirror logs once on
+    // failure and degrades silently.
+    private void SyncNativeModList()
+    {
+        var enabledIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var mod in _localMods)
+        {
+            if (_modEnabled.GetValueOrDefault(mod.Id, false))
+                enabledIds.Add(mod.Id);
+        }
+        NativeModListMirror.Sync(_localMods, enabledIds, _loader.SnapshotLoadedAssemblies());
+    }
 
     // Mod IDs the framework saw last launch but doesn't see now. Snapshot taken
     // in Initialize. Returned as IReadOnlyCollection (live HashSet reference);
@@ -269,7 +291,12 @@ public class ModManager : IDisposable
     {
         _desiredEnabled[id] = enable;
 
-        if (TryGetLocalManifest(id, out var manifest) && enable && UsesFrameworkAssemblyLoader(manifest))
+        // One manifest lookup serves both the fingerprint-check guard and the
+        // dispatch below. The lookup is idempotent so the prior double call was
+        // safe but wasteful.
+        var hasManifest = TryGetLocalManifest(id, out var manifest);
+
+        if (hasManifest && enable && UsesFrameworkAssemblyLoader(manifest))
         {
             // Manually flipping the toggle ON counts as user verification — mark the
             // current DLL hash as checked so future sessions can auto-load it.
@@ -278,7 +305,7 @@ public class ModManager : IDisposable
 
         PersistDesiredEnabledState();
 
-        if (!TryGetLocalManifest(id, out manifest))
+        if (!hasManifest)
             return;
 
         if (manifest.UsesOfficialLoader())
@@ -302,6 +329,10 @@ public class ModManager : IDisposable
         // re-attach cleanly.
         try { WorkshopSubscriber.Shutdown(); }
         catch (Exception ex) { GD.PrintErr($"[ModFramework] WorkshopSubscriber.Shutdown threw: {ex.GetType().Name}: {ex.Message}"); }
+        try { NativeModUiSuppressor.Shutdown(); }
+        catch (Exception ex) { GD.PrintErr($"[ModFramework] NativeModUiSuppressor.Shutdown threw: {ex.GetType().Name}: {ex.Message}"); }
+        try { OfficialModBridge.Shutdown(); }
+        catch (Exception ex) { GD.PrintErr($"[ModFramework] OfficialModBridge.Shutdown threw: {ex.GetType().Name}: {ex.Message}"); }
         GD.Print("[ModFramework] Framework shut down");
     }
 
@@ -381,6 +412,7 @@ public class ModManager : IDisposable
             _networkLayer.BroadcastManifest();
 
         RefreshCompatibilityReport();
+        SyncNativeModList();
         return true;
     }
 
@@ -410,6 +442,7 @@ public class ModManager : IDisposable
         if (broadcast)
             _networkLayer.BroadcastManifest();
         RefreshCompatibilityReport();
+        SyncNativeModList();
     }
 
     private void MountModPckIfAny(ModManifest manifest)
@@ -811,17 +844,17 @@ public class ModManager : IDisposable
         try
         {
             var unionInstalledById = new Dictionary<string, ModManifest>(StringComparer.OrdinalIgnoreCase);
-            foreach (var m in _localMods)
-                if (!string.IsNullOrWhiteSpace(m.Id)) unionInstalledById[m.Id] = m;
-            foreach (var peer in _peerSnapshots.Values)
-                foreach (var pm in peer.InstalledManifests)
-                    if (!string.IsNullOrWhiteSpace(pm.Id) && !unionInstalledById.ContainsKey(pm.Id))
-                        unionInstalledById[pm.Id] = pm;
+            foreach (var localMod in _localMods)
+                if (!string.IsNullOrWhiteSpace(localMod.Id)) unionInstalledById[localMod.Id] = localMod;
+            foreach (var peerSnapshot in _peerSnapshots.Values)
+                foreach (var peerMod in peerSnapshot.InstalledManifests)
+                    if (!string.IsNullOrWhiteSpace(peerMod.Id) && !unionInstalledById.ContainsKey(peerMod.Id))
+                        unionInstalledById[peerMod.Id] = peerMod;
 
             var unionEnabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (id, on) in _modEnabled) if (on) unionEnabled.Add(id);
-            foreach (var peer in _peerSnapshots.Values)
-                foreach (var id in peer.EnabledModIds) unionEnabled.Add(id);
+            foreach (var (id, enabled) in _modEnabled) if (enabled) unionEnabled.Add(id);
+            foreach (var peerSnapshot in _peerSnapshots.Values)
+                foreach (var id in peerSnapshot.EnabledModIds) unionEnabled.Add(id);
 
             _latestCompatibilityReport = ModCompatibilityChecker.Check(
                 unionInstalledById.Values.ToList(),
@@ -888,16 +921,16 @@ public class ModManager : IDisposable
         if (report == null || !report.HasIssues) return null;
 
         var lines = new List<string>();
-        foreach (var c in report.Conflicts)
-            if (string.Equals(c.ModA, modId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.ModB, modId, StringComparison.OrdinalIgnoreCase))
-                lines.Add($"Conflict: {c.ModA} vs {c.ModB} — {c.Reason}");
-        foreach (var w in report.Warnings)
-            if (w.InvolvedMods.Any(id => string.Equals(id, modId, StringComparison.OrdinalIgnoreCase)))
-                lines.Add($"Warning: {w.Detail}");
-        foreach (var d in report.MissingDependencies)
-            if (string.Equals(d.ModId, modId, StringComparison.OrdinalIgnoreCase))
-                lines.Add($"Missing dependency: requires {d.MissingDependencyId}");
+        foreach (var conflict in report.Conflicts)
+            if (string.Equals(conflict.ModA, modId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(conflict.ModB, modId, StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Conflict: {conflict.ModA} vs {conflict.ModB} — {conflict.Reason}");
+        foreach (var warning in report.Warnings)
+            if (warning.InvolvedMods.Any(id => string.Equals(id, modId, StringComparison.OrdinalIgnoreCase)))
+                lines.Add($"Warning: {warning.Detail}");
+        foreach (var dependency in report.MissingDependencies)
+            if (string.Equals(dependency.ModId, modId, StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Missing dependency: requires {dependency.MissingDependencyId}");
 
         return lines.Count == 0 ? null : string.Join("\n", lines);
     }
@@ -911,22 +944,22 @@ public class ModManager : IDisposable
         var report = _latestCompatibilityReport;
         if (report == null || report.Conflicts.Count == 0) return;
 
-        foreach (var c in report.Conflicts)
+        foreach (var conflict in report.Conflicts)
         {
-            if (string.Equals(c.ModA, c.ModB, StringComparison.OrdinalIgnoreCase)) continue;
-            if (!_modEnabled.GetValueOrDefault(c.ModA, false) || !_modEnabled.GetValueOrDefault(c.ModB, false)) continue;
+            if (string.Equals(conflict.ModA, conflict.ModB, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!_modEnabled.GetValueOrDefault(conflict.ModA, false) || !_modEnabled.GetValueOrDefault(conflict.ModB, false)) continue;
 
-            var pairKey = string.CompareOrdinal(c.ModA, c.ModB) < 0
-                ? $"{c.ModA}|{c.ModB}" : $"{c.ModB}|{c.ModA}";
+            var pairKey = string.CompareOrdinal(conflict.ModA, conflict.ModB) < 0
+                ? $"{conflict.ModA}|{conflict.ModB}" : $"{conflict.ModB}|{conflict.ModA}";
             if (_conflictPairsHandled.Contains(pairKey)) continue;
 
-            var nameA = TryGetLocalManifest(c.ModA, out var ma) ? ma.Name : c.ModA;
-            var nameB = TryGetLocalManifest(c.ModB, out var mb) ? mb.Name : c.ModB;
-            var modAId = c.ModA;
-            var modBId = c.ModB;
+            var nameA = TryGetLocalManifest(conflict.ModA, out var manifestA) ? manifestA.Name : conflict.ModA;
+            var nameB = TryGetLocalManifest(conflict.ModB, out var manifestB) ? manifestB.Name : conflict.ModB;
+            var modAId = conflict.ModA;
+            var modBId = conflict.ModB;
 
             _conflictPromptOpen = true;
-            MainMenuIntegration.ShowConflictPrompt(_tree, modAId, nameA, modBId, nameB, c.Reason, keepId =>
+            MainMenuIntegration.ShowConflictPrompt(_tree, modAId, nameA, modBId, nameB, conflict.Reason, keepId =>
             {
                 _conflictPromptOpen = false;
                 _conflictPairsHandled.Add(pairKey);
@@ -1077,6 +1110,9 @@ public class ModManager : IDisposable
             // changed. Recomputed lazily on next IsModChecked / GetCurrentModFingerprint.
             _modCurrentFingerprint.Remove(chunk.ModId);
 
+            // Reflect the newly-discovered manifest into the native list before
+            // TryFinalize (which may flip enabled state and resync again).
+            SyncNativeModList();
             TryFinalizeTransferredMod(chunk.ModId);
         }
         catch (Exception ex)
@@ -1207,6 +1243,9 @@ public class ModManager : IDisposable
                 _modSessionAvailable[mod.Id] = true;
             }
             GD.Print($"[ModFramework] Workshop install integrated; {_localMods.Count} local mods after rescan");
+            // Mirror the freshly-discovered Workshop mod into native ModManager.Mods
+            // so vanilla mods watching that list see it appear without a restart.
+            SyncNativeModList();
         }
         catch (Exception ex)
         {
@@ -1594,16 +1633,16 @@ public class ModManager : IDisposable
         if (report == null || !report.HasIssues) return;
 
         var notes = new List<string>();
-        foreach (var c in report.Conflicts)
-            if (string.Equals(c.ModA, forModId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.ModB, forModId, StringComparison.OrdinalIgnoreCase))
-                notes.Add($"⚠ Conflict: {c.ModA} vs {c.ModB} — {c.Reason}");
-        foreach (var w in report.Warnings)
-            if (w.InvolvedMods.Any(id => string.Equals(id, forModId, StringComparison.OrdinalIgnoreCase)))
-                notes.Add($"⚠ {w.Detail} — {w.Reason}");
-        foreach (var d in report.MissingDependencies)
-            if (string.Equals(d.ModId, forModId, StringComparison.OrdinalIgnoreCase))
-                notes.Add($"⚠ Missing dependency: requires {d.MissingDependencyId}");
+        foreach (var conflict in report.Conflicts)
+            if (string.Equals(conflict.ModA, forModId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(conflict.ModB, forModId, StringComparison.OrdinalIgnoreCase))
+                notes.Add($"⚠ Conflict: {conflict.ModA} vs {conflict.ModB} — {conflict.Reason}");
+        foreach (var warning in report.Warnings)
+            if (warning.InvolvedMods.Any(id => string.Equals(id, forModId, StringComparison.OrdinalIgnoreCase)))
+                notes.Add($"⚠ {warning.Detail} — {warning.Reason}");
+        foreach (var dependency in report.MissingDependencies)
+            if (string.Equals(dependency.ModId, forModId, StringComparison.OrdinalIgnoreCase))
+                notes.Add($"⚠ Missing dependency: requires {dependency.MissingDependencyId}");
 
         if (notes.Count > 0)
             lines.Add(string.Join("\n", notes));

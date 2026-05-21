@@ -56,21 +56,19 @@ public class ModManifest
         var manifest = new ModManifest
         {
             Id = dict.GetValueOrDefault("id", "").AsString(),
-            Name = dict.GetValueOrDefault("name", dict.GetValueOrDefault("Name", "")).AsString(),
-            Version = dict.GetValueOrDefault("version", dict.GetValueOrDefault("Version", "1.0.0")).AsString(),
-            Author = dict.GetValueOrDefault("author", dict.GetValueOrDefault("Author", "")).AsString(),
-            Description = dict.GetValueOrDefault("description", dict.GetValueOrDefault("Description", "")).AsString(),
+            Name = ModManifestJson.GetStringDual(dict, "name", "Name", ""),
+            Version = ModManifestJson.GetStringDual(dict, "version", "Version", "1.0.0"),
+            Author = ModManifestJson.GetStringDual(dict, "author", "Author", ""),
+            Description = ModManifestJson.GetStringDual(dict, "description", "Description", ""),
             Type = dict.GetValueOrDefault("type", hasOfficialFields && !hasFrameworkFields ? "official" : "patch").AsString(),
             PackageName = dict.GetValueOrDefault("PackageName", "").AsString(),
             AssemblyFile = dict.GetValueOrDefault("Assembly", "").AsString(),
-            AssemblySha256 = dict.GetValueOrDefault("assemblySha256", dict.GetValueOrDefault("AssemblySha256", "")).AsString(),
-            PckFile = dict.GetValueOrDefault("pckFile", dict.GetValueOrDefault("PckFile", "")).AsString(),
-            AddAssemblyToGodot = dict.ContainsKey("addAssemblyToGodot")
-                ? dict["addAssemblyToGodot"].AsBool()
-                : (dict.ContainsKey("AddAssemblyToGodot") ? dict["AddAssemblyToGodot"].AsBool() : true),
+            AssemblySha256 = ModManifestJson.GetStringDual(dict, "assemblySha256", "AssemblySha256", ""),
+            PckFile = ModManifestJson.GetStringDual(dict, "pckFile", "PckFile", ""),
+            AddAssemblyToGodot = ModManifestJson.GetBoolDual(dict, "addAssemblyToGodot", "AddAssemblyToGodot", true),
             DirectoryPath = directoryPath ?? "",
             DirectoryName = directoryName ?? "",
-            LoadPolicy = dict.GetValueOrDefault("loadPolicy", dict.GetValueOrDefault("LoadPolicy", hasOfficialFields && !hasFrameworkFields ? ModLoadPolicies.Official : ModLoadPolicies.Auto)).AsString(),
+            LoadPolicy = ModManifestJson.GetStringDual(dict, "loadPolicy", "LoadPolicy", hasOfficialFields && !hasFrameworkFields ? ModLoadPolicies.Official : ModLoadPolicies.Auto),
             Effects = ModEffects.FromJson(dict.GetValueOrDefault("effects", new Dictionary()).AsGodotDictionary()),
             Multiplayer = ModMultiplayer.FromJson(dict.GetValueOrDefault("multiplayer", new Dictionary()).AsGodotDictionary())
         };
@@ -201,22 +199,15 @@ public class ModEffects
             ReadSettings(dict["settings"], effects);
         }
         if (dict.ContainsKey("patches"))
-        {
-            var arr = dict["patches"].AsGodotArray();
-            effects.Patches = arr.Select(v => v.AsString()).ToList();
-        }
+            effects.Patches = ModManifestJson.ReadStringList(dict["patches"]);
         if (dict.ContainsKey("nodes"))
         {
-            var arr = dict["nodes"].AsGodotArray();
-            effects.Nodes = arr.Select(v => v.AsString()).ToList();
+            effects.Nodes = ModManifestJson.ReadStringList(dict["nodes"]);
             if (effects.Nodes.Count > 0)
                 effects.NeedsRestart = true;
         }
         if (dict.ContainsKey("assets"))
-        {
-            var arr = dict["assets"].AsGodotArray();
-            effects.Assets = arr.Select(v => v.AsString()).ToList();
-        }
+            effects.Assets = ModManifestJson.ReadStringList(dict["assets"]);
         if (dict.ContainsKey("needsRestart"))
             effects.NeedsRestart = dict["needsRestart"].AsBool();
         if (dict.ContainsKey("fixedSeedString"))
@@ -376,6 +367,21 @@ internal static class ModManifestJson
         return variant.AsGodotArray()
             .Select(v => v.AsString())
             .ToList();
+    }
+
+    // Pratfall's official-loader schema uses PascalCase keys (Name, Version, Author),
+    // while the framework's own manifest schema prefers camelCase (name, version, author).
+    // FromJson honors both so a single manifest.json works under either loader. These
+    // dual-key helpers consolidate the "prefer framework alias, fall back to official
+    // alias, then to default" lookup chain that otherwise repeats 8+ times.
+    public static string GetStringDual(Godot.Collections.Dictionary dict, string frameworkKey, string officialKey, string defaultValue)
+    {
+        return dict.GetValueOrDefault(frameworkKey, dict.GetValueOrDefault(officialKey, defaultValue)).AsString();
+    }
+
+    public static bool GetBoolDual(Godot.Collections.Dictionary dict, string frameworkKey, string officialKey, bool defaultValue)
+    {
+        return dict.GetValueOrDefault(frameworkKey, dict.GetValueOrDefault(officialKey, defaultValue)).AsBool();
     }
 
     public static List<string> NormalizeIdentifiers(IEnumerable<string> values)

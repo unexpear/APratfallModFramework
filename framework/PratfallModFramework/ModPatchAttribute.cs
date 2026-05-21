@@ -15,4 +15,9 @@ public class ModPatchAttribute : Attribute
     }
 }
 
-public enum PatchType { Prefix, Postfix, Transpiler }
+public enum PatchType
+{
+    Prefix = 0,
+    Postfix = 1,
+    Transpiler = 2,
+}

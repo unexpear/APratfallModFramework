@@ -94,74 +94,97 @@ public static class ModCompatibilityChecker
         }
 
         // (3) Manifest-declared `conflictsWith` between two enabled mods.
-        var enabledManifests = installed.Where(m => enabledSet.Contains(m.Id)).ToList();
+        var enabledManifests = installed.Where(mod => enabledSet.Contains(mod.Id)).ToList();
         var seenPairs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in enabledManifests)
+        foreach (var mod in enabledManifests)
         {
-            foreach (var b in a.Multiplayer.ConflictsWith)
+            foreach (var conflictTargetId in mod.Multiplayer.ConflictsWith)
             {
-                if (!enabledSet.Contains(b)) continue;
-                var pair = string.CompareOrdinal(a.Id, b) < 0 ? $"{a.Id}|{b}" : $"{b}|{a.Id}";
+                if (!enabledSet.Contains(conflictTargetId)) continue;
+                var pair = string.CompareOrdinal(mod.Id, conflictTargetId) < 0
+                    ? $"{mod.Id}|{conflictTargetId}"
+                    : $"{conflictTargetId}|{mod.Id}";
                 if (!seenPairs.Add(pair)) continue;
                 report.Conflicts.Add(new Conflict
                 {
-                    ModA = a.Id,
-                    ModB = b,
+                    ModA = mod.Id,
+                    ModB = conflictTargetId,
                     Reason = "declared incompatible by manifest (conflictsWith)",
                 });
             }
         }
 
         // (4) Missing required dependencies.
-        foreach (var m in enabledManifests)
+        foreach (var mod in enabledManifests)
         {
-            foreach (var dep in m.Multiplayer.Requires)
+            foreach (var dependencyId in mod.Multiplayer.Requires)
             {
-                if (!enabledSet.Contains(dep))
-                    report.MissingDependencies.Add(new MissingDependency { ModId = m.Id, MissingDependencyId = dep });
+                if (!enabledSet.Contains(dependencyId))
+                    report.MissingDependencies.Add(new MissingDependency { ModId = mod.Id, MissingDependencyId = dependencyId });
             }
         }
 
         // (5) Harmony patch overlaps — only if loaded assemblies were provided.
-        if (loadedAssembliesById != null && loadedAssembliesById.Count > 0)
-        {
-            // Map: "Namespace.Type::MethodName" -> list of (modId, patchType)
-            var patchedTargets = new Dictionary<string, List<(string ModId, PatchType Type)>>();
-            foreach (var (modId, asm) in loadedAssembliesById)
-            {
-                if (!enabledSet.Contains(modId)) continue;
-                Type[] types;
-                try { types = asm.GetTypes(); }
-                catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray()!; }
-                foreach (var t in types)
-                {
-                    foreach (var attr in t.GetCustomAttributes<ModPatchAttribute>())
-                    {
-                        var key = $"{attr.TargetType.FullName}::{attr.MethodName}";
-                        if (!patchedTargets.TryGetValue(key, out var list))
-                            patchedTargets[key] = list = new();
-                        list.Add((modId, attr.Type));
-                    }
-                }
-            }
-
-            foreach (var (target, patches) in patchedTargets)
-            {
-                var distinctMods = patches.Select(p => p.ModId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                if (distinctMods.Count < 2) continue;
-                var hasTranspiler = patches.Any(p => p.Type == PatchType.Transpiler);
-                report.Warnings.Add(new Warning
-                {
-                    Detail = $"{distinctMods.Count} mods patch {target}",
-                    InvolvedMods = distinctMods,
-                    Reason = hasTranspiler
-                        ? "multiple Harmony patches on same target — TRANSPILER involved, ordering may break behavior"
-                        : "multiple Harmony patches on same target — usually safe but may interact",
-                });
-            }
-        }
+        // Two-step: collect a target→patches map, then emit warnings from groups of 2+.
+        // Extracted into helpers so Check reads as a flat sequence rather than burying
+        // a 3-level reflection loop in the middle.
+        var patchedTargets = CollectPatchedTargets(loadedAssembliesById, enabledSet);
+        EmitPatchOverlapWarnings(patchedTargets, report);
 
         return report;
+    }
+
+    // Walks every loaded mod assembly's [ModPatch] attributes and indexes them by
+    // "TargetType::MethodName". Skips assemblies whose mod id isn't currently enabled.
+    // Reflection partial-failure tolerance lives in ReflectionHelper.GetTypesSafe —
+    // if an assembly can't fully reflect, we use whatever types DID load rather
+    // than abandoning the whole assembly.
+    private static Dictionary<string, List<(string ModId, PatchType Type)>> CollectPatchedTargets(
+        IReadOnlyDictionary<string, Assembly>? loadedAssembliesById,
+        HashSet<string> enabledModIds)
+    {
+        var patchedTargets = new Dictionary<string, List<(string ModId, PatchType Type)>>();
+        if (loadedAssembliesById == null || loadedAssembliesById.Count == 0)
+            return patchedTargets;
+
+        foreach (var (modId, assembly) in loadedAssembliesById)
+        {
+            if (!enabledModIds.Contains(modId)) continue;
+            foreach (var type in ReflectionHelper.GetTypesSafe(assembly))
+            {
+                foreach (var attr in type.GetCustomAttributes<ModPatchAttribute>())
+                {
+                    var key = $"{attr.TargetType.FullName}::{attr.MethodName}";
+                    if (!patchedTargets.TryGetValue(key, out var list))
+                        patchedTargets[key] = list = new();
+                    list.Add((modId, attr.Type));
+                }
+            }
+        }
+        return patchedTargets;
+    }
+
+    // Emits one Warning per target that 2+ enabled mods patch. Transpiler-involved
+    // overlaps get a stronger wording — Harmony transpilers rewrite IL and their
+    // ordering can break the other patches' assumptions.
+    private static void EmitPatchOverlapWarnings(
+        Dictionary<string, List<(string ModId, PatchType Type)>> patchedTargets,
+        Report report)
+    {
+        foreach (var (target, patches) in patchedTargets)
+        {
+            var distinctMods = patches.Select(p => p.ModId).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (distinctMods.Count < 2) continue;
+            var hasTranspiler = patches.Any(p => p.Type == PatchType.Transpiler);
+            report.Warnings.Add(new Warning
+            {
+                Detail = $"{distinctMods.Count} mods patch {target}",
+                InvolvedMods = distinctMods,
+                Reason = hasTranspiler
+                    ? "multiple Harmony patches on same target — TRANSPILER involved, ordering may break behavior"
+                    : "multiple Harmony patches on same target — usually safe but may interact",
+            });
+        }
     }
 
     public static void LogReport(Report report, Action<string>? info = null, Action<string>? warn = null)
@@ -174,8 +197,8 @@ public static class ModCompatibilityChecker
             return;
         }
         warn($"[ModFramework] Compatibility check: {report.Summarize()}");
-        foreach (var c in report.Conflicts) warn($"[ModFramework]   {c}");
-        foreach (var w in report.Warnings) warn($"[ModFramework]   {w}");
-        foreach (var d in report.MissingDependencies) warn($"[ModFramework]   {d}");
+        foreach (var conflict in report.Conflicts) warn($"[ModFramework]   {conflict}");
+        foreach (var warning in report.Warnings) warn($"[ModFramework]   {warning}");
+        foreach (var dependency in report.MissingDependencies) warn($"[ModFramework]   {dependency}");
     }
 }

@@ -73,17 +73,17 @@ public static partial class MainMenuIntegration
             choice();
         }
 
-        var dlBtn = new Button
+        var downloadBtn = new Button
         {
             Text = $"Download{sizeHint}",
             FocusMode = Control.FocusModeEnum.All,
             SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
         };
-        ApplyButtonTheme(dlBtn);
-        dlBtn.CustomMinimumSize = new Vector2(buttonWidth, buttonHeight);
-        dlBtn.Pressed += () => Resolve(onDownload);
-        buttonRow.AddChild(dlBtn);
-        focusables.Add(dlBtn);
+        ApplyButtonTheme(downloadBtn);
+        downloadBtn.CustomMinimumSize = new Vector2(buttonWidth, buttonHeight);
+        downloadBtn.Pressed += () => Resolve(onDownload);
+        buttonRow.AddChild(downloadBtn);
+        focusables.Add(downloadBtn);
 
         if (canStretch)
         {
@@ -120,6 +120,6 @@ public static partial class MainMenuIntegration
         };
 
         WireVerticalFocus(focusables);
-        dlBtn.CallDeferred("grab_focus");
+        downloadBtn.CallDeferred("grab_focus");
     }
 }

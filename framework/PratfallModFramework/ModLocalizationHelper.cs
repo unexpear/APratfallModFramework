@@ -7,7 +7,8 @@ namespace PratfallModFramework;
 
 // Helper for mods that want to add a new in-game language. Pratfall's loader has
 // native support for user-installed locales via LocalizationManager.LoadUserLocalizations,
-// which scans `<userData>/localization/` for files matching `_*.json` and adds them
+// which scans `<userData>/localization/` for `*.json` files (excluding any whose
+// name starts with `_` — those are reserved/skipped by the loader) and adds them
 // to AvailableLocales (the same list the in-game language selector reads). This
 // helper writes the mod's JSON to the right folder with the right naming convention
 // and triggers the rescan.
@@ -102,9 +103,9 @@ public static class ModLocalizationHelper
         }
     }
 
-    public static bool IsForceEnableUserLocalesActive => _forceEnableApplied;
-
     private static bool _forceEnableApplied;
+
+    public static bool IsForceEnableUserLocalesActive => _forceEnableApplied;
 
     private static bool AllowUserLocalizationPrefix(ref bool __result)
     {
@@ -193,7 +194,7 @@ public static class ModLocalizationHelper
             {
                 if (!global::Game.Config.AllowUserLocalization)
                 {
-                    GD.PrintErr("[ModFramework] LocalizationManager.LoadUserLocalizations is gated by Game.Config.AllowUserLocalization=false on this Pratfall build. The user-locale file was written, but the game won't load it. Wait for Pratfall to enable AllowUserLocalization, or load translations via TranslationServer.AddTranslation directly.");
+                    GD.PrintErr("[ModFramework] LocalizationManager.LoadUserLocalizations is gated by Game.Config.AllowUserLocalization=false on this Pratfall build. The user-locale file was written, but the game won't load it. Options: (1) call ModLocalizationHelper.ForceEnableUserLocales() to Harmony-unlock the gate, or (2) skip this helper and call TranslationServer.AddTranslation + LocalizationManager.UpdateAvailableLocales directly — Cecil-verified on R2973 to surface new languages in the picker.");
                     return;
                 }
                 if (global::Game.Platform != null && !global::Game.Platform.IsSupportingDirectFileAccess())
@@ -202,7 +203,7 @@ public static class ModLocalizationHelper
                     return;
                 }
             }
-            catch { /* gate-introspection failure shouldn't block the legitimate call */ }
+            catch (Exception) { /* gate-introspection failure shouldn't block the legitimate call */ }
 
             mgr.LoadUserLocalizations();
         }
@@ -246,8 +247,9 @@ public static class ModLocalizationHelper
 
     private static string Sanitize(string s)
     {
-        // Filesystem-safe + matches the leading-underscore convention. Strip anything
-        // that could break path parsing or cross folders.
+        // Filesystem-safe — strip anything that could break path parsing or cross
+        // folders. The non-leading-underscore filename convention is enforced by
+        // RegisterRaw's `{modId}_{localeCode}.json` template, not here.
         var clean = new StringBuilder();
         foreach (var ch in s)
             clean.Append(char.IsLetterOrDigit(ch) || ch == '-' ? ch : '_');
@@ -283,7 +285,7 @@ public static class ModLocalizationHelper
 
             // Rescan so AvailableLocales drops the entry too.
             try { global::LocalizationManager.Instance?.LoadUserLocalizations(); }
-            catch { /* best-effort cleanup */ }
+            catch (Exception) { /* best-effort cleanup */ }
         }
     }
 

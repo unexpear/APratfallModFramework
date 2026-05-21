@@ -69,7 +69,12 @@ public static partial class MainMenuIntegration
         buttonRow.AddThemeConstantOverride("separation", 18);
         panel.AddChild(buttonRow);
 
-        var buttonHeight = Math.Max(GetReferenceButtonHeight(), 56f);
+        // Cache the reference height: GetReferenceButtonHeight() walks the tree
+        // (finds MainMenuUI → Options button) — non-trivial work + an atomic
+        // snapshot avoids any chance of two sibling sizes computing against
+        // different values if a layout pass intervened.
+        var referenceButtonHeight = GetReferenceButtonHeight();
+        var buttonHeight = Math.Max(referenceButtonHeight, 56f);
         var buttonWidth = Mathf.Clamp(dialogSize.X * 0.35f, 200f, 320f);
 
         var keepA = new Button { Text = $"Keep {modAName}", FocusMode = Control.FocusModeEnum.All };
@@ -89,7 +94,7 @@ public static partial class MainMenuIntegration
             SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
         };
         ApplyButtonTheme(laterBtn);
-        laterBtn.CustomMinimumSize = new Vector2(220f, Math.Max(GetReferenceButtonHeight() * 0.85f, 44f));
+        laterBtn.CustomMinimumSize = new Vector2(220f, Math.Max(referenceButtonHeight * 0.85f, 44f));
         panel.AddChild(laterBtn);
 
         bool fired = false;

@@ -133,13 +133,13 @@ public static class ModCrashReporter
                         return manifest;
                     }
                 }
-                catch
+                catch (Exception)
                 {
                     // Skip bad manifests; we're best-effort.
                 }
             }
         }
-        catch
+        catch (Exception)
         {
         }
         return null;
@@ -177,7 +177,7 @@ public static class ModCrashReporter
             if (string.IsNullOrWhiteSpace(globalized)) globalized = raw;
             return Path.Combine(globalized, "modframework-crash-reports");
         }
-        catch
+        catch (Exception)
         {
             return null;
         }
@@ -195,7 +195,7 @@ public static class ModCrashReporter
             if (string.IsNullOrWhiteSpace(globalized)) globalized = raw;
             return Path.Combine(globalized, "mods");
         }
-        catch
+        catch (Exception)
         {
             return null;
         }

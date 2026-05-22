@@ -44,13 +44,17 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ### ModConfig.cs
 
+Config-format coverage: EXISTS (ModFrameworkSelfTest.RunConfigFormatTests, commit 73680a4; plus the broader RunConfigSystemTest for bind/reload/constraint/OnChange). Covers _schema_version created + preserved, save->reload preserves typed values, corrupt config -> .bad backup + defaults recovered, type-mismatch -> default + bad value overwritten (no poison), default-value seeding stable. Execution status: compiled + behavior-verified by reading; NOT yet executed in-game.
+
 - Finding: Schema-version init JsonObject template repeated at 3 sites (lines 260, 268, 276).
   Why deferred: persistence-adjacent; safer in a focused persistence pass.
+  Status: UNBLOCKED IN PRINCIPLE by config-format coverage (73680a4); not yet applied.
   Fix sketch: private static helper CreateConfigDocumentTemplate() returning new JsonObject { ["_schema_version"] = CurrentSchemaVersion }.
   Re-trigger: persistence-focused readability pass.
 
 - Finding: Path-resolution dance repeated in EnsureLoaded + WriteFile.
   Why deferred: persistence-adjacent; small win, low urgency.
+  Status: UNBLOCKED IN PRINCIPLE by config-format coverage (73680a4); not yet applied. (Note: this EnsureFilePath helper is ModConfig-local; the cross-file PathUtil.ResolveUserDataSubfolder consolidation still waits on path-resolution coverage.)
   Fix sketch: private EnsureFilePath() helper that returns whether a file path is now resolved.
   Re-trigger: persistence-focused readability pass.
 

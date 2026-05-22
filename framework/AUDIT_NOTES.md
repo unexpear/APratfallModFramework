@@ -131,10 +131,10 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: replace GetUserLocaleFolder with PathUtil.ResolveUserDataSubfolder("localization", createIfMissing: true) once the shared helper lands.
   Re-trigger: persistence-focused readability pass.
 
-- Finding: Sanitize keeps hyphens; filename sanitizer behavior must be unified carefully across all sanitize sites.
-  Why deferred: persistence-adjacent; consolidation needs an explicit allowed-character policy.
-  Fix sketch: PathUtil.SanitizeForFilename with documented allowed chars. Verify locale codes, mod ids, log names, crash-report names, and save-data names before rollout.
-  Re-trigger: persistence-focused readability pass.
+- Finding: Sanitize is duplicated across 5 sites; all 5 are behaviorally EQUIVALENT. (Verified: each keeps letters/digits/hyphen and maps everything else to '_'. ModSaveDataHelper additionally lists '_' explicitly, but the fallback also yields '_', so the output is identical for every input.) The earlier "ModLocalizationHelper diverges on hyphens, others may not" note was WRONG — they all keep hyphens.
+  Why deferred: PathUtil.SanitizeForFilename consolidation is still persistence-sensitive (outputs feed user file paths), but it is NO LONGER blocked by char-set disagreement.
+  Coverage: sanitize golden + cross-impl equivalence exists (ModFrameworkSelfTest.RunFilenameSanitizeTests, commit fbb7f14). Execution status: compiled + behavior-verified by reading; NOT yet executed in-game.
+  Re-trigger: persistence-focused readability pass; consolidation now gated only by an in-game run of the sanitize coverage + a one-time check that no live user filenames change. Do NOT apply the PathUtil.SanitizeForFilename refactor yet.
 
 - Finding: ForceEnableUserLocales is intentionally one-way with no Shutdown/reset path.
   Why deferred: documentation/lifecycle note; it should be excluded from the canonical HarmonyPatchSet lifecycle pattern.

@@ -294,13 +294,6 @@ Config-format coverage: EXISTS (ModFrameworkSelfTest.RunConfigFormatTests, commi
   Fix sketch: confirm intended semantics, then document them in XmlDoc and the framework guide.
   Re-trigger: pre-v1.0 docs pass.
 
-### DebugPeerConfig.cs
-
-- Finding: JSON schema for user://modframework-debug-peer.json is not covered by format-contract regression coverage.
-  Why deferred: coverage work, not readability; debug-only, but still a developer-visible persistence contract.
-  Fix sketch: add DebugPeerConfig roundtrip coverage: load/save/normalize idempotence, Enabled=false short-circuit, missing-field defaults, and debug-peer snapshot generation.
-  Re-trigger: format-contract regression coverage pass.
-
 ### NativeDialogBridge.cs
 
 - Finding: TryShow has silent false-return branches without diagnostics.
@@ -437,7 +430,7 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
     (d) filename Sanitize golden — COVERED (RunFilenameSanitizeTests, fbb7f14)
     (e) ModLogger log-line format + file output — COVERED (RunLogFormatTests, e7d510d): HH:mm:ss.fff timestamp shape, padded level tags, "| TypeName: message" exception suffix, UTF-8 file append, Environment.NewLine terminator, ring-buffer order, ring capacity/eviction (200), per-mod GetRecentLines isolation
     (f) lifecycle-hook coverage — PENDING
-    (g) DebugPeerConfig roundtrip — PENDING
+    (g) DebugPeerConfig roundtrip — COVERED (RunDebugPeerConfigTests, fa7e7f7): Enabled=false short-circuit, missing-field defaults, Normalize idempotence + self-loop reset, representative TryLoad, CreatePeerSnapshot, ApplyApprovedResult, MirrorLocalInstalledManifests
   Execution status for all covered sub-items: compiled + behavior-verified by reading; NOT yet executed in-game.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.
   Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity), (f) lifecycle-hook coverage: SessionStartHooks install idempotence, Host/Offline dispatch, callback exception isolation, last-install-wins behavior, Bootstrap startup/shutdown sentinel behavior, and ModManager subsystem teardown order, (g) DebugPeerConfig roundtrip / schema-default tests for user://modframework-debug-peer.json (load/save/normalize idempotence, Enabled=false short-circuit, missing-field defaults, debug-peer snapshot generation).

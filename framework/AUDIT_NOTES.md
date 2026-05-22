@@ -5,18 +5,31 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ## In-game validation (executed)
 
-2026-05-22 — all 13 safety-gate self-test families executed in-game on Pratfall
-1.1.0.R2981 via a throwaway StressSelfTestMod OnLoad runner: **13/13 passed, 0
-failed** (VoteTally, GameEventDispatch, DropPoolSelectiveDispose, FilenameSanitize,
-WireFormatRoundtrip, WireFormatCap, ConfigFormat, LogFormat, CrashReportGolden,
-DebugPeerConfig, PathResolution, ModAssemblyLoader, NetworkLifecycle). This
+2026-05-22 — all 14 safety-gate self-test families executed in-game via a throwaway
+StressSelfTestMod OnLoad runner: **14/14 passed, 0 failed** (VoteTally,
+GameEventDispatch, DropPoolSelectiveDispose, FilenameSanitize, WireFormatRoundtrip,
+WireFormatCap, ConfigFormat, LogFormat, CrashReportGolden, DebugPeerConfig,
+PathResolution, ModAssemblyLoader, NetworkLifecycle, SessionModResolver). This
 supersedes the per-family "NOT yet executed in-game" execution-status lines below
 — the coverage is now executed-verified, not just read-verified. Confirmed at
 runtime: collectible-ALC unload (WeakReference dies under Godot's .NET host),
-GameEventBus fire/dispatch, debug-peer guard attach/detach, and the format / path
-/ log / crash / wire / config contracts. Re-run after any Pratfall update or
-coverage change. The documented GAPs are unchanged by this run: real-transport
-dispatch/peer-auth (network-lifecycle) and the full ALC fixture-DLL cycle.
+GameEventBus fire/dispatch, debug-peer guard attach/detach, the format / path /
+log / crash / wire / config contracts, the OnLoad fail-closed path (finding #1),
+and the P1 session mod resolver.
+
+OnLoad fail-closed (finding #1, cec8faf) validated two ways this run: (1) the
+ModAssemblyLoader test's emitted throwing-OnLoad assembly propagates instead of
+being swallowed; (2) a REAL stale mod — StressQuarantineMod, whose OnLoad throws
+on the removed QuarantineRoutingResult type — hit the live path: log shows "OnLoad
+failed for mod StressQuarantineMod; rolled back 0 patch(es) + assembly load",
+exactly ONE crash report (the ModManager de-dup guard held), a thrown
+ModOnLoadException, and "Failed to load mod StressQuarantineMod" (kept disabled,
+not advertised). That exercises the real LoadMod -> ModManager fail-closed flow the
+in-process test can't reach; the residual fixture-DLL gap is now only patch-rollback
+with patches>0 (this mod declares 0) plus OnUnload-once / reload / SnapshotLoadedAssemblies.
+
+Re-run after any Pratfall update or coverage change. Other documented GAPs unchanged:
+real-transport dispatch/peer-auth (network-lifecycle).
 
 ## Deferred Law-1/Law-2/Law-3 findings
 
@@ -486,7 +499,7 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
 
 - Finding: ModAssemblyLoader load/unload regression coverage — PARTIAL.
   Covered (RunModAssemblyLoaderTests, 4b836b2): fresh-loader bookkeeping (IsLoaded(unknown)=false, UnloadMod(unknown) no-op, empty SnapshotLoadedAssemblies), hash-pin tamper-protection refusal (mismatched sha256 throws InvalidOperationException before the assembly is loaded), and the collectible-ALC unload mechanic (load a sidecar DLL into a collectible AssemblyLoadContext, Unload + GC, WeakReference dies).
-  Also covered (cec8faf): OnLoad fail-closed propagation — a throwing static OnLoad propagates the mod's real exception (driven via an in-memory emitted assembly through the private InvokeLoadCallbacks seam), and the non-throwing success path still collects OnUnload. Execution status: compiled + behavior-verified by reading; the new case is NOT yet executed in-game (the prior 13/13 in-game run predates it).
+  Also covered (cec8faf): OnLoad fail-closed propagation — a throwing static OnLoad propagates the mod's real exception (driven via an in-memory emitted assembly through the private InvokeLoadCallbacks seam), and the non-throwing success path still collects OnUnload. Execution status: EXECUTED in-game 2026-05-22 (14/14 run); additionally validated end-to-end on a real stale mod (StressQuarantineMod fail-closed: rolled back, single crash report, ModOnLoadException, kept disabled).
   GAP (still needs an on-disk fixture mod DLL — .NET 8 can't persist an emitted assembly to disk): the FULL LoadMod path against a real mod — patches actually removed + the loader's own ALC collects + the mod absent from _loaded after an OnLoad throw; OnUnload fires exactly once (incl. after an OnLoad throw); reload-same-id leaves no stale state; SnapshotLoadedAssemblies with real loaded mods; shared-assembly refs resolve to host context not the ALC.
   Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (the collectible-ALC + GC check especially needs a real run to confirm the Godot .NET host actually collects).
   Fix sketch for the gap: add a tiny purpose-built fixture mod DLL as a build artifact (OnLoad/OnUnload/[ModPatch] types + a pinned sha256), then exercise the full LoadMod/UnloadMod cycle against it.
@@ -519,7 +532,7 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Scope: pure, session-scoped resolver only. Computes EffectiveSessionModSet + per-mod SessionDecisions (Safe auto-enable vs Unsafe unanimous-override) from the host's enabled set and each peer's installed inventory. Never mutates the host's saved enabled state. NO network, NO UI, NO ModManager/ModVoteSession integration — those are P2-P4.
   Safe default: a clean mod (every player has a compatible copy, deps satisfied, no declared conflict) auto-enables; any contentious mod (missing-for-player, version-mismatch, missing-dependency, declared-conflict) is disabled-for-session and surfaced as an unsafe override needing a unanimous vote. Declared-conflict pairs keep the earlier-listed, disable the later (P1 keep-both = unanimous; safe-majority which-to-keep deferred to a later phase per the plan).
   Covered (RunSessionModResolverTests, 6a98ab4): all-compatible auto-enable, missing-for-player -> disabled+unanimous, version-mismatch, missing-dependency, declared-conflict -> later-disabled/earlier-effective, and Resolve-does-not-mutate-host-state.
-  Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (runs via the stress-mod harness; ModManifest/ModLocalState normalize is pure C#, so an in-game run mainly confirms the harness wiring). Upgrade after the first in-game harness run.
+  Execution status: EXECUTED in-game 2026-05-22 (14/14 run, RunSessionModResolverTests = 6/6 sub-cases pass via the stress-mod harness).
   Next phases (design only, NOT built): P2 build peer ModPeerSnapshots from real lobby manifest exchange; P3 drive the PendingVotes through ModVoteSession (safe=majority, unsafe=unanimous, failed-vote -> auto-disable); P4 apply the resolved plan at session start (SessionStartHooks) without touching saved enabled state.
   Re-trigger: before starting P2 (peer snapshot transport) or P3 (vote wiring).
 

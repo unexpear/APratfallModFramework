@@ -1276,6 +1276,170 @@ public static class ModFrameworkSelfTest
     private static string OutcomeText(bool? outcome) =>
         outcome switch { true => "PASS", false => "FAIL", null => "no-resolution" };
 
+    // Helper-cluster dispatch/exception/cleanup coverage for ModGameEventHelper.
+    // Fires only the test's OWN bus subscriptions (the delta from a captured baseline)
+    // so real game subscribers are never invoked with a synthetic event. All test
+    // subscriptions are disposed in the finally block so a failure can't leak handlers
+    // onto the shared GameEventBus.
+    public static HelperTestResult RunGameEventDispatchTests()
+    {
+        var r = new HelperTestResult();
+        var subs = new List<IDisposable>();
+        try
+        {
+            // 1. SubscribeAll: subscribe -> fire -> handler called.
+            var allHits = 0;
+            var baseAll = BusInvocationList();
+            var subAll = ModGameEventHelper.SubscribeAll((_, _) => allHits++);
+            subs.Add(subAll);
+            FireDelta(baseAll, NewTag("selftest.any"), null);
+            if (allHits != 1) { r.ErrorMessage = $"SubscribeAll fire: expected 1 hit, got {allHits}"; return r; }
+            r.StepsPassed.Add("SubscribeAll: fire invokes handler");
+
+            // 2. Dispose -> callback removed from bus -> fire does not invoke handler.
+            subAll.Dispose();
+            if (BusInvocationList().Where(d => Array.IndexOf(baseAll, d) < 0).Any())
+            { r.ErrorMessage = "after Dispose, callback still on bus"; return r; }
+            FireDelta(baseAll, NewTag("selftest.any"), null); // delta now empty
+            if (allHits != 1) { r.ErrorMessage = $"after Dispose, handler still fired (hits={allHits})"; return r; }
+            r.StepsPassed.Add("Dispose: callback removed, fire is a no-op");
+
+            // 3. double Dispose is safe (no throw).
+            subAll.Dispose();
+            r.StepsPassed.Add("double Dispose is safe");
+
+            // 4. Tag filtering: matching tag fires, non-matching tag does not.
+            var tagHits = 0;
+            var baseTag = BusInvocationList();
+            subs.Add(ModGameEventHelper.SubscribeToTag("selftest.match", (_, _) => tagHits++));
+            FireDelta(baseTag, NewTag("selftest.match"), null);
+            if (tagHits != 1) { r.ErrorMessage = $"tag match: expected 1 hit, got {tagHits}"; return r; }
+            FireDelta(baseTag, NewTag("selftest.other"), null);
+            if (tagHits != 1) { r.ErrorMessage = $"non-matching tag fired handler (hits={tagHits})"; return r; }
+            r.StepsPassed.Add("SubscribeToTag: matches tag, rejects non-matching tag");
+
+            // 4b. Subscribe(GameplayTag): Equals-based filtering matches a separate tag
+            // instance with the same .Tag string, and rejects a different .Tag.
+            var eqHits = 0;
+            var baseEq = BusInvocationList();
+            subs.Add(ModGameEventHelper.Subscribe(NewTag("selftest.eq"), (_, _) => eqHits++));
+            FireDelta(baseEq, NewTag("selftest.eq"), null);
+            if (eqHits != 1) { r.ErrorMessage = $"Subscribe(GameplayTag) same-tag instance: expected 1 hit, got {eqHits}"; return r; }
+            FireDelta(baseEq, NewTag("selftest.neq"), null);
+            if (eqHits != 1) { r.ErrorMessage = $"Subscribe(GameplayTag) non-matching tag fired (hits={eqHits})"; return r; }
+            r.StepsPassed.Add("Subscribe(GameplayTag): Equals-based filtering across instances");
+
+            // 5. Duplicate subscriptions: same handler subscribed twice fires twice (no dedup).
+            var dupHits = 0;
+            Action<global::GameplayTag, global::IGameEvent> dupHandler = (_, _) => dupHits++;
+            var baseDup = BusInvocationList();
+            subs.Add(ModGameEventHelper.SubscribeAll(dupHandler));
+            subs.Add(ModGameEventHelper.SubscribeAll(dupHandler));
+            FireDelta(baseDup, NewTag("selftest.any"), null);
+            if (dupHits != 2) { r.ErrorMessage = $"duplicate subscriptions: expected 2 hits, got {dupHits}"; return r; }
+            r.StepsPassed.Add("duplicate subscriptions both fire (no dedup)");
+
+            // 6. Throwing handler does not prevent another handler from firing (per-callback try/catch).
+            var survivorHits = 0;
+            var baseThrow = BusInvocationList();
+            subs.Add(ModGameEventHelper.SubscribeAll((_, _) => throw new InvalidOperationException("selftest boom")));
+            subs.Add(ModGameEventHelper.SubscribeAll((_, _) => survivorHits++));
+            FireDelta(baseThrow, NewTag("selftest.any"), null);
+            if (survivorHits != 1) { r.ErrorMessage = $"throwing handler broke isolation; survivor hits={survivorHits}"; return r; }
+            r.StepsPassed.Add("throwing handler isolated (survivor still fires)");
+
+            // 7. Invalid args throw the expected exception types.
+            if (!Throws<ArgumentNullException>(() => ModGameEventHelper.SubscribeAll(null!)))
+            { r.ErrorMessage = "SubscribeAll(null) did not throw ArgumentNullException"; return r; }
+            if (!Throws<ArgumentException>(() => ModGameEventHelper.SubscribeToTag("", (_, _) => { })))
+            { r.ErrorMessage = "SubscribeToTag(empty) did not throw ArgumentException"; return r; }
+            if (!Throws<ArgumentNullException>(() => ModGameEventHelper.SubscribeToTag("x", null!)))
+            { r.ErrorMessage = "SubscribeToTag(tag, null) did not throw ArgumentNullException"; return r; }
+            r.StepsPassed.Add("invalid args throw expected exception types");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+        finally
+        {
+            foreach (var s in subs) s.Dispose();
+        }
+    }
+
+    // Verifies ModDropPoolHelper.Dispose removes ONLY the entry that registration added,
+    // leaving sibling registrations intact (reference-equality removal, not content match).
+    public static HelperTestResult RunDropPoolSelectiveDisposeTest()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var pool = new RandomWeightedDropPool { Pool = Array.Empty<RandomWeightedScene>() };
+            var scene = new PackedScene();
+            var reg1 = ModDropPoolHelper.RegisterIn(pool, scene, weight: 1, label: "selftest-1");
+            var reg2 = ModDropPoolHelper.RegisterIn(pool, scene, weight: 2, label: "selftest-2");
+            if ((pool.Pool?.Length ?? 0) != 2) { r.ErrorMessage = $"expected 2 entries after 2 registers, got {pool.Pool?.Length ?? 0}"; return r; }
+            r.StepsPassed.Add("two registrations add two entries");
+
+            reg1.Dispose();
+            if ((pool.Pool?.Length ?? 0) != 1) { r.ErrorMessage = $"expected 1 entry after disposing reg1, got {pool.Pool?.Length ?? 0}"; return r; }
+            if (pool.Pool![0].Weight != 2) { r.ErrorMessage = $"wrong entry removed; remaining Weight={pool.Pool[0].Weight}, expected 2"; return r; }
+            r.StepsPassed.Add("Dispose removed only reg1's entry; reg2 intact");
+
+            reg2.Dispose();
+            if ((pool.Pool?.Length ?? 0) != 0) { r.ErrorMessage = $"expected 0 entries after disposing reg2, got {pool.Pool?.Length ?? 0}"; return r; }
+            r.StepsPassed.Add("disposing reg2 returns pool to empty");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Reads the GameEventBus.OnGameEventReceived multicast delegate's invocation list
+    // (same reflection target as GetStaticDelegateCount, returning the entries).
+    private static Delegate[] BusInvocationList()
+    {
+        var field = typeof(global::GameEventBus).GetField("OnGameEventReceived",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        var del = field?.GetValue(null) as Delegate;
+        return del?.GetInvocationList() ?? Array.Empty<Delegate>();
+    }
+
+    // Invokes only the bus callbacks added since `baseline` (the test's own subscriptions),
+    // never the real game subscribers already on the bus.
+    private static void FireDelta(Delegate[] baseline, global::GameplayTag? tag, global::IGameEvent? ev)
+    {
+        foreach (var cb in BusInvocationList())
+            if (Array.IndexOf(baseline, cb) < 0)
+                cb.DynamicInvoke(tag, ev);
+    }
+
+    // GameplayTag.Tag has a non-public setter; set the auto-property backing field
+    // directly so the test can build a synthetic tag without a real GameplayTags constant.
+    private static global::GameplayTag NewTag(string tag)
+    {
+        var t = new global::GameplayTag();
+        typeof(global::GameplayTag)
+            .GetField("<Tag>k__BackingField", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(t, tag);
+        return t;
+    }
+
+    private static bool Throws<TException>(Action action) where TException : Exception
+    {
+        try { action(); return false; }
+        catch (TException) { return true; }
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

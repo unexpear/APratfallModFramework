@@ -298,11 +298,6 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ### NativeDialogBridge.cs
 
-- Finding: _activeController is a cached Godot Node ref held across callback boundaries and may become stale if DialogUI is QueueFreed before DismissActive.
-  Why deferred: safety bug-surface tracked under Task #2, not a readability patch.
-  Fix sketch: cast _activeController to GodotObject and check GodotObject.IsInstanceValid before cancelMethod.Invoke.
-  Re-trigger: Task #2 IsInstanceValid sweep.
-
 - Finding: TryShow has silent false-return branches without diagnostics.
   Why deferred: diagnostic logging policy decision; logging every failed lookup could add noise.
   Fix sketch: add specific GD.PrintErr messages, likely log-once-per-process per failure reason.
@@ -356,11 +351,6 @@ or intentionally rejected. Do not keep a completed-history trail.
   Why deferred: wire + behavior; dispatch changes could alter peer-auth or receive semantics.
   Fix sketch: consider DispatchIfValidSender<T>() with separate targeted-transfer variant.
   Re-trigger: with wire-format regression coverage.
-
-- Finding: _hookedLobbyManager and _hookedEventManager are cached Pratfall network-manager references with unverified lifetime semantics.
-  Why deferred: needs Cecil verification of NetworkLobbyManagerBase / NetworkEventManager lifetime.
-  Fix sketch: verify whether they can become invalid/freed during lobby teardown or host migration; if yes, add GodotObject.IsInstanceValid guards in UnhookTransport before -= operations.
-  Re-trigger: Task #2 IsInstanceValid sweep.
 
 ### VoteUI.cs
 
@@ -417,13 +407,18 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ## Safety tasks
 
-- Finding: GodotObject lifetime / IsInstanceValid sweep.
-  Why deferred: safety bug-surface, not readability work; tracked separately as Task #2.
-  Fix sketch: audit cached GodotObject/Node/UI refs crossing QueueFree, callbacks, timers, deferred calls, static fields, dictionaries, tree teardown. Use GodotObject.IsInstanceValid on offending sites.
-  Confirmed suspects (post-audit): ModNetworkLayer._hookedLobbyManager / _hookedEventManager, NativeDialogBridge._activeController, ModDropPoolHelper._pool / _entry, ModManager._voteUI, Show*Panel existing.QueueFree race window, Timer Timeout captures.
-  Cleared by audit: ModButtonPromptHelper (fetches ButtonPrompBarController.Instance fresh per call, no cached ref).
-  Note: MainMenuIntegration._dialogToggles is ALREADY protected (SyncDialogToggle uses IsInstanceValid).
-  Re-trigger: Task #2.
+- Task #2 (GodotObject lifetime / IsInstanceValid sweep): COMPLETE.
+  One fix applied: NativeDialogBridge.DismissActive now guards GodotObject.IsInstanceValid before invoking the cached DialogUI node's cancel method (a scene teardown can free the node while the C# ref stays non-null).
+  Cleared (do not re-flag):
+    - ModNetworkLayer._hookedLobbyManager / _hookedEventManager — Cecil-verified plain System.Object, not GodotObject; GC-managed; existing null checks correct.
+    - ModDropPoolHelper._pool / _entry — Cecil-verified Godot.Resource (RefCounted); live C# refs keep refcount >= 1, can't be freed.
+    - ModManager._voteUI — persistent tree.Root child, freed only in Dispose with atomic null, never self-frees.
+    - VoteUI child controls — owned children, share VoteUI lifetime.
+    - ModButtonPromptHelper — fetches ButtonPrompBarController.Instance fresh per call, no cached ref.
+    - Timer Timeout captures — all method-group bindings on long-lived `this`; Bootstrap auto-close lambda already IsInstanceValid-guarded; grab_focus deferrals use fresh local refs.
+    - Show*Panel QueueFree race — out of scope (fresh GetNodeOrNull lookups, not cached refs; deferred-free name-collision already mitigated in ModsDialog via rename-before-free).
+    - MainMenuIntegration._dialogToggles — already protected (SyncDialogToggle uses IsInstanceValid).
+  Key rule (future sweeps): IsInstanceValid applies ONLY to cached Node/GodotObject refs that can be freed under a still-live C# wrapper. It does NOT apply to plain C# objects (GC-managed) or Resource/RefCounted refs held alive by C# references.
 
 - Finding: No format-contract regression coverage.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.

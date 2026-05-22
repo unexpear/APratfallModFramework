@@ -75,6 +75,16 @@ internal static class NativeDialogBridge
             return;
 
         var controller = _activeController;
+
+        // A Godot Node can be freed (scene teardown, e.g. match end / disconnect mid-vote)
+        // while the C# ref stays non-null; invoking on the freed node would throw.
+        if (controller is GodotObject godotController && !GodotObject.IsInstanceValid(godotController))
+        {
+            _activeController = null;
+            _suppressActiveCallback = false;
+            return;
+        }
+
         var cancelMethod = controller.GetType().GetMethod(
             "OnCancelButtonClicked",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);

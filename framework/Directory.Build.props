@@ -10,6 +10,17 @@
 
   <PropertyGroup>
     <!--
+      Single source of truth for the framework version. Stamps every framework
+      assembly's Version (AssemblyVersion/FileVersion/InformationalVersion). The
+      installer reads this back off the built PratfallModFramework.dll to write
+      mods/PratfallModFramework/manifest.json, so the manifest can never drift from
+      the shipped DLL (a stale manifest version would give the session resolver a
+      false version match). Bump here on each release.
+    -->
+    <FrameworkVersion>1.5.0</FrameworkVersion>
+    <Version>$(FrameworkVersion)</Version>
+
+    <!--
       Language: opt into the latest C# the SDK supports (currently C# 12 with
       .NET 8 SDK; C# 13 with .NET 9 SDK installed). Pure compiler feature —
       no runtime change, no behavior risk. Lets us use `field` keyword,

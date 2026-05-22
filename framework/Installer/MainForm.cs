@@ -435,23 +435,67 @@ public class MainForm : Form
         var modsDir = Path.Combine(_gameDir, "mods", "PratfallModFramework");
         Directory.CreateDirectory(modsDir);
         var manifestPath = Path.Combine(modsDir, "manifest.json");
+        var version = ReadFrameworkVersion(frameworkDest);
         if (!File.Exists(manifestPath))
         {
-            File.WriteAllText(manifestPath, @"{
+            File.WriteAllText(manifestPath, $@"{{
   ""id"": ""PratfallModFramework"",
   ""name"": ""Pratfall Mod Framework"",
-  ""version"": ""1.3.0"",
+  ""version"": ""{version}"",
   ""author"": ""ModFramework"",
   ""description"": ""Base mod framework. Enables mod detection, voting, P2P transfer, and runtime loading."",
   ""type"": ""framework"",
-  ""effects"": { ""settings"": [], ""patches"": [], ""nodes"": [], ""assets"": [], ""needsRestart"": false },
-  ""multiplayer"": { ""mode"": ""local_only"", ""requires"": [], ""conflictsWith"": [] }
-}");
-            Log("Manifest created in mods folder");
+  ""effects"": {{ ""settings"": [], ""patches"": [], ""nodes"": [], ""assets"": [], ""needsRestart"": false }},
+  ""multiplayer"": {{ ""mode"": ""local_only"", ""requires"": [], ""conflictsWith"": [] }}
+}}");
+            Log($"Manifest created (version {version})");
+        }
+        else
+        {
+            UpdateManifestVersionIfStale(manifestPath, version);
         }
 
         Invoke(() => _progressBar.Value = 100);
         Log("Install complete! Launch Pratfall to use the Mod Framework.");
+    }
+
+    // The manifest version must equal the framework DLL we just deployed, so the
+    // session resolver never sees a stale/false version match. Read it straight off
+    // the assembly (Version is stamped from Directory.Build.props FrameworkVersion).
+    private string ReadFrameworkVersion(string frameworkDllPath)
+    {
+        try
+        {
+            var v = System.Reflection.AssemblyName.GetAssemblyName(frameworkDllPath).Version;
+            if (v != null)
+                return $"{v.Major}.{v.Minor}.{v.Build}";
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not read framework DLL version ({ex.Message}); falling back to 1.0.0");
+        }
+        return "1.0.0";
+    }
+
+    // Self-correct an existing install whose manifest predates this build: update only
+    // the version field, preserving every other field. Best-effort — a parse failure
+    // just logs and leaves the file alone.
+    private void UpdateManifestVersionIfStale(string manifestPath, string version)
+    {
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(manifestPath));
+            if (node == null) { Log("Manifest unreadable; left unchanged"); return; }
+            var existing = node["version"]?.GetValue<string>();
+            if (existing == version) { Log($"Manifest version current ({version})"); return; }
+            node["version"] = version;
+            File.WriteAllText(manifestPath, node.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            Log($"Manifest version updated {existing ?? "<none>"} -> {version}");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not update manifest version: {ex.Message}");
+        }
     }
 
     private void ExtractEmbeddedDll(string resourceName, string destPath)

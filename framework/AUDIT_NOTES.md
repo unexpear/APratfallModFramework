@@ -511,6 +511,14 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Fix sketch: a UI/timer/native-dialog test harness (drive SceneTreeTimer advance + a stub DialogUI) OR a manual in-game test checklist.
   Re-trigger: before any VoteUI callback/timer/native-dialog refactor (gates the deferred VoteUI Resolve helper extraction); build the harness first.
 
+- Session mod resolver (lobby mod matching) — P1 IMPLEMENTED. Design: SESSION_MOD_RESOLVER_PLAN.md (5ae79dd). Code: SessionModResolver.Resolve(hostState, peers) -> SessionResolutionPlan (6a98ab4).
+  Scope: pure, session-scoped resolver only. Computes EffectiveSessionModSet + per-mod SessionDecisions (Safe auto-enable vs Unsafe unanimous-override) from the host's enabled set and each peer's installed inventory. Never mutates the host's saved enabled state. NO network, NO UI, NO ModManager/ModVoteSession integration — those are P2-P4.
+  Safe default: a clean mod (every player has a compatible copy, deps satisfied, no declared conflict) auto-enables; any contentious mod (missing-for-player, version-mismatch, missing-dependency, declared-conflict) is disabled-for-session and surfaced as an unsafe override needing a unanimous vote. Declared-conflict pairs keep the earlier-listed, disable the later (P1 keep-both = unanimous; safe-majority which-to-keep deferred to a later phase per the plan).
+  Covered (RunSessionModResolverTests, 6a98ab4): all-compatible auto-enable, missing-for-player -> disabled+unanimous, version-mismatch, missing-dependency, declared-conflict -> later-disabled/earlier-effective, and Resolve-does-not-mutate-host-state.
+  Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (runs via the stress-mod harness; ModManifest/ModLocalState normalize is pure C#, so an in-game run mainly confirms the harness wiring). Upgrade after the first in-game harness run.
+  Next phases (design only, NOT built): P2 build peer ModPeerSnapshots from real lobby manifest exchange; P3 drive the PendingVotes through ModVoteSession (safe=majority, unsafe=unanimous, failed-vote -> auto-disable); P4 apply the resolved plan at session start (SessionStartHooks) without touching saved enabled state.
+  Re-trigger: before starting P2 (peer snapshot transport) or P3 (vote wiring).
+
 - Finding: No Pratfall API contract verification / Cecil sweep.
   Why deferred: infrastructure verification, not readability work.
   Fix sketch: Cecil-verify native Pratfall contracts the framework relies on: ModManifest.LoadedAssembly setter behavior, ModManager.Mods / LoadedMods accessor semantics, DialogUIShowOptions fields, NetworkLobbyManagerBase / NetworkEventManager lifetime, and other reflected/native API assumptions.

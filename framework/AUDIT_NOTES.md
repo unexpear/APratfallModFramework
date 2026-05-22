@@ -454,10 +454,12 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (runs via the stress-mod harness; uses GameEventBus reflection + GameplayTag/PackedScene construction which need the Godot runtime). Upgrade to "executed successfully" after the first in-game harness run.
   Unblocks (refactors NOT yet applied): ModGameEventHelper Subscribe* dedup discussion; helper-cluster subscription/disposal cleanup decisions.
 
-- Finding: No ModAssemblyLoader load/unload regression coverage.
-  Why deferred: not readability work; AssemblyLoadContext unload behavior is fragile and needs explicit tests before any loader refactor.
-  Fix sketch: add tests for Harmony apply/remove across load/unload cycle, OnUnload fires exactly once after OnLoad throw, reload-same-id leaves no stale state, shared assembly refs use host context not ALC, SnapshotLoadedAssemblies doesn't prevent unload, ALC.Unload + GC actually frees the assembly (use WeakReference + force GC to verify).
-  Re-trigger: before any ModAssemblyLoader refactor (gates the deferred Harmony-per-patch try/catch item).
+- Finding: ModAssemblyLoader load/unload regression coverage — PARTIAL.
+  Covered (RunModAssemblyLoaderTests, 4b836b2): fresh-loader bookkeeping (IsLoaded(unknown)=false, UnloadMod(unknown) no-op, empty SnapshotLoadedAssemblies), hash-pin tamper-protection refusal (mismatched sha256 throws InvalidOperationException before the assembly is loaded), and the collectible-ALC unload mechanic (load a sidecar DLL into a collectible AssemblyLoadContext, Unload + GC, WeakReference dies).
+  GAP (needs a fixture mod DLL — .NET 8 can't emit one to disk at runtime without Roslyn): full LoadMod of a real mod (OnLoad invoked + patches applied), OnUnload fires exactly once (incl. after an OnLoad throw), reload-same-id leaves no stale state, ModAssemblyLoader's OWN ALC collects after UnloadMod, SnapshotLoadedAssemblies with real loaded mods, shared-assembly refs resolve to host context not the ALC.
+  Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (the collectible-ALC + GC check especially needs a real run to confirm the Godot .NET host actually collects).
+  Fix sketch for the gap: add a tiny purpose-built fixture mod DLL as a build artifact (OnLoad/OnUnload/[ModPatch] types + a pinned sha256), then exercise the full LoadMod/UnloadMod cycle against it.
+  Re-trigger: before any ModAssemblyLoader refactor (gates the deferred Harmony-per-patch try/catch item); the GAP re-triggers when a fixture DLL is added.
 
 - Finding: MOD_AUTHORS_GUIDE_FRAMEWORK.md lacks an exception-handling-in-framework-helpers section.
   Why deferred: needs full helper-cluster audit to classify each helper callback by frequency.

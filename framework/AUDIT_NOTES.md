@@ -343,12 +343,12 @@ Config-format coverage: EXISTS (ModFrameworkSelfTest.RunConfigFormatTests, commi
 - Finding: Broadcast/Send methods share repeated happy-path shape (transport check, hooked check, localUserId check, Normalize, wrapper Create, SendReliableGlobalEvent).
   Why deferred: wire + behavior + callback; each method has method-specific debug behavior that does not factor cleanly.
   Fix sketch: consider BroadcastReliable<T>(payload, eventId, eventName) for the real-transport happy path while leaving debug paths inline.
-  Re-trigger: wire-format coverage now EXISTS (8836d16) so the helper investigation is unblocked, but full application also needs network-lifecycle coverage (separate gate, not yet written).
+  Re-trigger: wire-format coverage EXISTS (8836d16); network-lifecycle coverage is PARTIAL (a3ebf7b) — debug-peer guard + transport-reset covered, but the dispatch/peer-auth path is a real-transport GAP. Close the dispatch gap before applying this helper.
 
 - Finding: OnNetworkEventReceived switch repeats get-event → sender-validation → optional target-validation → invoke.
   Why deferred: wire + behavior; dispatch changes could alter peer-auth or receive semantics.
   Fix sketch: consider DispatchIfValidSender<T>() with separate targeted-transfer variant.
-  Re-trigger: wire-format coverage now EXISTS (8836d16); dispatch refactor also needs network-lifecycle coverage (peer-auth / target-validation paths) before application.
+  Re-trigger: BLOCKED — wire-format coverage EXISTS (8836d16) but the OnNetworkEventReceived dispatch/peer-auth path is the documented real-transport GAP (see Network-lifecycle coverage entry). Close that gap (mock-transport / NetworkFrameEvent harness or real-lobby test) before refactoring.
 
 ### VoteUI.cs
 
@@ -460,6 +460,13 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (the collectible-ALC + GC check especially needs a real run to confirm the Godot .NET host actually collects).
   Fix sketch for the gap: add a tiny purpose-built fixture mod DLL as a build artifact (OnLoad/OnUnload/[ModPatch] types + a pinned sha256), then exercise the full LoadMod/UnloadMod cycle against it.
   Re-trigger: before any ModAssemblyLoader refactor (gates the deferred Harmony-per-patch try/catch item); the GAP re-triggers when a fixture DLL is added.
+
+- Finding: Network-lifecycle regression coverage — PARTIAL.
+  Covered (RunNetworkLifecycleTests, a3ebf7b): fresh ModNetworkLayer starts not-ready; debug-peer guard (attaches during an Offline session, NOT for Host); OnTransportReset fires once on a Debug->unhook (via Shutdown); Shutdown cleans transport state. Driven via the public API (Initialize / NotifySessionStarting / IsNetworkReady / LocalUserId / OnTransportReset / Shutdown); uses the real debug-config path with backup/restore; skips when no SceneTree or a real lobby is active.
+  GAP (needs real Steam/lobby transport + a NetworkFrameEvent harness): OnNetworkEventReceived dispatch + peer-auth — self-sent drop, non-member drop, wrong-TargetUserId drop, and the accept path. OnNetworkEventReceived is private, takes a Pratfall NetworkFrameEvent (struct with a private _reader), only runs in Real mode, and the accept path needs IsUserInLobby(sender)==true. Not faked.
+  Execution status: compiled + behavior-verified by reading; NOT yet executed in-game.
+  Consequence: the ModNetworkLayer Broadcast/Send dedup + OnNetworkEventReceived dispatch-dedup refactors stay BLOCKED — their core dispatch/peer-auth behavior is in the GAP, not covered.
+  Re-trigger: a mock-transport / NetworkFrameEvent test harness (or real-lobby integration test) to close the dispatch gap before the dispatch-dedup refactor.
 
 - Finding: MOD_AUTHORS_GUIDE_FRAMEWORK.md lacks an exception-handling-in-framework-helpers section.
   Why deferred: needs full helper-cluster audit to classify each helper callback by frequency.

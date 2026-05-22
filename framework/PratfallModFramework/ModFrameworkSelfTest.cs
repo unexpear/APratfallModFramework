@@ -1952,6 +1952,86 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Network-lifecycle coverage (achievable subset — the real-transport dispatch / peer-auth
+    // path is a GAP, see AUDIT_NOTES: OnNetworkEventReceived is private, takes a Pratfall
+    // NetworkFrameEvent, only runs in Real mode, and its accept-path needs a real lobby).
+    // What's covered here, via the public API: fresh layer starts not-ready, the debug-peer
+    // guard (attaches only during an Offline session, never for Host), OnTransportReset firing
+    // once on a Debug->unhook, and Shutdown cleaning transport state.
+    public static HelperTestResult RunNetworkLifecycleTests()
+    {
+        var r = new HelperTestResult();
+        var tree = Engine.GetMainLoop() as SceneTree;
+        if (tree == null)
+        {
+            r.StepsPassed.Add("SceneTree unavailable (not in-game) — network-lifecycle checks skipped");
+            r.Success = true;
+            return r;
+        }
+
+        // If a real lobby is already active we can't isolate the debug-peer guard — skip.
+        var probe = new ModNetworkLayer();
+        if (probe.IsNetworkReady)
+        {
+            r.StepsPassed.Add("real network already active — debug-peer guard test skipped (can't isolate from a live lobby)");
+            r.Success = true;
+            return r;
+        }
+        r.StepsPassed.Add("fresh ModNetworkLayer starts not-ready");
+
+        var realPath = ProjectSettings.GlobalizePath(DebugPeerConfig.ConfigPath);
+        string? backup = null;
+        ModNetworkLayer? layerA = null;
+        ModNetworkLayer? layerB = null;
+        try
+        {
+            if (!string.IsNullOrEmpty(realPath) && File.Exists(realPath)) { backup = realPath + ".selftest-bak"; File.Copy(realPath, backup, overwrite: true); }
+            if (!string.IsNullOrEmpty(realPath)) File.WriteAllText(realPath, "{ \"Enabled\": true, \"LocalUserId\": \"dbg-local\" }");
+
+            // Scenario A: Offline session attaches the debug peer; Shutdown fires OnTransportReset once.
+            layerA = new ModNetworkLayer();
+            layerA.Initialize(tree, () => new ModLocalState());
+            layerA.NotifySessionStarting(SessionKind.Offline);
+            if (!layerA.IsNetworkReady) { r.ErrorMessage = "Offline session + debug config should attach Debug transport"; return r; }
+            if (layerA.LocalUserId != "dbg-local") { r.ErrorMessage = $"Debug LocalUserId expected dbg-local, got {layerA.LocalUserId}"; return r; }
+            r.StepsPassed.Add("debug-peer attaches during Offline session (LocalUserId from config)");
+
+            var resets = 0;
+            layerA.OnTransportReset += () => resets++;
+            layerA.Shutdown();
+            if (resets != 1) { r.ErrorMessage = $"OnTransportReset expected 1 on Debug->unhook, got {resets}"; return r; }
+            if (layerA.IsNetworkReady) { r.ErrorMessage = "layer should not be ready after Shutdown"; return r; }
+            r.StepsPassed.Add("OnTransportReset fires once on Debug -> unhook (Shutdown); state cleaned");
+
+            // Scenario B: Host session does NOT attach the debug peer (the guard that keeps debug
+            // votes out of real multiplayer). Fresh layer because NotifySessionStarting only polls
+            // on the first call.
+            layerB = new ModNetworkLayer();
+            layerB.Initialize(tree, () => new ModLocalState());
+            layerB.NotifySessionStarting(SessionKind.Host);
+            if (layerB.IsNetworkReady) { r.ErrorMessage = "Host session must not attach the debug peer"; return r; }
+            r.StepsPassed.Add("debug-peer does NOT attach for Host session (guard holds)");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+        finally
+        {
+            try { layerA?.Shutdown(); } catch { }
+            try { layerB?.Shutdown(); } catch { }
+            if (!string.IsNullOrEmpty(realPath))
+            {
+                try { if (File.Exists(realPath)) File.Delete(realPath); } catch { }
+                if (backup != null) { try { File.Copy(backup, realPath, overwrite: true); File.Delete(backup); } catch { } }
+            }
+        }
+    }
+
     // ModAssemblyLoader coverage (achievable subset — no fixture mod DLL exists, so the full
     // LoadMod->OnUnload-fires->reload-no-stale cycle is NOT covered here; see AUDIT_NOTES).
     // Covers: bookkeeping no-ops on a fresh loader, the hash-pin tamper-protection refusal,

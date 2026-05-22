@@ -1,3 +1,4 @@
+using System.Runtime.Loader;
 using System.Security.Cryptography;
 using Godot;
 
@@ -1949,6 +1950,73 @@ public static class ModFrameworkSelfTest
             r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
             return r;
         }
+    }
+
+    // ModAssemblyLoader coverage (achievable subset — no fixture mod DLL exists, so the full
+    // LoadMod->OnUnload-fires->reload-no-stale cycle is NOT covered here; see AUDIT_NOTES).
+    // Covers: bookkeeping no-ops on a fresh loader, the hash-pin tamper-protection refusal,
+    // and the collectible-ALC unload mechanic (WeakReference dies after Unload + GC) that
+    // ModAssemblyLoader.UnloadMod depends on.
+    public static HelperTestResult RunModAssemblyLoaderTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var loader = new ModAssemblyLoader();
+
+            // 1. Bookkeeping no-ops on a fresh loader.
+            if (loader.IsLoaded("nope")) { r.ErrorMessage = "IsLoaded(unknown) should be false"; return r; }
+            loader.UnloadMod("nope"); // must not throw
+            if (loader.SnapshotLoadedAssemblies().Count != 0) { r.ErrorMessage = "fresh SnapshotLoadedAssemblies should be empty"; return r; }
+            r.StepsPassed.Add("fresh loader: IsLoaded false, UnloadMod no-op, snapshot empty");
+
+            // 2. Hash-pin mismatch refuses to load (tamper protection, throws before assembly load).
+            var tmp = Path.Combine(Path.GetTempPath(), $"selftest-alc-{Guid.NewGuid():N}.bin");
+            try
+            {
+                File.WriteAllText(tmp, "not a real assembly");
+                if (!Throws<InvalidOperationException>(() => loader.LoadMod("hashtest", tmp, new string('0', 64))))
+                { r.ErrorMessage = "LoadMod with mismatched sha256 should throw InvalidOperationException"; return r; }
+                if (loader.IsLoaded("hashtest")) { r.ErrorMessage = "mod should not be loaded after hash mismatch"; return r; }
+                r.StepsPassed.Add("hash-pin mismatch refuses to load (tamper protection)");
+            }
+            finally { TryDeleteFile(tmp); }
+
+            // 3. Collectible-ALC unload mechanic: load a sidecar DLL into a collectible ALC,
+            //    Unload + GC, assert the WeakReference dies (the guarantee UnloadMod relies on).
+            var sidecar = Path.Combine(Path.GetDirectoryName(typeof(ModAssemblyLoader).Assembly.Location) ?? "", "0Harmony.dll");
+            if (!File.Exists(sidecar))
+            {
+                r.StepsPassed.Add("0Harmony sidecar not found — collectible-ALC unload mechanic check skipped");
+            }
+            else
+            {
+                var weak = LoadAndUnloadCollectible(sidecar);
+                for (var i = 0; i < 10 && weak.IsAlive; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
+                if (weak.IsAlive) { r.ErrorMessage = "collectible ALC did not unload (WeakReference alive after Unload + GC)"; return r; }
+                r.StepsPassed.Add("collectible-ALC unload mechanic: WeakReference dies after Unload + GC");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Loads dllPath into a fresh collectible ALC and unloads it, returning a WeakReference to
+    // the ALC. NoInlining so the ALC local can't linger on the caller's frame and block GC.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference LoadAndUnloadCollectible(string dllPath)
+    {
+        var alc = new AssemblyLoadContext("selftest-collectible", isCollectible: true);
+        alc.LoadFromAssemblyPath(dllPath);
+        var weak = new WeakReference(alc);
+        alc.Unload();
+        return weak;
     }
 
     // Path-resolution coverage for the user-data-subfolder resolvers, before the deferred

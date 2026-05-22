@@ -395,7 +395,9 @@ public class ModManager : IDisposable
             catch (Exception ex)
             {
                 GD.PrintErr($"[ModFramework] Failed to enable mod {id}: {ex.Message}");
-                ModCrashReporter.Report(id, "EnableMod (LoadAssembly/MountPck)", ex);
+                // OnLoad failures are already reported + rolled back by the loader; don't double-report.
+                if (ex is not ModOnLoadException)
+                    ModCrashReporter.Report(id, "EnableMod (LoadAssembly/MountPck)", ex);
                 _modSessionAvailable[id] = false;
                 _modEnabled[id] = false;
                 return false;
@@ -547,7 +549,9 @@ public class ModManager : IDisposable
                 _modSessionAvailable[mod.Id] = false;
                 _modEnabled[mod.Id] = false;
                 GD.PrintErr($"[ModFramework] Failed to load mod {mod.Id}: {ex.GetType().Name}: {ex.Message}");
-                ModCrashReporter.Report(mod.Id, "LoadAllEnabledMods (apply loop)", ex);
+                // OnLoad failures are already reported + rolled back by the loader; don't double-report.
+                if (ex is not ModOnLoadException)
+                    ModCrashReporter.Report(mod.Id, "LoadAllEnabledMods (apply loop)", ex);
             }
         }
     }

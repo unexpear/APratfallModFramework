@@ -58,7 +58,29 @@ public class ModAssemblyLoader
 
         var harmony = new Harmony(id);
         int patchesApplied = ApplyDeclaredPatches(id, assembly, harmony);
-        var unloadCallbacks = InvokeLoadCallbacks(id, assembly);
+
+        List<MethodInfo> unloadCallbacks;
+        try
+        {
+            unloadCallbacks = InvokeLoadCallbacks(assembly);
+        }
+        catch (Exception ex)
+        {
+            // Fail closed: a mod whose OnLoad throws must not survive as a partial load.
+            // Patches were already applied above, so unpatch them, drop the collectible
+            // assembly context, and never record the mod — otherwise ModManager would still
+            // mark it enabled and advertise it to peers. Report once here against the mod's
+            // real exception (reflection wraps it); ModOnLoadException tells ModManager's
+            // load catch not to write a second report. Mirrors UnloadMod's teardown.
+            var real = (ex as TargetInvocationException)?.InnerException ?? ex;
+            harmony.UnpatchAll(harmony.Id);
+            alc.Unload();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            LogError($"[ModFramework] OnLoad failed for mod {id}; rolled back {patchesApplied} patch(es) + assembly load");
+            ModCrashReporter.Report(id, "OnLoad", real);
+            throw new ModOnLoadException(id, real);
+        }
 
         _loaded.Add(new LoadedMod(id, alc, harmony, assembly, patchesApplied, unloadCallbacks));
         Log($"[ModFramework] Loaded mod {id} ({patchesApplied} patches)");
@@ -161,7 +183,11 @@ public class ModAssemblyLoader
         return new HarmonyMethod(method);
     }
 
-    private static List<MethodInfo> InvokeLoadCallbacks(string id, Assembly asm)
+    // Invokes each type's static OnLoad and collects static OnUnload methods. A throwing
+    // OnLoad is NOT swallowed — it propagates so LoadMod can fail the load closed (roll back
+    // patches + assembly, never record the mod). Reflection wraps the mod's real exception in
+    // a TargetInvocationException; LoadMod unwraps it for the single crash report.
+    private static List<MethodInfo> InvokeLoadCallbacks(Assembly asm)
     {
         var unloadCallbacks = new List<MethodInfo>();
 
@@ -169,20 +195,7 @@ public class ModAssemblyLoader
         {
             var onLoad = type.GetMethod("OnLoad", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
             if (onLoad != null && onLoad.GetParameters().Length == 0 && ModRuntime.IsGodotRuntimeReady)
-            {
-                try
-                {
-                    onLoad.Invoke(null, null);
-                }
-                catch (Exception ex)
-                {
-                    LogError($"[ModFramework] OnLoad failed for {type.FullName} in mod {id}: {ex.InnerException?.Message ?? ex.Message}");
-                    // Drop a crash report with manifest + stack + recent log lines so
-                    // the mod author can debug. The TargetInvocationException wrapper
-                    // from reflection is unwrapped to the real exception when present.
-                    ModCrashReporter.Report(id, $"OnLoad in {type.FullName}", ex.InnerException ?? ex);
-                }
-            }
+                onLoad.Invoke(null, null);
 
             var onUnload = type.GetMethod("OnUnload", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
             if (onUnload != null && onUnload.GetParameters().Length == 0)
@@ -299,4 +312,15 @@ public class ModAssemblyLoader
         else
             Console.Error.WriteLine(message);
     }
+}
+
+// Thrown by ModAssemblyLoader.LoadMod when a mod's OnLoad throws. By the time this is raised
+// the loader has already reported the crash and rolled back (unpatched + unloaded the
+// assembly), so ModManager's load catch marks the mod disabled WITHOUT writing a second report.
+public sealed class ModOnLoadException : Exception
+{
+    public string ModId { get; }
+
+    public ModOnLoadException(string modId, Exception inner)
+        : base($"OnLoad failed for mod {modId}: {inner.Message}", inner) => ModId = modId;
 }

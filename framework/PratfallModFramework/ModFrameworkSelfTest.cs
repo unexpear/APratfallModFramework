@@ -2077,6 +2077,44 @@ public static class ModFrameworkSelfTest
                 r.StepsPassed.Add("collectible-ALC unload mechanic: WeakReference dies after Unload + GC");
             }
 
+            // 4. OnLoad fail-closed (finding #1): a throwing static OnLoad must PROPAGATE out of
+            //    the load-callback pass instead of being swallowed, so LoadMod can roll back and
+            //    fail the load. Driven with an in-memory emitted assembly because the project has
+            //    no on-disk fixture mod DLL and .NET 8 can't persist an emitted one. The full
+            //    LoadMod rollback (patches removed + ALC unloaded + mod not recorded) still needs
+            //    a fixture DLL — see the fixture gap in AUDIT_NOTES.
+            {
+                // Success path preserved: a non-throwing OnLoad returns normally; OnUnload collected.
+                var okResult = InvokeLoadCallbacksReflect(EmitModAssembly(onLoadThrows: false))
+                    as List<System.Reflection.MethodInfo>;
+                var okCount = okResult?.Count ?? -1;
+                if (okResult == null || okCount != 1 || okResult[0].Name != "OnUnload")
+                { r.ErrorMessage = $"OnLoad success path: expected 1 OnUnload callback, got count={okCount}"; return r; }
+                r.StepsPassed.Add("OnLoad success path: non-throwing OnLoad returns, OnUnload collected");
+
+                if (!ModRuntime.IsGodotRuntimeReady)
+                {
+                    r.StepsPassed.Add("OnLoad fail-closed propagation — skipped (Godot runtime not ready; OnLoad isn't invoked off-runtime)");
+                }
+                else
+                {
+                    string realType = "", realMsg = "";
+                    var propagated = false;
+                    try { InvokeLoadCallbacksReflect(EmitModAssembly(onLoadThrows: true)); }
+                    catch (Exception loadEx)
+                    {
+                        var real = loadEx;
+                        while (real is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
+                            real = tie.InnerException;
+                        propagated = true; realType = real.GetType().Name; realMsg = real.Message;
+                    }
+                    if (!propagated) { r.ErrorMessage = "OnLoad fail-closed: a throwing OnLoad must propagate, not be swallowed"; return r; }
+                    if (realType != nameof(InvalidOperationException) || realMsg != "fixture OnLoad boom")
+                    { r.ErrorMessage = $"OnLoad fail-closed: expected propagated InvalidOperationException 'fixture OnLoad boom', got {realType}: {realMsg}"; return r; }
+                    r.StepsPassed.Add("OnLoad fail-closed: throwing OnLoad propagates the mod's real exception (not swallowed)");
+                }
+            }
+
             r.Success = true;
             return r;
         }
@@ -2097,6 +2135,54 @@ public static class ModFrameworkSelfTest
         var weak = new WeakReference(alc);
         alc.Unload();
         return weak;
+    }
+
+    // Emits a tiny in-memory assembly with one type exposing static OnLoad + OnUnload. When
+    // onLoadThrows, OnLoad throws InvalidOperationException("fixture OnLoad boom"). Lets the
+    // OnLoad-callback pass be exercised without an on-disk fixture mod DLL (.NET 8 can't persist
+    // an emitted assembly to disk).
+    private static System.Reflection.Emit.AssemblyBuilder EmitModAssembly(bool onLoadThrows)
+    {
+        var name = new System.Reflection.AssemblyName($"SelfTestMod_{Guid.NewGuid():N}");
+        var asmBuilder = System.Reflection.Emit.AssemblyBuilder.DefineDynamicAssembly(
+            name, System.Reflection.Emit.AssemblyBuilderAccess.Run);
+        var typeBuilder = asmBuilder.DefineDynamicModule("main")
+            .DefineType("Boom", System.Reflection.TypeAttributes.Public);
+
+        var onLoad = typeBuilder.DefineMethod("OnLoad",
+            System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static,
+            typeof(void), Type.EmptyTypes);
+        var il = onLoad.GetILGenerator();
+        if (onLoadThrows)
+        {
+            var ctor = typeof(InvalidOperationException).GetConstructor(new[] { typeof(string) })!;
+            il.Emit(System.Reflection.Emit.OpCodes.Ldstr, "fixture OnLoad boom");
+            il.Emit(System.Reflection.Emit.OpCodes.Newobj, ctor);
+            il.Emit(System.Reflection.Emit.OpCodes.Throw);
+        }
+        else
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Ret);
+        }
+
+        var onUnload = typeBuilder.DefineMethod("OnUnload",
+            System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static,
+            typeof(void), Type.EmptyTypes);
+        onUnload.GetILGenerator().Emit(System.Reflection.Emit.OpCodes.Ret);
+
+        typeBuilder.CreateType();
+        return asmBuilder;
+    }
+
+    // Reflection-invokes ModAssemblyLoader.InvokeLoadCallbacks (private static) so the OnLoad
+    // fail-closed behavior can be asserted here. Returns the collected List<MethodInfo>; a
+    // throwing OnLoad surfaces as a TargetInvocationException (wrapped again by this reflection).
+    private static object? InvokeLoadCallbacksReflect(System.Reflection.Assembly modAssembly)
+    {
+        var method = typeof(ModAssemblyLoader).GetMethod("InvokeLoadCallbacks",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("ModAssemblyLoader.InvokeLoadCallbacks not found (test seam changed)");
+        return method.Invoke(null, new object?[] { modAssembly });
     }
 
     // Path-resolution coverage for the user-data-subfolder resolvers, before the deferred

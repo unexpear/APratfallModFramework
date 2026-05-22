@@ -1,4 +1,5 @@
 using Godot;
+using HarmonyLib;
 
 namespace PratfallModFramework;
 
@@ -29,6 +30,7 @@ public static class Bootstrap
                 _instance.Initialize(tree);
                 GD.Print("[ModFramework] Framework initialized");
                 WriteLoadedSentinel();
+                WireShutdownToGameQuit();
                 ShowStartupStatus(tree, "Mod Framework", "Pratfall Mod Framework loaded successfully!", false);
             }
             catch (System.Exception ex)
@@ -45,12 +47,44 @@ public static class Bootstrap
 
     public static void Shutdown()
     {
-        _instance?.Shutdown();
+        // Idempotent: atomically clear the init flag so a repeat call (or a second
+        // exit notification) runs the teardown exactly once.
+        if (Interlocked.Exchange(ref _initialized, 0) == 0)
+            return;
+        // Wrap so sentinel removal still runs even if subsystem teardown throws.
+        try { _instance?.Shutdown(); }
+        catch (System.Exception ex) { GD.PrintErr($"[ModFramework] ModManager.Shutdown threw during teardown: {ex.GetType().Name}: {ex.Message}"); }
         ModRuntime.MarkGodotRuntimeStopped();
         _instance = null;
-        _initialized = 0;
         RemoveLoadedSentinel();
         GD.Print("[ModFramework] Shutdown complete");
+    }
+
+    // Pratfall hard-exits without delivering Godot node notifications (WM_CLOSE_REQUEST /
+    // EXIT_TREE) or the .NET ProcessExit event — verified empirically, none fire on quit.
+    // The only reliable hook is the game's own Game.Quit / Game.QuitImmediately. Harmony-
+    // prefix them with Bootstrap.Shutdown so framework teardown runs on the main thread,
+    // while the runtime is still alive, before the game tears down. Shutdown is idempotent.
+    private static void WireShutdownToGameQuit()
+    {
+        try
+        {
+            var harmony = new Harmony("PratfallModFramework.Bootstrap.ShutdownHook");
+            var prefix = new HarmonyMethod(typeof(Bootstrap), nameof(Shutdown));
+            foreach (var name in new[] { "Quit", "QuitImmediately" })
+            {
+                var method = AccessTools.Method(typeof(global::Game), name);
+                if (method != null)
+                    harmony.Patch(method, prefix: prefix);
+                else
+                    GD.PrintErr($"[ModFramework] Bootstrap: Game.{name} not found — shutdown hook partial");
+            }
+            GD.Print("[ModFramework] Shutdown hook wired (Game.Quit/QuitImmediately -> Bootstrap.Shutdown)");
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] Bootstrap: failed to wire shutdown hook: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     // Visual "did the framework load on this PC?" check for users — drops an empty

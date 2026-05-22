@@ -164,8 +164,9 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 - Finding: VoteState.Manifest is stored on StartVote but never read by ModVoteSession itself; ModManager keeps its own copy in _activeVoteRequests[voteId].
   Why deferred: internal-api change to StartVote signature; should be paired with VoteCoordinator split work.
+  Status: UNBLOCKED by vote-tally coverage (commit fa4c730); not yet applied.
   Fix sketch: remove manifest parameter from StartVote and Manifest field from VoteState; update ModManager.QueueVoteRequest caller.
-  Re-trigger: VoteCoordinator / vote-system cleanup pass.
+  Re-trigger: VoteCoordinator / vote-system cleanup pass (coverage gate now satisfied).
 
 - Finding: Vote behavior contract is undocumented.
   Why deferred: documentation pass, not a 3-laws readability patch.
@@ -450,10 +451,10 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: add "Exception handling in framework helpers" section explaining frequency-based exception routing — rare lifecycle callbacks (OnLoad, OnUnload, settings widget creation) route to ModCrashReporter; high-frequency callbacks (game events, button presses, per-frame work) log to godot.log only to avoid crash-report flooding. Include per-helper classification table.
   Re-trigger: pre-v1.0 docs pass (gating helper audits are complete).
 
-- Finding: No vote-tally regression coverage.
-  Why deferred: not readability work; needed before vote behavior refactors.
-  Fix sketch: add ModVoteSession tests for strict-majority pass, ties fail, duplicate voter dedup, case-insensitive voter dedup, resolution threshold, minimum-player clamp, ClearAllVotes mid-tally, late votes after resolution, and duplicate StartVote no-op behavior.
-  Re-trigger: before any vote-session tally/quorum/timeout refactor (gates the dead-Manifest-field cleanup + future VoteCoordinator split).
+- Vote-tally regression coverage: EXISTS (ModFrameworkSelfTest.RunVoteTallyTests, commit fa4c730).
+  Covered: strict-majority pass, ties fail, no resolution before ExpectedVotes reached, duplicate voter ignored, case-insensitive voter dedup, totalPlayers clamped to >= 1, ClearAllVotes mid-tally fires no resolution, late vote after resolution fires no second result, duplicate StartVote no-op.
+  Execution status: compiled + behavior-verified by reading ModVoteSession; NOT yet executed in-game (runs via the stress-mod harness; ModVoteSession uses GD.Print which needs the Godot runtime). Upgrade this line to "executed successfully" after the first in-game harness run.
+  Unblocks (refactors NOT yet applied): ModVoteSession dead VoteState.Manifest cleanup; VoteCoordinator split planning.
 
 - Finding: No vote-flow/UI regression coverage.
   Why deferred: not readability work; VoteUI behavior depends on timers, native-dialog fallback, callback ordering, and scene-tree UI state.

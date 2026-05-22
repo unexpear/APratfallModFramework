@@ -3,6 +3,21 @@
 Working notes for deferred audit findings. Delete bullets when they are applied
 or intentionally rejected. Do not keep a completed-history trail.
 
+## In-game validation (executed)
+
+2026-05-22 — all 13 safety-gate self-test families executed in-game on Pratfall
+1.1.0.R2981 via a throwaway StressSelfTestMod OnLoad runner: **13/13 passed, 0
+failed** (VoteTally, GameEventDispatch, DropPoolSelectiveDispose, FilenameSanitize,
+WireFormatRoundtrip, WireFormatCap, ConfigFormat, LogFormat, CrashReportGolden,
+DebugPeerConfig, PathResolution, ModAssemblyLoader, NetworkLifecycle). This
+supersedes the per-family "NOT yet executed in-game" execution-status lines below
+— the coverage is now executed-verified, not just read-verified. Confirmed at
+runtime: collectible-ALC unload (WeakReference dies under Godot's .NET host),
+GameEventBus fire/dispatch, debug-peer guard attach/detach, and the format / path
+/ log / crash / wire / config contracts. Re-run after any Pratfall update or
+coverage change. The documented GAPs are unchanged by this run: real-transport
+dispatch/peer-auth (network-lifecycle) and the full ALC fixture-DLL cycle.
+
 ## Deferred Law-1/Law-2/Law-3 findings
 
 ### ModManager.cs

@@ -138,9 +138,12 @@ Config-format coverage: EXISTS (ModFrameworkSelfTest.RunConfigFormatTests, commi
 
 ### ModAssemblyLoader.cs
 
+- FIXED (cec8faf): OnLoad failure now fails closed (review finding #1). Was — a mod whose OnLoad threw was caught + crash-reported but the load CONTINUED: patches stayed applied, the mod was added to _loaded, LoadMod returned success, and ModManager set _modEnabled + _modSessionAvailable true and broadcast it to peers (a partially-initialized mod, also poisoning the voted session resolver, which trusts that state). Now InvokeLoadCallbacks lets the OnLoad exception propagate; LoadMod unpatches the Harmony patches it applied, unloads the collectible ALC, never records the mod, reports once (unwrapped), and throws ModOnLoadException — which ModManager's two load catches recognize to keep the flags false and skip the duplicate report.
+
 - Finding: Harmony patch failures in ApplyDeclaredPatches are uncaught; one bad patch fails the whole mod load.
   Why deferred: behavior decision; fail-fast is defensible because a half-patched mod may be unsafe, but it hurts mod authors when one bad patch prevents otherwise valid patches from loading.
   Fix sketch: consider per-patch try/catch around harmony.Patch, with logging/crash-report routing, after load-regression coverage exists.
+  Related (post-cec8faf): OnLoad failures now roll back patches + unload the ALC. ApplyDeclaredPatches is now the ONE load step that leaves partial state on failure — a mid-loop harmony.Patch throw leaves earlier patches applied + the ALC loaded, then propagates uncaught. When this is addressed, mirror LoadMod's OnLoad rollback so patch failures also fail closed.
   Re-trigger: mod-load regression coverage or mod-author reports about one bad patch killing the whole mod.
 
 ### ModLocalizationHelper.cs
@@ -483,7 +486,8 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
 
 - Finding: ModAssemblyLoader load/unload regression coverage — PARTIAL.
   Covered (RunModAssemblyLoaderTests, 4b836b2): fresh-loader bookkeeping (IsLoaded(unknown)=false, UnloadMod(unknown) no-op, empty SnapshotLoadedAssemblies), hash-pin tamper-protection refusal (mismatched sha256 throws InvalidOperationException before the assembly is loaded), and the collectible-ALC unload mechanic (load a sidecar DLL into a collectible AssemblyLoadContext, Unload + GC, WeakReference dies).
-  GAP (needs a fixture mod DLL — .NET 8 can't emit one to disk at runtime without Roslyn): full LoadMod of a real mod (OnLoad invoked + patches applied), OnUnload fires exactly once (incl. after an OnLoad throw), reload-same-id leaves no stale state, ModAssemblyLoader's OWN ALC collects after UnloadMod, SnapshotLoadedAssemblies with real loaded mods, shared-assembly refs resolve to host context not the ALC.
+  Also covered (cec8faf): OnLoad fail-closed propagation — a throwing static OnLoad propagates the mod's real exception (driven via an in-memory emitted assembly through the private InvokeLoadCallbacks seam), and the non-throwing success path still collects OnUnload. Execution status: compiled + behavior-verified by reading; the new case is NOT yet executed in-game (the prior 13/13 in-game run predates it).
+  GAP (still needs an on-disk fixture mod DLL — .NET 8 can't persist an emitted assembly to disk): the FULL LoadMod path against a real mod — patches actually removed + the loader's own ALC collects + the mod absent from _loaded after an OnLoad throw; OnUnload fires exactly once (incl. after an OnLoad throw); reload-same-id leaves no stale state; SnapshotLoadedAssemblies with real loaded mods; shared-assembly refs resolve to host context not the ALC.
   Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (the collectible-ALC + GC check especially needs a real run to confirm the Godot .NET host actually collects).
   Fix sketch for the gap: add a tiny purpose-built fixture mod DLL as a build artifact (OnLoad/OnUnload/[ModPatch] types + a pinned sha256), then exercise the full LoadMod/UnloadMod cycle against it.
   Re-trigger: before any ModAssemblyLoader refactor (gates the deferred Harmony-per-patch try/catch item); the GAP re-triggers when a fixture DLL is added.

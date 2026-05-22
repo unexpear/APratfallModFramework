@@ -463,6 +463,18 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Fix sketch: delete dead UsesOfficialLoader branches in ModManager.cs (5+ call sites all gated by always-false), then delete the no-op OfficialModBridge.EnableMod / DisableMod / IsEnabled / CanResolveManifest bridges, then delete the UsesOfficialLoader method itself.
   Re-trigger: lifecycle pass or cleanup pass.
 
+- Finding: A permanently-unloadable enabled mod re-generates a crash report on every session start.
+  Observed in-game (2026-05-22): StressHashGuardMod is intentionally hash-invalid + enabled, so ApplyDesiredModsForSession retries EnableMod on each session start -> hash mismatch -> ModCrashReporter.Report each time, accumulating duplicate reports in modframework-crash-reports/.
+  Why deferred: behavior decision — "fail loud" is correct, but a mod that can NEVER load (permanent hash mismatch / load failure) arguably should be marked-failed-once and skipped (or its duplicate crash report suppressed) on subsequent session starts.
+  Fix sketch: track a per-fingerprint "already failed to load" set; skip the retry / suppress the duplicate report until the fingerprint changes or the user re-enables.
+  Re-trigger: crash-report-policy pass, or if broken-mod crash-report spam becomes a real annoyance.
+
+- Finding: Quarantine feature removed, but stale references remain.
+  Observed: QuarantineRoutingResult no longer exists in the framework, yet StressQuarantineMod (external stress-mod) references it (OnLoad throws TypeLoadException at runtime) and SMOKE_TEST.md section 7 ("trusted-only quarantine") + its trust-policy mentions document a flow the source no longer has.
+  Why deferred: cleanup/docs — not framework code (the stress-mod is external; the doc is stale).
+  Fix sketch: retire/rebuild StressQuarantineMod; remove or update SMOKE_TEST.md section 7 (+ trust-policy mentions) to match the current source. Decide whether quarantine is gone for good or a planned feature.
+  Re-trigger: pre-v1.0 docs/cleanup pass.
+
 - Helper-cluster subscription/disposal regression coverage: EXISTS (ModFrameworkSelfTest.RunGameEventDispatchTests + RunDropPoolSelectiveDisposeTest, commit 3894e3e).
   Covered: ModGameEventHelper subscribe->fire->handler called, Dispose->fire->not called, double-Dispose safe, throwing-handler isolation, string tag filtering, GameplayTag.Equals filtering across separate instances, duplicate subscriptions fire twice (no dedup), invalid args throw (ArgumentNullException / ArgumentException); ModDropPoolHelper selective Dispose removes only its own entry.
   Already covered by existing tests: ModSaveDataHelper (RunSaveDataHelperTest), ModLocalizationHelper (RunLocalizationHelperTest), ModButtonPromptHelper (RunButtonPromptHelperTest) cleanup models.

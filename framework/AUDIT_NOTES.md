@@ -346,12 +346,12 @@ or intentionally rejected. Do not keep a completed-history trail.
 - Finding: Broadcast/Send methods share repeated happy-path shape (transport check, hooked check, localUserId check, Normalize, wrapper Create, SendReliableGlobalEvent).
   Why deferred: wire + behavior + callback; each method has method-specific debug behavior that does not factor cleanly.
   Fix sketch: consider BroadcastReliable<T>(payload, eventId, eventName) for the real-transport happy path while leaving debug paths inline.
-  Re-trigger: with wire-format regression coverage.
+  Re-trigger: wire-format coverage now EXISTS (8836d16) so the helper investigation is unblocked, but full application also needs network-lifecycle coverage (separate gate, not yet written).
 
 - Finding: OnNetworkEventReceived switch repeats get-event → sender-validation → optional target-validation → invoke.
   Why deferred: wire + behavior; dispatch changes could alter peer-auth or receive semantics.
   Fix sketch: consider DispatchIfValidSender<T>() with separate targeted-transfer variant.
-  Re-trigger: with wire-format regression coverage.
+  Re-trigger: wire-format coverage now EXISTS (8836d16); dispatch refactor also needs network-lifecycle coverage (peer-auth / target-validation paths) before application.
 
 ### VoteUI.cs
 
@@ -374,13 +374,17 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ### ModNetworkContracts.cs
 
+Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests + RunWireFormatCapTests, commit 8836d16). Covers Create -> Serialize(ByteBufferWriter) -> Deserialize(ByteBufferReader) -> ToX roundtrip for all 7 wrappers (ModManifestSnapshot, ModConfigSync, ModVoteRequest, ModVoteResponse, ModVoteResult, ModTransferRequest, ModTransferChunk) plus the 32700-byte cap throw on the two wrappers that enforce it. Execution status: compiled + behavior-verified by reading; NOT yet executed in-game. This is roundtrip-equality coverage ONLY — there is NO golden cross-version payload coverage yet (that waits on the _proto_version field decision).
+
 - Finding: 7 NetworkEvent wrapper classes share verbatim 4-method shape: Create / ToX / Serialize / Deserialize.
   Why deferred: wire-format-adjacent; generic base or template approach needs regression coverage to confirm serialized shape remains unchanged.
+  Status: UNBLOCKED IN PRINCIPLE by wire-format coverage (8836d16); not yet applied.
   Fix sketch: evaluate NetworkEventBase<TPayload> or static NetworkEventJson<TPayload> delegation helper, then verify byte-for-byte ByteBufferWriter output equivalence.
-  Re-trigger: after wire-format regression coverage exists.
+  Re-trigger: NetworkEvent dedup refactor pass (coverage gate satisfied).
 
 - Finding: 32700-byte JSON cap constant and check duplicated in ModTransferChunkNetworkEvent and ModConfigSyncNetworkEvent.
   Why deferred: wire-format-adjacent and should be paired with the NetworkEvent dedup decision.
+  Status: UNBLOCKED IN PRINCIPLE by wire-format coverage (8836d16); not yet applied.
   Fix sketch: ModNetworkJson.EnsureJsonFitsWireLimit(json, contextName) shared helper.
   Re-trigger: with NetworkEvent dedup.
 

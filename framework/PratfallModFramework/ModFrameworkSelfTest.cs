@@ -1951,6 +1951,125 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // DebugPeerConfig coverage. Object-level logic (defaults, normalize idempotence,
+    // snapshot, vote resolution, apply-result, mirror) is exercised by constructing the
+    // config directly; the TryLoad file path is exercised against the real ConfigPath with
+    // a backup/restore (ordered to end deleted, the safe default) since the path is a const.
+    public static HelperTestResult RunDebugPeerConfigTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. Missing-field defaults.
+            {
+                var c = new DebugPeerConfig();
+                c.Normalize();
+                if (c.LocalUserId != "debug-host" || c.PeerUserId != "debug-peer" || !c.MirrorLocalInstalledManifests || !c.DefaultVoteYes)
+                { r.ErrorMessage = $"defaults: local={c.LocalUserId} peer={c.PeerUserId} mirror={c.MirrorLocalInstalledManifests} voteYes={c.DefaultVoteYes}"; return r; }
+                if (c.InstalledManifests == null || c.EnabledModIds == null || c.VoteResponses == null)
+                { r.ErrorMessage = "default collections must be non-null after Normalize"; return r; }
+                r.StepsPassed.Add("missing-field defaults applied");
+            }
+
+            // 2. Normalize idempotence + self-loop reset (PeerUserId == LocalUserId).
+            {
+                var c = new DebugPeerConfig
+                {
+                    LocalUserId = "  Host  ",
+                    PeerUserId = "  Host  ",
+                    EnabledModIds = new List<string> { " ModA ", "ModA" },
+                    VoteResponses = new Dictionary<string, bool> { [" v1 "] = true },
+                };
+                c.Normalize();
+                if (c.LocalUserId != "Host" || c.PeerUserId != "debug-peer")
+                { r.ErrorMessage = $"self-loop reset: local={c.LocalUserId} peer={c.PeerUserId}"; return r; }
+                if (c.EnabledModIds.Count != 1) { r.ErrorMessage = $"enabled dedup expected 1, got {c.EnabledModIds.Count}"; return r; }
+                var local1 = c.LocalUserId; var peer1 = c.PeerUserId; var enabled1 = string.Join(",", c.EnabledModIds); var votes1 = string.Join(",", c.VoteResponses.Keys);
+                c.Normalize();
+                if (c.LocalUserId != local1 || c.PeerUserId != peer1 || string.Join(",", c.EnabledModIds) != enabled1 || string.Join(",", c.VoteResponses.Keys) != votes1)
+                { r.ErrorMessage = "Normalize not idempotent"; return r; }
+                r.StepsPassed.Add("normalize idempotent + self-loop PeerUserId reset");
+            }
+
+            // 3. CreatePeerSnapshot mirrors local manifests; enabled filtered to installed.
+            {
+                var local = new ModLocalState { InstalledManifests = { NewVoteManifest("moda"), NewVoteManifest("modb") }, EnabledModIds = { "moda" } };
+                var c = new DebugPeerConfig { Enabled = true, PeerUserId = "peerX", MirrorLocalInstalledManifests = true, EnabledModIds = new List<string> { "moda" } };
+                var snap = c.CreatePeerSnapshot(local);
+                if (snap.UserId != "peerX" || snap.MemberIndex != 1) { r.ErrorMessage = $"snapshot id/index: {snap.UserId}/{snap.MemberIndex}"; return r; }
+                if (snap.InstalledManifests.Count != 2) { r.ErrorMessage = $"snapshot mirror installed expected 2, got {snap.InstalledManifests.Count}"; return r; }
+                if (snap.EnabledModIds.Count != 1 || snap.EnabledModIds[0] != "moda") { r.ErrorMessage = $"snapshot enabled: [{string.Join(",", snap.EnabledModIds)}]"; return r; }
+                r.StepsPassed.Add("CreatePeerSnapshot mirrors local + filters enabled to installed");
+            }
+
+            // 4. MirrorLocalInstalledManifests=false uses the config's own manifests.
+            {
+                var c = new DebugPeerConfig { Enabled = true, MirrorLocalInstalledManifests = false, InstalledManifests = new List<ModManifest> { NewVoteManifest("ownmod") } };
+                var snap = c.CreatePeerSnapshot(new ModLocalState { InstalledManifests = { NewVoteManifest("localmod") } });
+                if (snap.InstalledManifests.Count != 1 || snap.InstalledManifests[0].Id != "ownmod")
+                { r.ErrorMessage = $"mirror=false should use own manifests: [{string.Join(",", snap.InstalledManifests.Select(m => m.Id))}]"; return r; }
+                r.StepsPassed.Add("MirrorLocalInstalledManifests=false uses own manifests");
+            }
+
+            // 5. ResolveVote: explicit response wins, unknown falls to DefaultVoteYes.
+            {
+                var c = new DebugPeerConfig { DefaultVoteYes = false, VoteResponses = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["yesmod"] = true } };
+                c.Normalize();
+                if (!c.ResolveVote("yesmod")) { r.ErrorMessage = "ResolveVote explicit true failed"; return r; }
+                if (c.ResolveVote("unknownmod")) { r.ErrorMessage = "ResolveVote unknown should fall to DefaultVoteYes=false"; return r; }
+                r.StepsPassed.Add("ResolveVote: explicit response + DefaultVoteYes fallback");
+            }
+
+            // 6. ApplyApprovedResult: passed adds the mod; failed is a no-op.
+            {
+                var local = new ModLocalState { InstalledManifests = { NewVoteManifest("moda") } };
+                var passed = new DebugPeerConfig { Enabled = true, MirrorLocalInstalledManifests = true, EnabledModIds = new List<string>() };
+                passed.ApplyApprovedResult(new ModVoteResult { VoteId = "v", SourceUserId = "h", Passed = true, Manifest = NewVoteManifest("moda") }, local);
+                if (!passed.EnabledModIds.Contains("moda")) { r.ErrorMessage = "ApplyApprovedResult(passed) did not enable moda"; return r; }
+                var failed = new DebugPeerConfig { Enabled = true, MirrorLocalInstalledManifests = true, EnabledModIds = new List<string>() };
+                failed.ApplyApprovedResult(new ModVoteResult { VoteId = "v", SourceUserId = "h", Passed = false, Manifest = NewVoteManifest("moda") }, local);
+                if (failed.EnabledModIds.Contains("moda")) { r.ErrorMessage = "ApplyApprovedResult(failed) should be a no-op"; return r; }
+                r.StepsPassed.Add("ApplyApprovedResult: passed enables, failed no-op");
+            }
+
+            // 7. TryLoad file path (real ConfigPath, backed up + restored).
+            var realPath = ProjectSettings.GlobalizePath(DebugPeerConfig.ConfigPath);
+            if (string.IsNullOrEmpty(realPath))
+            {
+                r.StepsPassed.Add("debug-peer ConfigPath not resolvable — TryLoad file checks skipped");
+            }
+            else
+            {
+                string? backup = null;
+                try
+                {
+                    if (File.Exists(realPath)) { backup = realPath + ".selftest-bak"; File.Copy(realPath, backup, overwrite: true); }
+                    File.WriteAllText(realPath, "{ \"Enabled\": false }");
+                    if (DebugPeerConfig.TryLoad() != null) { r.ErrorMessage = "TryLoad(Enabled=false) should return null"; return r; }
+                    File.WriteAllText(realPath, "{ \"Enabled\": true, \"PeerUserId\": \"peerX\" }");
+                    var loaded = DebugPeerConfig.TryLoad();
+                    if (loaded == null || loaded.PeerUserId != "peerX") { r.ErrorMessage = $"TryLoad(representative): {(loaded == null ? "null" : loaded.PeerUserId)}"; return r; }
+                    File.Delete(realPath);
+                    if (DebugPeerConfig.TryLoad() != null) { r.ErrorMessage = "TryLoad(missing file) should return null"; return r; }
+                    r.StepsPassed.Add("TryLoad: Enabled=false -> null, representative -> loaded, missing -> null");
+                }
+                finally
+                {
+                    try { if (File.Exists(realPath)) File.Delete(realPath); } catch { }
+                    if (backup != null) { try { File.Copy(backup, realPath, overwrite: true); File.Delete(backup); } catch { } }
+                }
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
     // Returns the index of the first marker not found at or after the previous marker's
     // position (i.e. missing or out of order), or -1 if all markers appear in order.
     private static int FirstOutOfOrderMarker(string text, string[] markers)

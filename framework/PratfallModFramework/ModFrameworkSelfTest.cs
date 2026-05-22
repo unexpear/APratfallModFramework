@@ -1509,6 +1509,174 @@ public static class ModFrameworkSelfTest
         return null;
     }
 
+    // Wire-format roundtrip coverage for all 7 NetworkEvent wrappers. Serializes through
+    // Pratfall's ByteBufferWriter, deserializes through ByteBufferReader, converts back via
+    // the wrapper's ToX method, and asserts every important field survives. Gates the
+    // deferred NetworkEvent dedup + 32700-byte cap helper: a dedup that reorders or drops a
+    // serialized field would break peer compatibility silently, and this catches it.
+    public static HelperTestResult RunWireFormatRoundtripTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. ModManifestSnapshotNetworkEvent
+            {
+                var state = new ModLocalState
+                {
+                    InstalledManifests = { NewVoteManifest("moda"), NewVoteManifest("modb") },
+                    EnabledModIds = { "moda" },
+                };
+                var ev = ModManifestSnapshotNetworkEvent.Create("sender-1", 7, state);
+                var copy = new ModManifestSnapshotNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                if (copy.SenderUserId != "sender-1" || copy.SenderIndex != 7)
+                { r.ErrorMessage = $"manifest envelope: sender={copy.SenderUserId}/{copy.SenderIndex}"; return r; }
+                var snap = copy.ToSnapshot();
+                if (snap.InstalledManifests.Count != 2 || snap.EnabledModIds.Count != 1 || snap.EnabledModIds[0] != "moda")
+                { r.ErrorMessage = $"manifest snapshot: installed={snap.InstalledManifests.Count} enabled=[{string.Join(",", snap.EnabledModIds)}]"; return r; }
+                r.StepsPassed.Add("ModManifestSnapshotNetworkEvent roundtrips");
+            }
+
+            // 2. ModVoteRequestNetworkEvent
+            {
+                var req = new ModVoteRequest { VoteId = "v1", SourceUserId = "host", Title = "T", Body = "B", ExpectedVotes = 3, Manifest = NewVoteManifest("moda") };
+                var ev = ModVoteRequestNetworkEvent.Create("sender-1", 1, req);
+                var copy = new ModVoteRequestNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                var rt = copy.ToRequest();
+                if (rt.VoteId != "v1" || rt.SourceUserId != "host" || rt.Title != "T" || rt.Body != "B" || rt.ExpectedVotes != 3 || rt.Manifest.Id != "moda")
+                { r.ErrorMessage = $"vote request: {rt.VoteId}/{rt.SourceUserId}/{rt.Title}/{rt.Body}/{rt.ExpectedVotes}/{rt.Manifest.Id}"; return r; }
+                r.StepsPassed.Add("ModVoteRequestNetworkEvent roundtrips");
+            }
+
+            // 3. ModVoteResponseNetworkEvent
+            {
+                var resp = new ModVoteResponse { VoteId = "v1", TargetUserId = "host", VoteYes = true };
+                var ev = ModVoteResponseNetworkEvent.Create("sender-2", 2, resp);
+                var copy = new ModVoteResponseNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                var rt = copy.ToResponse();
+                if (rt.VoteId != "v1" || rt.TargetUserId != "host" || rt.VoteYes != true)
+                { r.ErrorMessage = $"vote response: {rt.VoteId}/{rt.TargetUserId}/{rt.VoteYes}"; return r; }
+                r.StepsPassed.Add("ModVoteResponseNetworkEvent roundtrips");
+            }
+
+            // 4. ModVoteResultNetworkEvent
+            {
+                var res = new ModVoteResult { VoteId = "v1", SourceUserId = "host", Passed = true, Manifest = NewVoteManifest("moda") };
+                var ev = ModVoteResultNetworkEvent.Create("sender-1", 1, res);
+                var copy = new ModVoteResultNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                var rt = copy.ToResult();
+                if (rt.VoteId != "v1" || rt.SourceUserId != "host" || rt.Passed != true || rt.Manifest.Id != "moda")
+                { r.ErrorMessage = $"vote result: {rt.VoteId}/{rt.SourceUserId}/{rt.Passed}/{rt.Manifest.Id}"; return r; }
+                r.StepsPassed.Add("ModVoteResultNetworkEvent roundtrips");
+            }
+
+            // 5. ModTransferRequestNetworkEvent (carries TargetUserId)
+            {
+                var req = new ModTransferRequest { ModId = "moda", ModVersion = "1.0.0" };
+                var ev = ModTransferRequestNetworkEvent.Create("sender-1", 1, "peer-2", req);
+                var copy = new ModTransferRequestNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                if (copy.TargetUserId != "peer-2") { r.ErrorMessage = $"transfer request target={copy.TargetUserId}"; return r; }
+                var rt = copy.ToRequest();
+                if (rt.ModId != "moda" || rt.ModVersion != "1.0.0") { r.ErrorMessage = $"transfer request: {rt.ModId}/{rt.ModVersion}"; return r; }
+                r.StepsPassed.Add("ModTransferRequestNetworkEvent roundtrips (with TargetUserId)");
+            }
+
+            // 6. ModTransferChunkNetworkEvent (carries TargetUserId + all chunk fields)
+            {
+                var chunk = new ModTransferChunk
+                {
+                    ModId = "moda", ModVersion = "1.0.0", ChunkIndex = 2, TotalChunks = 5, TotalBytes = 1000,
+                    ChunkBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3 }), Sha256Hex = "abc123", IsLast = true, FileSuffix = ".pck",
+                };
+                var ev = ModTransferChunkNetworkEvent.Create("sender-1", 1, "peer-2", chunk);
+                var copy = new ModTransferChunkNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                if (copy.TargetUserId != "peer-2") { r.ErrorMessage = $"transfer chunk target={copy.TargetUserId}"; return r; }
+                var rt = copy.ToChunk();
+                if (rt.ModId != "moda" || rt.ChunkIndex != 2 || rt.TotalChunks != 5 || rt.TotalBytes != 1000 ||
+                    rt.ChunkBase64 != chunk.ChunkBase64 || rt.Sha256Hex != "abc123" || rt.IsLast != true || rt.FileSuffix != ".pck")
+                { r.ErrorMessage = $"transfer chunk: idx={rt.ChunkIndex} total={rt.TotalChunks} bytes={rt.TotalBytes} b64={rt.ChunkBase64} sha={rt.Sha256Hex} last={rt.IsLast} suffix={rt.FileSuffix}"; return r; }
+                r.StepsPassed.Add("ModTransferChunkNetworkEvent roundtrips (all chunk fields)");
+            }
+
+            // 7. ModConfigSyncNetworkEvent
+            {
+                var snapshot = new ModConfigSyncSnapshot
+                {
+                    Entries =
+                    {
+                        new ModConfigSyncEntry { ModId = "moda", Section = "S", Key = "K1", TypeName = "int", StringValue = "42" },
+                        new ModConfigSyncEntry { ModId = "moda", Section = "S", Key = "K2", TypeName = "string", StringValue = "hello" },
+                    },
+                };
+                var ev = ModConfigSyncNetworkEvent.Create("sender-1", 1, snapshot);
+                var copy = new ModConfigSyncNetworkEvent();
+                WireRoundtrip(ev.Serialize, copy.Deserialize);
+                var rt = copy.ToSnapshot();
+                if (rt.Entries.Count != 2 || rt.Entries[1].Key != "K2" || rt.Entries[1].StringValue != "hello")
+                { r.ErrorMessage = $"config sync: entries={rt.Entries.Count}"; return r; }
+                r.StepsPassed.Add("ModConfigSyncNetworkEvent roundtrips");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Verifies the 32700-byte serialized-JSON cap that ModTransferChunkNetworkEvent and
+    // ModConfigSyncNetworkEvent enforce in Create (Pratfall's ByteBufferWriter silently
+    // truncates strings over 32768 bytes, so the wrappers throw loudly instead).
+    public static HelperTestResult RunWireFormatCapTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var oversizeChunk = new ModTransferChunk { ModId = "moda", ModVersion = "1.0.0", ChunkBase64 = new string('A', 40000) };
+            if (!Throws<InvalidOperationException>(() => ModTransferChunkNetworkEvent.Create("s", 1, "t", oversizeChunk)))
+            { r.ErrorMessage = "oversize chunk did not throw InvalidOperationException"; return r; }
+            r.StepsPassed.Add("ModTransferChunkNetworkEvent.Create throws over 32700 bytes");
+
+            var oversizeSnapshot = new ModConfigSyncSnapshot
+            {
+                Entries = { new ModConfigSyncEntry { ModId = "moda", Section = "S", Key = "K", TypeName = "string", StringValue = new string('x', 40000) } },
+            };
+            if (!Throws<InvalidOperationException>(() => ModConfigSyncNetworkEvent.Create("s", 1, oversizeSnapshot)))
+            { r.ErrorMessage = "oversize config snapshot did not throw InvalidOperationException"; return r; }
+            r.StepsPassed.Add("ModConfigSyncNetworkEvent.Create throws over 32700 bytes");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Serializes via ByteBufferWriter, copies the written bytes into a ByteBufferReader,
+    // and deserializes — the real wire path for an INetworkEvent.
+    private static void WireRoundtrip(Action<global::ByteBufferWriter> serialize, Action<global::ByteBufferReader> deserialize)
+    {
+        var writer = new global::ByteBufferWriter(512);
+        serialize(writer);
+        var bytes = writer.Buffer.ToMemory().ToArray();
+
+        var reader = new global::ByteBufferReader(512);
+        reader.Replace(bytes);
+        reader.SeekZero();
+        deserialize(reader);
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

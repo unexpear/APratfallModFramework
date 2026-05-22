@@ -429,17 +429,19 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
     (c) crash-report golden sample — COVERED (RunCrashReportGoldenTests, 76c1774): structural-in-order golden — report header, mod/context/time labels, manifest-unavailable branch, nested exception chain (InnerException[1] ->), ordered section markers, embedded ModLogger recent-lines section, normalized ISO/HH:mm:ss.fff timestamp shapes, and .txt filename shape <sanitizedModId>_<yyyy-MM-ddTHH.mm.ss>.txt. Not byte-exact (robust to whitespace).
     (d) filename Sanitize golden — COVERED (RunFilenameSanitizeTests, fbb7f14)
     (e) ModLogger log-line format + file output — COVERED (RunLogFormatTests, e7d510d): HH:mm:ss.fff timestamp shape, padded level tags, "| TypeName: message" exception suffix, UTF-8 file append, Environment.NewLine terminator, ring-buffer order, ring capacity/eviction (200), per-mod GetRecentLines isolation
-    (f) lifecycle-hook coverage — PENDING
+    (f) lifecycle-hook coverage — PENDING; MIGRATED out of format-contract — tracked under the lifecycle/network families (ALC unload / SessionStartHooks / network-lifecycle), not a persistence-format gate
     (g) DebugPeerConfig roundtrip — COVERED (RunDebugPeerConfigTests, fa7e7f7): Enabled=false short-circuit, missing-field defaults, Normalize idempotence + self-loop reset, representative TryLoad, CreatePeerSnapshot, ApplyApprovedResult, MirrorLocalInstalledManifests
+    (+) path-resolution — COVERED (RunPathResolutionTests, 6a99cbc): 6 resolvers share the user-data root + expected subfolders (modframework-config / -logs / -crash-reports / mods / localization / -saves); create-variance preserved (config/logs create their dir, the rest don't). Cross-cutting; gates the PathUtil consolidation, not one of the original a-g.
+  FAMILY STATUS: format-contract persistence/wire/report/sanitize/log/debug/path sub-areas are COMPLETE. Only (f) lifecycle-hook remains and it has migrated to the lifecycle/network families.
   Execution status for all covered sub-items: compiled + behavior-verified by reading; NOT yet executed in-game.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.
   Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity), (f) lifecycle-hook coverage: SessionStartHooks install idempotence, Host/Offline dispatch, callback exception isolation, last-install-wins behavior, Bootstrap startup/shutdown sentinel behavior, and ModManager subsystem teardown order, (g) DebugPeerConfig roundtrip / schema-default tests for user://modframework-debug-peer.json (load/save/normalize idempotence, Enabled=false short-circuit, missing-field defaults, debug-peer snapshot generation).
-  Re-trigger: before any persistence / wire / report-format / path-sanitization / log-format refactor. Gates these deferred refactors:
-    - ModConfig CreateConfigDocumentTemplate + EnsureFilePath extractions
-    - ModNetworkContracts NetworkEvent dedup + 32700-byte cap helper
-    - ModCrashReporter ResolveUserDataSubfolder + Sanitize family extraction
-    - cross-file PathUtil.SanitizeForFilename promotion
-    - cross-file PathUtil.ResolveUserDataSubfolder promotion
+  Re-trigger: coverage now exists for every gated refactor below — they are UNBLOCKED IN PRINCIPLE (NOT yet applied; coverage-first/refactor-later, and pending an in-game harness run):
+    - ModConfig CreateConfigDocumentTemplate + EnsureFilePath extractions — unblocked (config-format coverage)
+    - ModNetworkContracts NetworkEvent dedup + 32700-byte cap helper — unblocked (wire-format coverage)
+    - ModCrashReporter ResolveUserDataSubfolder + Sanitize family extraction — unblocked (sanitize + path-resolution coverage)
+    - cross-file PathUtil.SanitizeForFilename promotion — unblocked (sanitize coverage)
+    - cross-file PathUtil.ResolveUserDataSubfolder promotion — unblocked (path-resolution coverage)
 
 - Finding: UsesOfficialLoader always returns false; dead-branch scaffolding.
   Why deferred: cleanup-only; comment in ModManifest.cs documents it.

@@ -1864,6 +1864,107 @@ public static class ModFrameworkSelfTest
     private static bool HasTimestampPrefix(string line) =>
         System.Text.RegularExpressions.Regex.IsMatch(line, @"^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} ");
 
+    // Crash-report structural golden for ModCrashReporter. Locks in report structure
+    // (section order, field labels, exception chain incl. InnerException, embedded
+    // ModLogger lines) + normalized timestamp/filename shapes before any report-format
+    // refactor. Structural-in-order (not byte-exact) so it's robust to whitespace; the
+    // exception-chain markers are matched exactly because that format IS the contract.
+    public static HelperTestResult RunCrashReportGoldenTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var id = $"SelfTestCrash{Guid.NewGuid():N}"; // alphanumeric -> Sanitize identity
+            ModLogger.For(id).Info("warming up");
+
+            // Non-thrown exceptions -> null StackTrace -> deterministic body (no stack frames
+            // to normalize); nested inner exercises the InnerException chain formatting.
+            var inner = new InvalidOperationException("inner boom");
+            var outer = new InvalidOperationException("outer boom", inner);
+
+            var bodyMethod = typeof(ModCrashReporter).GetMethod("BuildReportBody",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
+                null, new[] { typeof(string), typeof(string), typeof(Exception) }, null);
+            if (bodyMethod == null) { r.ErrorMessage = "BuildReportBody(string,string,Exception) not found"; return r; }
+            var body = (string)bodyMethod.Invoke(null, new object[] { id, "OnLoad", outer })!;
+
+            string[] markers =
+            {
+                "Pratfall Mod Framework",
+                "Mod id",
+                id,
+                "Context",
+                "OnLoad",
+                "UTC time",
+                "Local time",
+                "Manifest",
+                "manifest not available",
+                "Exception",
+                "System.InvalidOperationException: outer boom",
+                "InnerException[1] -> System.InvalidOperationException: inner boom",
+                "Recent log lines (from ModLogger ring buffer)",
+                "[INFO ] warming up",
+            };
+            var bad = FirstOutOfOrderMarker(body, markers);
+            if (bad >= 0) { r.ErrorMessage = $"crash-report structure: marker missing/out-of-order: \"{markers[bad]}\""; return r; }
+            r.StepsPassed.Add("report structure: header + manifest + exception chain + log section in order");
+
+            if (!System.Text.RegularExpressions.Regex.IsMatch(body, @"UTC time\s*:\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"))
+            { r.ErrorMessage = "UTC time header not ISO-8601"; return r; }
+            if (!System.Text.RegularExpressions.Regex.IsMatch(body, @"Local time\s*:\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"))
+            { r.ErrorMessage = "Local time header not ISO-8601"; return r; }
+            r.StepsPassed.Add("report header timestamps are ISO-8601 (normalized shape)");
+
+            if (!System.Text.RegularExpressions.Regex.IsMatch(body, @"(?m)^\d{2}:\d{2}:\d{2}\.\d{3} \[INFO \] warming up"))
+            { r.ErrorMessage = "embedded log line missing normalized HH:mm:ss.fff timestamp shape"; return r; }
+            r.StepsPassed.Add("embedded log line carries normalized timestamp");
+
+            // Filename shape via the real Report path: <sanitized_modid>_<yyyy-MM-ddTHH.mm.ss>.txt
+            var folder = ResolveCrashReportFolderForTest();
+            if (folder == null)
+            {
+                r.StepsPassed.Add("crash-report folder null — filename-shape check skipped");
+            }
+            else
+            {
+                ModCrashReporter.Report(id, "OnLoad", outer);
+                var files = Directory.Exists(folder) ? Directory.GetFiles(folder, id + "_*.txt") : Array.Empty<string>();
+                try
+                {
+                    if (files.Length == 0) { r.ErrorMessage = "no crash-report file written"; return r; }
+                    var name = Path.GetFileName(files[0]);
+                    var pattern = "^" + System.Text.RegularExpressions.Regex.Escape(id) + @"_\d{4}-\d{2}-\d{2}T\d{2}\.\d{2}\.\d{2}\.txt$";
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(name, pattern))
+                    { r.ErrorMessage = $"crash-report filename shape: \"{name}\""; return r; }
+                    r.StepsPassed.Add("crash-report filename: <modid>_<utc-timestamp>.txt");
+                }
+                finally { foreach (var f in files) TryDeleteFile(f); }
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Returns the index of the first marker not found at or after the previous marker's
+    // position (i.e. missing or out of order), or -1 if all markers appear in order.
+    private static int FirstOutOfOrderMarker(string text, string[] markers)
+    {
+        var pos = 0;
+        for (var i = 0; i < markers.Length; i++)
+        {
+            var idx = text.IndexOf(markers[i], pos, StringComparison.Ordinal);
+            if (idx < 0) return i;
+            pos = idx + markers[i].Length;
+        }
+        return -1;
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

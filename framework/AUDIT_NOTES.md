@@ -360,7 +360,7 @@ or intentionally rejected. Do not keep a completed-history trail.
 - Finding: _hookedLobbyManager and _hookedEventManager are cached Pratfall network-manager references with unverified lifetime semantics.
   Why deferred: needs Cecil verification of NetworkLobbyManagerBase / NetworkEventManager lifetime.
   Fix sketch: verify whether they can become invalid/freed during lobby teardown or host migration; if yes, add GodotObject.IsInstanceValid guards in UnhookTransport before -= operations.
-  Re-trigger: Task #15 IsInstanceValid sweep.
+  Re-trigger: Task #2 IsInstanceValid sweep.
 
 ### VoteUI.cs
 
@@ -418,11 +418,12 @@ or intentionally rejected. Do not keep a completed-history trail.
 ## Safety tasks
 
 - Finding: GodotObject lifetime / IsInstanceValid sweep.
-  Why deferred: safety bug-surface, not readability work; tracked separately as Task #15.
+  Why deferred: safety bug-surface, not readability work; tracked separately as Task #2.
   Fix sketch: audit cached GodotObject/Node/UI refs crossing QueueFree, callbacks, timers, deferred calls, static fields, dictionaries, tree teardown. Use GodotObject.IsInstanceValid on offending sites.
-  Highest-suspicion targets: ModManager._voteUI, Show*Panel existing.QueueFree race window, ModButtonPromptHelper, Timer Timeout captures, WorkshopHook subscribers.
+  Confirmed suspects (post-audit): ModNetworkLayer._hookedLobbyManager / _hookedEventManager, NativeDialogBridge._activeController, ModDropPoolHelper._pool / _entry, ModManager._voteUI, Show*Panel existing.QueueFree race window, Timer Timeout captures.
+  Cleared by audit: ModButtonPromptHelper (fetches ButtonPrompBarController.Instance fresh per call, no cached ref).
   Note: MainMenuIntegration._dialogToggles is ALREADY protected (SyncDialogToggle uses IsInstanceValid).
-  Re-trigger: Task #15.
+  Re-trigger: Task #2.
 
 - Finding: No format-contract regression coverage.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.
@@ -452,7 +453,7 @@ or intentionally rejected. Do not keep a completed-history trail.
 - Finding: MOD_AUTHORS_GUIDE_FRAMEWORK.md lacks an exception-handling-in-framework-helpers section.
   Why deferred: needs full helper-cluster audit to classify each helper callback by frequency.
   Fix sketch: add "Exception handling in framework helpers" section explaining frequency-based exception routing — rare lifecycle callbacks (OnLoad, OnUnload, settings widget creation) route to ModCrashReporter; high-frequency callbacks (game events, button presses, per-frame work) log to godot.log only to avoid crash-report flooding. Include per-helper classification table.
-  Re-trigger: after ModButtonPromptHelper, ModDropPoolHelper, and ModSaveDataHelper audits complete.
+  Re-trigger: pre-v1.0 docs pass (gating helper audits are complete).
 
 - Finding: No vote-tally regression coverage.
   Why deferred: not readability work; needed before vote behavior refactors.
@@ -529,7 +530,7 @@ All 5 helpers audited:
 - Pre-v1.0 docs pass should add an "Exception handling in framework helpers" section to MOD_AUTHORS_GUIDE_FRAMEWORK.md with the frequency-based policy table + per-helper classification.
 - Decision deferred: where per-method exception-policy doc lives (XML doc for IntelliSense, file-level comment for grep, or both).
 
-Re-trigger: only if a 5th helper appears or one of the existing 4 grows substantially.
+Re-trigger: only if a 6th helper appears or one of the existing 5 grows substantially.
 
 ## Helper approval rule (reference)
 

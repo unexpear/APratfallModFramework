@@ -1140,6 +1140,142 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Vote-tally regression coverage for ModVoteSession. Pure in-memory tally logic —
+    // no scene tree, no filesystem, no network. Locks in the resolution contract before
+    // any vote-system refactor (dead VoteState.Manifest cleanup, VoteCoordinator split).
+    public static HelperTestResult RunVoteTallyTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. Strict majority passes: 3 players, 2 yes / 1 no -> PASS.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                s.CastVote("v", "c", false);
+                if (outcome != true) { r.ErrorMessage = $"strict majority expected PASS, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("strict majority (2y/1n) passes");
+            }
+
+            // 2. Ties fail: 2 players, 1 yes / 1 no -> FAIL.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 2);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", false);
+                if (outcome != false) { r.ErrorMessage = $"tie expected FAIL, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("tie (1y/1n) fails");
+            }
+
+            // 3. No resolution before ExpectedVotes reached.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                if (outcome != null) { r.ErrorMessage = $"resolved early after 2/3 votes ({OutcomeText(outcome)})"; return r; }
+                r.StepsPassed.Add("no resolution before ExpectedVotes reached");
+            }
+
+            // 4. Duplicate voter ignored: same voterId twice counts once.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 2);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "a", true); // duplicate -> ignored, only 1 unique voter
+                if (outcome != null) { r.ErrorMessage = "duplicate voter resolved the vote (not deduped)"; return r; }
+                r.StepsPassed.Add("duplicate voter ignored");
+            }
+
+            // 5. Case-insensitive voter dedup: "Alice" == "alice".
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 2);
+                s.CastVote("v", "Alice", true);
+                s.CastVote("v", "alice", true); // same voter, different case -> ignored
+                if (outcome != null) { r.ErrorMessage = "case-variant voter not deduped"; return r; }
+                r.StepsPassed.Add("case-insensitive voter dedup");
+            }
+
+            // 6. totalPlayers clamped to at least 1: a single vote resolves.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 0);
+                s.CastVote("v", "a", true);
+                if (outcome != true) { r.ErrorMessage = $"totalPlayers=0 should clamp to 1 and resolve on one vote, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("totalPlayers clamped to >= 1");
+            }
+
+            // 7. ClearAllVotes mid-tally does not fire OnVoteResolved.
+            {
+                var s = new ModVoteSession();
+                var resolveCount = 0;
+                s.OnVoteResolved += (_, _) => resolveCount++;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                s.ClearAllVotes();
+                s.CastVote("v", "c", true); // vote was cleared -> no-op
+                if (resolveCount != 0) { r.ErrorMessage = $"ClearAllVotes/late vote fired {resolveCount} resolution(s)"; return r; }
+                r.StepsPassed.Add("ClearAllVotes mid-tally fires no resolution");
+            }
+
+            // 8. Late vote after resolution does not fire a second result.
+            {
+                var s = new ModVoteSession();
+                var resolveCount = 0;
+                s.OnVoteResolved += (_, _) => resolveCount++;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 2);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true); // resolves here
+                s.CastVote("v", "c", true); // late -> no-op (voteId already removed)
+                if (resolveCount != 1) { r.ErrorMessage = $"expected exactly 1 resolution, got {resolveCount}"; return r; }
+                r.StepsPassed.Add("late vote after resolution fires no second result");
+            }
+
+            // 9. Duplicate StartVote for same voteId is a no-op (does not reset state).
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 2);
+                s.StartVote("v", NewVoteManifest("Mod2"), totalPlayers: 5); // ignored: ExpectedVotes stays 2
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                if (outcome != true) { r.ErrorMessage = $"duplicate StartVote changed state; expected resolve at 2 votes, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("duplicate StartVote is a no-op");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static ModManifest NewVoteManifest(string name) =>
+        new() { Id = name, Name = name, Version = "1.0.0" };
+
+    private static string OutcomeText(bool? outcome) =>
+        outcome switch { true => "PASS", false => "FAIL", null => "no-resolution" };
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

@@ -1440,6 +1440,75 @@ public static class ModFrameworkSelfTest
         catch (TException) { return true; }
     }
 
+    // Filename-sanitize golden coverage. Locks in the current input->output mapping for
+    // every Sanitize site and asserts all 5 implementations agree, so the deferred
+    // PathUtil.SanitizeForFilename consolidation can't silently change a filename and
+    // orphan a user's config/log/crash/locale/savedata files.
+    public static HelperTestResult RunFilenameSanitizeTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            (string input, string expected)[] golden =
+            {
+                ("MyMod", "MyMod"),
+                ("My.Mod.Config", "My_Mod_Config"),
+                ("my-mod_v1.2", "my-mod_v1_2"),
+                ("a b\tc", "a_b_c"),
+                ("../../secret", "______secret"),
+                ("", ""),
+            };
+            (string name, Type type)[] owners =
+            {
+                ("ModConfig", typeof(ModConfig)),
+                ("ModLogger", typeof(ModLogger)),
+                ("ModCrashReporter", typeof(ModCrashReporter)),
+                ("ModLocalizationHelper", typeof(ModLocalizationHelper)),
+                ("ModSaveDataHelper", typeof(ModSaveDataHelper)),
+            };
+
+            foreach (var (input, expected) in golden)
+                foreach (var (name, type) in owners)
+                {
+                    var actual = CallSanitize(type, input);
+                    if (actual != expected)
+                    { r.ErrorMessage = $"{name}.Sanitize(\"{input}\") = \"{actual}\", expected \"{expected}\""; return r; }
+                }
+
+            r.StepsPassed.Add($"all {owners.Length} Sanitize impls match {golden.Length} golden cases (cross-impl equivalent)");
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static string CallSanitize(Type owner, string input)
+    {
+        var m = FindStaticStringMethod(owner, "Sanitize")
+            ?? throw new InvalidOperationException($"Sanitize(string) not found on {owner.Name}");
+        return (string)m.Invoke(null, new object[] { input })!;
+    }
+
+    // Finds a `static string Method(string)` on the type or any nested type. The Sanitize
+    // helpers are private (ModConfig's is internal); ModLogger's lives on a nested type.
+    private static System.Reflection.MethodInfo? FindStaticStringMethod(Type owner, string name)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        var m = owner.GetMethod(name, F, null, new[] { typeof(string) }, null);
+        if (m != null) return m;
+        foreach (var nested in owner.GetNestedTypes(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+        {
+            m = nested.GetMethod(name, F, null, new[] { typeof(string) }, null);
+            if (m != null) return m;
+        }
+        return null;
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

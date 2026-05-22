@@ -75,6 +75,21 @@ Config-format coverage: EXISTS (ModFrameworkSelfTest.RunConfigFormatTests, commi
 
 ### Bootstrap.cs
 
+- Finding: Bootstrap.Shutdown exists but is NOT wired to game exit.
+  Evidence (observed in-game 2026-05-22, Pratfall 1.1.0.R2981):
+    - After a clean game exit, __PRATFALL_MOD_FRAMEWORK_LOADED.txt remains.
+    - godot.log shows normal game shutdown but no framework Shutdown / ModManager.Shutdown sequence.
+    - Bootstrap.Shutdown is callable (public) but has no quit-notification hook.
+  Impact:
+    - Normal process exit still frees memory (OS reclaim), so production impact is low.
+    - But all deferred subsystem Shutdown work (SessionStartHooks / ModExceptionFilter / WorkshopHook + the HarmonyPatchSet lifecycle pass) is DORMANT until Bootstrap.Shutdown is actually wired — nothing invokes ModManager.Shutdown on a normal quit.
+    - Sentinel cleanup (RemoveLoadedSentinel) is currently unreliable — the loaded-sentinel can persist after exit.
+  Fix sketch:
+    - Hook Bootstrap.Shutdown into a Godot/game exit path (e.g. NOTIFICATION_WM_CLOSE_REQUEST on the bootstrap node, SceneTree.tree_exiting, or an autoload _ExitTree / _Notification).
+    - Prefer a single idempotent shutdown call (guard against double-invoke).
+    - After wiring, verify by launching, exiting, and confirming: framework shutdown log appears, ModManager.Shutdown runs, loaded sentinel is removed.
+  Re-trigger: PREREQUISITE for the cross-cutting HarmonyPatchSet lifecycle pass — wire Shutdown to exit before adding per-subsystem Shutdown methods, otherwise they never run.
+
 - Finding: SetFullRect and IsActionPressed helpers are duplicated between Bootstrap.cs and MainMenuIntegration.cs.
   Why deferred: Bootstrap creates startup overlays before MainMenuIntegration.Install runs, so it should not depend on MainMenuIntegration.
   Fix sketch: create a neutral framework-level helper file (e.g. GodotControlExtensions.cs) containing pure helpers SetFullRect(Control) and IsActionPressed(InputEvent, string).

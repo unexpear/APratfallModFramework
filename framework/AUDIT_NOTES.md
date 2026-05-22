@@ -436,10 +436,11 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: delete dead UsesOfficialLoader branches in ModManager.cs (5+ call sites all gated by always-false), then delete the no-op OfficialModBridge.EnableMod / DisableMod / IsEnabled / CanResolveManifest bridges, then delete the UsesOfficialLoader method itself.
   Re-trigger: lifecycle pass or cleanup pass.
 
-- Finding: No helper-cluster subscription/disposal regression coverage.
-  Why deferred: not readability work; needed before changing mod-author helper subscription/disposal behavior.
-  Fix sketch: add tests for subscribe→fire, dispose→unsubscribe, double-dispose idempotence, handler exception isolation, tag filtering (string and GameplayTag.Equals), duplicate subscriptions (no dedup expected), argument-validation throw types (ArgumentNullException + ArgumentException for empty strings).
-  Re-trigger: before any helper-cluster subscription/refactor work (gates the deferred ModGameEventHelper Subscribe* dedup + future shared ModSubscription helper).
+- Helper-cluster subscription/disposal regression coverage: EXISTS (ModFrameworkSelfTest.RunGameEventDispatchTests + RunDropPoolSelectiveDisposeTest, commit 3894e3e).
+  Covered: ModGameEventHelper subscribe->fire->handler called, Dispose->fire->not called, double-Dispose safe, throwing-handler isolation, string tag filtering, GameplayTag.Equals filtering across separate instances, duplicate subscriptions fire twice (no dedup), invalid args throw (ArgumentNullException / ArgumentException); ModDropPoolHelper selective Dispose removes only its own entry.
+  Already covered by existing tests: ModSaveDataHelper (RunSaveDataHelperTest), ModLocalizationHelper (RunLocalizationHelperTest), ModButtonPromptHelper (RunButtonPromptHelperTest) cleanup models.
+  Execution status: compiled + behavior-verified by reading; NOT yet executed in-game (runs via the stress-mod harness; uses GameEventBus reflection + GameplayTag/PackedScene construction which need the Godot runtime). Upgrade to "executed successfully" after the first in-game harness run.
+  Unblocks (refactors NOT yet applied): ModGameEventHelper Subscribe* dedup discussion; helper-cluster subscription/disposal cleanup decisions.
 
 - Finding: No ModAssemblyLoader load/unload regression coverage.
   Why deferred: not readability work; AssemblyLoadContext unload behavior is fragile and needs explicit tests before any loader refactor.

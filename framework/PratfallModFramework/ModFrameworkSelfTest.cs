@@ -1677,6 +1677,86 @@ public static class ModFrameworkSelfTest
         deserialize(reader);
     }
 
+    // Config-format gap-fill for ModConfig: schema-version write/preserve, corrupt-file
+    // fallback (+ .bad backup), and type-mismatch fallback that doesn't poison future writes.
+    // Complements RunConfigSystemTest (which covers bind/reload/constraint/OnChange). Each
+    // case uses a fresh GUID-suffixed mod id so ModConfig's static instance cache doesn't
+    // short-circuit the load path on re-runs.
+    public static HelperTestResult RunConfigFormatTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var folder = ModConfig.ResolveConfigFolder();
+            if (folder == null)
+            {
+                r.StepsPassed.Add("ResolveConfigFolder null (platform not up) — config-format file checks skipped");
+                r.Success = true;
+                return r;
+            }
+
+            // 1. Schema version created on first write and preserved across a value change.
+            {
+                var id = $"SelfTestCfgSchema_{Guid.NewGuid():N}";
+                var path = Path.Combine(folder, ModConfig.Sanitize(id) + ".json");
+                try
+                {
+                    var entry = ModConfig.For(id).Bind("S", "K", 1);
+                    if (!File.ReadAllText(path).Contains("_schema_version"))
+                    { r.ErrorMessage = "schema version not written on first save"; return r; }
+                    entry.Value = 2; // triggers another write
+                    if (!File.ReadAllText(path).Contains("_schema_version"))
+                    { r.ErrorMessage = "schema version not preserved after value change"; return r; }
+                    r.StepsPassed.Add("schema version created + preserved across writes");
+                }
+                finally { TryDeleteFile(path); }
+            }
+
+            // 2. Corrupt config file -> .bad backup + defaults recovered.
+            {
+                var id = $"SelfTestCfgCorrupt_{Guid.NewGuid():N}";
+                var path = Path.Combine(folder, ModConfig.Sanitize(id) + ".json");
+                try
+                {
+                    File.WriteAllText(path, "{ this is not valid json");
+                    var entry = ModConfig.For(id).Bind("S", "K", 7);
+                    if (entry.Value != 7) { r.ErrorMessage = $"corrupt fallback expected default 7, got {entry.Value}"; return r; }
+                    if (!File.Exists(path + ".bad")) { r.ErrorMessage = "corrupt file not backed up to .bad"; return r; }
+                    r.StepsPassed.Add("corrupt config -> .bad backup + defaults recovered");
+                }
+                finally { TryDeleteFile(path); TryDeleteFile(path + ".bad"); }
+            }
+
+            // 3. Type mismatch -> default + bad value overwritten (no poison of future writes).
+            {
+                var id = $"SelfTestCfgType_{Guid.NewGuid():N}";
+                var path = Path.Combine(folder, ModConfig.Sanitize(id) + ".json");
+                try
+                {
+                    File.WriteAllText(path, "{ \"Combat\": { \"MaxFlares\": \"notanint\" }, \"_schema_version\": 1 }");
+                    var entry = ModConfig.For(id).Bind("Combat", "MaxFlares", 99);
+                    if (entry.Value != 99) { r.ErrorMessage = $"type-mismatch expected default 99, got {entry.Value}"; return r; }
+                    if (File.ReadAllText(path).Contains("notanint")) { r.ErrorMessage = "bad value not overwritten (poisoned future writes)"; return r; }
+                    r.StepsPassed.Add("type mismatch -> default + bad value overwritten");
+                }
+                finally { TryDeleteFile(path); }
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

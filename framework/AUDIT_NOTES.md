@@ -433,7 +433,7 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Coverage progress (sub-items keyed to the fix sketch below):
     (a) config persistence roundtrip — COVERED (RunConfigSystemTest + RunConfigFormatTests, 73680a4)
     (b) NetworkEvent wire-format roundtrip — COVERED (RunWireFormatRoundtripTests + RunWireFormatCapTests, 8836d16); golden cross-version payloads + network-lifecycle subtests still PENDING
-    (c) crash-report golden sample — PENDING
+    (c) crash-report golden sample — COVERED (RunCrashReportGoldenTests, 76c1774): structural-in-order golden — report header, mod/context/time labels, manifest-unavailable branch, nested exception chain (InnerException[1] ->), ordered section markers, embedded ModLogger recent-lines section, normalized ISO/HH:mm:ss.fff timestamp shapes, and .txt filename shape <sanitizedModId>_<yyyy-MM-ddTHH.mm.ss>.txt. Not byte-exact (robust to whitespace).
     (d) filename Sanitize golden — COVERED (RunFilenameSanitizeTests, fbb7f14)
     (e) ModLogger log-line format + file output — COVERED (RunLogFormatTests, e7d510d): HH:mm:ss.fff timestamp shape, padded level tags, "| TypeName: message" exception suffix, UTF-8 file append, Environment.NewLine terminator, ring-buffer order, ring capacity/eviction (200), per-mod GetRecentLines isolation
     (f) lifecycle-hook coverage — PENDING

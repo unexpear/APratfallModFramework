@@ -88,7 +88,7 @@ internal static class ModZipDropInstaller
         }
     }
 
-    private enum ExtractResult { Extracted, Skipped, Failed }
+    private enum ExtractResult { Extracted = 0, Skipped = 1, Failed = 2 }
 
     private static ExtractResult TryExtractOne(string zipPath)
     {

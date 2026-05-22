@@ -534,8 +534,8 @@ public sealed class ModNetworkLayer : IDisposable
 
     private enum TransportMode
     {
-        None,
-        Real,
-        Debug
+        None = 0,
+        Real = 1,
+        Debug = 2
     }
 }

@@ -95,25 +95,25 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ### ModCrashReporter.cs
 
-- Finding: ResolveCrashReportFolder + ResolveModsRoot are near-identical, only differing in final folder name.
+- Finding: ResolveCrashReportFolder + ResolveModsRoot are near-identical, only differing in final folder name (6 sites of user-data-subfolder resolution: ModConfig.ResolveConfigFolder, ModCrashReporter.ResolveCrashReportFolder, ModCrashReporter.ResolveModsRoot, ModLogger.ResolveLogFolder, ModSaveDataHelper save-folder, ModLocalizationHelper.GetUserLocaleFolder; plus 2 test-only sites in ModFrameworkSelfTest).
   Why deferred: persistence/report-output-adjacent file path resolution.
   Fix sketch: extract private ResolveUserDataSubfolder(string subfolderName), or promote to PathUtil if cross-file reuse is justified.
   Re-trigger: persistence/report-format readability pass.
 
-- Finding: Sanitize() filesystem-safe name transform duplicated across ModCrashReporter, ModConfig, and ModLocalizationHelper.
+- Finding: Sanitize() filesystem-safe name transform duplicated across ModConfig, ModCrashReporter, ModLocalizationHelper, ModLogger, and ModSaveDataHelper (5 sites).
   Why deferred: persistence/report-output-adjacent filename construction.
   Fix sketch: PathUtil.SanitizeForFilename(string) shared helper.
   Re-trigger: persistence-focused readability pass.
 
 ### ModLogger.cs
 
-- Finding: ResolveLogFolder is near-identical to ResolveConfigFolder, ResolveCrashReportFolder, and ResolveModsRoot (4 sites of user-data-subfolder resolution).
+- Finding: ResolveLogFolder is near-identical to ResolveConfigFolder, ResolveCrashReportFolder, ResolveModsRoot, ModSaveDataHelper's save-folder, and ModLocalizationHelper.GetUserLocaleFolder (6 sites of user-data-subfolder resolution; plus 2 test-only sites in ModFrameworkSelfTest).
   Why deferred: persistence/report-output-adjacent user-data path resolution.
-  Fix sketch: shared PathUtil.ResolveUserDataSubfolder(name, createIfMissing) helper; account for create-dir variance (ModLogger + ModConfig create, ModCrashReporter doesn't).
+  Fix sketch: shared PathUtil.ResolveUserDataSubfolder(name, createIfMissing) helper; account for create-dir variance (ModLogger + ModConfig + ModSaveDataHelper + ModLocalizationHelper create, ModCrashReporter doesn't).
   Re-trigger: persistence-focused readability pass gated by format-contract regression coverage.
 
-- Finding: Sanitize filesystem-safe name transform is duplicated across ModConfig, ModLocalizationHelper, ModCrashReporter, and ModLogger.
-  Why deferred: persistence/report-output-adjacent filename construction; behavior drift could orphan config/log/report/localization files.
+- Finding: Sanitize filesystem-safe name transform is duplicated across ModConfig, ModLocalizationHelper, ModCrashReporter, ModLogger, and ModSaveDataHelper (5 sites).
+  Why deferred: persistence/report-output-adjacent filename construction; behavior drift could orphan config/log/report/localization/savedata files.
   Fix sketch: PathUtil.SanitizeForFilename(string) shared helper.
   Re-trigger: persistence-focused readability pass gated by format-contract regression coverage.
 
@@ -123,6 +123,42 @@ or intentionally rejected. Do not keep a completed-history trail.
   Why deferred: behavior decision; fail-fast is defensible because a half-patched mod may be unsafe, but it hurts mod authors when one bad patch prevents otherwise valid patches from loading.
   Fix sketch: consider per-patch try/catch around harmony.Patch, with logging/crash-report routing, after load-regression coverage exists.
   Re-trigger: mod-load regression coverage or mod-author reports about one bad patch killing the whole mod.
+
+### ModLocalizationHelper.cs
+
+- Finding: GetUserLocaleFolder is another user-data-subfolder resolution site, bringing the shared path-resolution duplicate count to 6.
+  Why deferred: persistence-adjacent; gated by PathUtil.ResolveUserDataSubfolder consolidation.
+  Fix sketch: replace GetUserLocaleFolder with PathUtil.ResolveUserDataSubfolder("localization", createIfMissing: true) once the shared helper lands.
+  Re-trigger: persistence-focused readability pass.
+
+- Finding: Sanitize keeps hyphens; filename sanitizer behavior must be unified carefully across all sanitize sites.
+  Why deferred: persistence-adjacent; consolidation needs an explicit allowed-character policy.
+  Fix sketch: PathUtil.SanitizeForFilename with documented allowed chars. Verify locale codes, mod ids, log names, crash-report names, and save-data names before rollout.
+  Re-trigger: persistence-focused readability pass.
+
+- Finding: ForceEnableUserLocales is intentionally one-way with no Shutdown/reset path.
+  Why deferred: documentation/lifecycle note; it should be excluded from the canonical HarmonyPatchSet lifecycle pattern.
+  Fix sketch: document that ForceEnableUserLocales is process-lifetime persistent because user locales loaded mid-session cannot be cleanly unloaded.
+  Re-trigger: HarmonyPatchSet lifecycle pass.
+
+### ReflectionHelper.cs
+
+- Finding: GetTypesSafe adoption is incomplete; raw Assembly.GetTypes() remains in ModAssemblyLoader.cs and ModExceptionFilter.cs.
+  Why deferred: behavior decision, not pure dedup. ModAssemblyLoader currently fails fast if a mod assembly has missing dependencies, which may be safer than partial type loading. ModExceptionFilter scans the game assembly and is lower-risk.
+  Fix sketch: decide per site. Keep ModAssemblyLoader raw if fail-fast remains policy; consider GetTypesSafe for ModExceptionFilter as defensive robustness. Gate ModAssemblyLoader changes behind load/unload regression coverage.
+  Re-trigger: ModAssemblyLoader fail-fast-vs-partial-load decision and load/unload regression coverage.
+
+### ModExceptionFilter.cs
+
+- Finding: Missing Shutdown method; inconsistent with WorkshopSubscriber, NativeModUiSuppressor, OfficialModBridge, and SessionStartHooks.
+  Why deferred: lifecycle change; patches currently survive process lifetime.
+  Fix sketch: add Shutdown that calls harmony.UnpatchAll(harmony.Id) and resets _patched; wire into ModManager.Shutdown alongside the other Harmony-patch lifecycle classes.
+  Re-trigger: cross-cutting HarmonyPatchSet lifecycle pass.
+
+- Finding: No outer try/catch on Install.
+  Why deferred: lifecycle-adjacent; changes init failure semantics if Pratfall renames Log.OnException.
+  Fix sketch: wrap reflection lookup and harmony.Patch in try/catch matching OfficialModBridge.Install; log on failure and leave _patched = false so a future Install can retry.
+  Re-trigger: alongside Shutdown method addition.
 
 ### ModVoteSession.cs
 
@@ -136,6 +172,57 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: document strict-majority pass rule, ties-fail behavior, no-timeout behavior, case-insensitive voter dedup, and ClearAllVotes external reset contract.
   Re-trigger: pre-v1.0 documentation pass.
 
+### OfficialModBridge.cs
+
+- Finding: Install's 3× AccessTools.Method + null-check + Patch block is the prototype for the cross-cutting HarmonyPatchSet helper.
+  Why deferred: callback + internal-api; should land with the broader HarmonyPatchSet lifecycle helper, not standalone.
+  Fix sketch: TryPatchPrefix(string methodName, string prefixName, bool logOnMissing) returning bool; first call uses logOnMissing=true, later optional patches use false.
+  Re-trigger: cross-cutting HarmonyPatchSet lifecycle pass.
+
+- Finding: Install partial-failure followed by later Install may create a new Harmony instance with the same ID while earlier patches might still exist.
+  Why deferred: behavior; needs Harmony behavior verification, not readability work.
+  Fix sketch: investigate whether duplicate patching with the same Harmony ID is harmless or throws; if unsafe, Install should clean partial state or call Shutdown first.
+  HarmonyPatchSet design requirements (partial-failure recovery):
+    - TryInstall must be reentrant after a failed install.
+    - Partial patch application must be rolled back or tracked per-patch.
+    - A failed install must not leave one patched method active while _installed remains false.
+    - Later Install calls must not double-patch already-patched methods with a fresh Harmony instance.
+  Re-trigger: HarmonyPatchSet lifecycle pass.
+
+- Finding: OfficialModBridge.Install / Shutdown are the canonical Harmony-patchset lifecycle pattern.
+  Why deferred: documentation cross-link, not code change.
+  Fix sketch: when adding lifecycle handling to SessionStartHooks / ModExceptionFilter / WorkshopHook, copy the OfficialModBridge shape: outer Install try/catch, degraded log, installed flag, Shutdown UnpatchAll try/catch, state reset.
+  Re-trigger: cross-cutting lifecycle pass.
+
+### NativeModUiSuppressor.cs
+
+- Finding: `_applied = true` is set before the Apply try block, while OfficialModBridge sets `_installed = true` only after patch success.
+  Why deferred: HarmonyPatchSet design choice; lifecycle cluster currently uses inconsistent idempotency models.
+  Fix sketch: choose one canonical model during the HarmonyPatchSet lifecycle pass: retry-on-failure, explicit-Shutdown-to-retry, or rollback-on-partial-failure.
+  Re-trigger: HarmonyPatchSet lifecycle pass.
+
+- Finding: Silent half-applied state if Apply fails after `_applied = true`.
+  Why deferred: behavior-sensitive; tied to the idempotency and partial-failure recovery model.
+  Fix sketch: track per-patch applied state, rollback partial patches, or set `_applied` only after successful patch application.
+  Re-trigger: alongside the HarmonyPatchSet idempotency-model decision.
+
+### NativeModListMirror.cs
+
+- Finding: native ModManifest.LoadedAssembly setter side-effects are unverified.
+  Why deferred: behavior verification, not readability.
+  Fix sketch: Cecil-dump native ModManifest and confirm LoadedAssembly is an auto-property/backing field with no setter side effects.
+  Re-trigger: Pratfall update / Cecil-verification sweep.
+
+- Finding: Sync mutates ModManager.Mods and LoadedMods in place.
+  Why deferred: theoretical; no current evidence of non-main-thread iteration.
+  Fix sketch: only address if Pratfall or vanilla mods introduce multi-threaded list iteration; possible future fix is snapshot/double-buffered swap.
+  Re-trigger: multi-thread mod-list access pattern observed.
+
+- Finding: NativeModListMirror and OfficialModBridge are a paired suppress-and-mirror design.
+  Why deferred: documentation cross-link, not code change.
+  Fix sketch: when applying any OfficialModBridge lifecycle work, verify NativeModListMirror.Sync still runs after OfficialModBridge.Install and after framework scan/load state is ready.
+  Re-trigger: HarmonyPatchSet lifecycle pass.
+
 ### SessionStartHooks.cs
 
 - Finding: Missing Shutdown method; inconsistent with WorkshopSubscriber, NativeModUiSuppressor, and OfficialModBridge.
@@ -147,6 +234,116 @@ or intentionally rejected. Do not keep a completed-history trail.
   Why deferred: lifecycle-adjacent; changes initialization failure semantics if future Pratfall signatures drift.
   Fix sketch: wrap harmony.Patch calls in try/catch matching OfficialModBridge.Install; log and leave _installed false on failure.
   Re-trigger: alongside Shutdown method addition.
+
+### ModFrameworkSelfTest.cs
+
+- Finding: try/catch wrapper `r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}"; return r;` repeats across helper-test methods.
+  Why deferred: self-test harness refactor; should wait until test-runner output shape is formalized.
+  Fix sketch: private RunHelperTest wrapper that owns try/catch and standardized error formatting.
+  Re-trigger: when more helper-test methods are added or test-runner output becomes formalized.
+
+- Finding: temp-dir setup for `user://stress-tmp` repeats across stress tests.
+  Why deferred: self-test harness refactor.
+  Fix sketch: private EnsureStressTmpDir() helper returning the globalized path.
+  Re-trigger: self-test organization pass.
+
+- Finding: `Convert.ToHexString(SHA256.HashData(...))` repeats across hash assertions.
+  Why deferred: small dedup; inline is currently clear at assertion sites.
+  Fix sketch: private Sha256Hex(byte[]) helper if hash-checking tests expand.
+  Re-trigger: if another hash-heavy test family lands.
+
+- Finding: ResolveCrashReportFolderForTest and ResolveUserLocaleFolderForTest duplicate user-data-subfolder resolution.
+  Why deferred: gated by broader PathUtil.ResolveUserDataSubfolder consolidation.
+  Fix sketch: replace both with PathUtil.ResolveUserDataSubfolder once shared helper exists.
+  Re-trigger: PathUtil.ResolveUserDataSubfolder rollout.
+
+- Finding: helper-test catch paths can leak event subscriptions / IDisposable handles on exception.
+  Why deferred: behavior change to test failure semantics; should be paired with helper-cluster subscription/disposal coverage.
+  Fix sketch: use try/finally or using-style cleanup around registrations and event subscriptions.
+  Re-trigger: helper-cluster subscription/disposal regression coverage.
+
+- Finding: ModFrameworkSelfTest is missing several safety-gate coverage families.
+  Why deferred: coverage work, not readability work.
+  Fix sketch: add tests for filename sanitize golden cases, ModLogger log format, crash-report golden sample, lifecycle hooks, ModAssemblyLoader unload, vote tally, vote-flow/UI, network lifecycle, and the missing NetworkEvent wrapper roundtrips.
+  Re-trigger: before any refactor gated by those coverage families.
+
+### ModAPI.cs
+
+- Finding: BackupResource / RestoreResource / SaveResource accept arbitrary absolute paths; a malicious mod could touch files outside Pratfall's intended data area.
+  Why deferred: api + behavior; path-scoping policy decision needed before changing public behavior.
+  Fix sketch: add an allowed-root check for Pratfall-controlled paths, then reject or throw on paths outside the allowed roots.
+  Re-trigger: api hardening pass.
+
+- Finding: Exception contract is undocumented for LoadResource / BackupResource / RestoreResource / SaveResource.
+  Why deferred: documentation policy decision; current behavior lets exceptions bubble to mod callers.
+  Fix sketch: document null-return / thrown-exception behavior in XmlDoc and MOD_AUTHORS_GUIDE_FRAMEWORK.md.
+  Re-trigger: pre-v1.0 docs pass.
+
+- Finding: No XmlDoc on public mod-author API.
+  Why deferred: documentation pass; no behavior change, but weak IntelliSense support for mod authors.
+  Fix sketch: add XmlDoc comments to all public methods with usage notes and exception behavior.
+  Re-trigger: pre-v1.0 docs pass.
+
+- Finding: RestoreResource deletes the .bak after restore, while BackupResource does not overwrite an existing .bak.
+  Why deferred: behavior contract decision; single-restore and first-backup-wins semantics need confirmation before documenting or changing.
+  Fix sketch: confirm intended semantics, then document them in XmlDoc and the framework guide.
+  Re-trigger: pre-v1.0 docs pass.
+
+### DebugPeerConfig.cs
+
+- Finding: JSON schema for user://modframework-debug-peer.json is not covered by format-contract regression coverage.
+  Why deferred: coverage work, not readability; debug-only, but still a developer-visible persistence contract.
+  Fix sketch: add DebugPeerConfig roundtrip coverage: load/save/normalize idempotence, Enabled=false short-circuit, missing-field defaults, and debug-peer snapshot generation.
+  Re-trigger: format-contract regression coverage pass.
+
+### NativeDialogBridge.cs
+
+- Finding: _activeController is a cached Godot Node ref held across callback boundaries and may become stale if DialogUI is QueueFreed before DismissActive.
+  Why deferred: safety bug-surface tracked under Task #2, not a readability patch.
+  Fix sketch: cast _activeController to GodotObject and check GodotObject.IsInstanceValid before cancelMethod.Invoke.
+  Re-trigger: Task #2 IsInstanceValid sweep.
+
+- Finding: TryShow has silent false-return branches without diagnostics.
+  Why deferred: diagnostic logging policy decision; logging every failed lookup could add noise.
+  Fix sketch: add specific GD.PrintErr messages, likely log-once-per-process per failure reason.
+  Re-trigger: diagnostics-policy pass or native-dialog-not-showing bug report.
+
+- Finding: SetField cascade uses magic field-name strings and silently ignores missing fields.
+  Why deferred: reflection-failure diagnostic behavior change.
+  Fix sketch: make SetField return bool, aggregate missing fields, and log missing Pratfall field names.
+  Re-trigger: alongside native-dialog diagnostics work.
+
+- Finding: No outer try/catch on TryShow.
+  Why deferred: callback + behavior; reflection failures currently bubble.
+  Fix sketch: wrap reflection block in try/catch + GD.PrintErr and preserve false-return contract.
+  Re-trigger: vote-flow/UI regression coverage.
+
+- Finding: wrappedOnComplete does not catch exceptions from onComplete(accepted).
+  Why deferred: callback contract change.
+  Fix sketch: clear static state first, then wrap onComplete in try/catch + GD.PrintErr.
+  Re-trigger: vote-flow/UI regression coverage.
+
+- Finding: FindNodeByName is manual recursion even though Godot has Node.FindChild.
+  Why deferred: behavior; built-in traversal semantics may differ.
+  Fix sketch: investigate semantic equivalence, then replace only if behavior matches.
+  Re-trigger: investigation pass after vote-flow regression coverage exists.
+
+### WorkshopHook.cs
+
+- Finding: ModManager subscribes via `WorkshopHook.OnWorkshopItemInstalled += OnWorkshopItemInstalled` but never unsubscribes.
+  Why deferred: lifecycle change; production impact is likely low, but editor/hot-restart could retain a stale ModManager reference.
+  Fix sketch: add `WorkshopHook.OnWorkshopItemInstalled -= OnWorkshopItemInstalled` to ModManager.Shutdown alongside other event unsubscriptions.
+  Re-trigger: cross-cutting lifecycle cleanup pass.
+
+- Finding: No try/catch around `OnWorkshopItemInstalled?.Invoke(...)`.
+  Why deferred: WorkshopHook is still a stub awaiting real Workshop wiring; exception behavior should be decided when the Steam/Workshop callback is connected.
+  Fix sketch: either isolate subscribers with foreach over GetInvocationList + try/catch + GD.PrintErr, or document that subscriber exceptions propagate.
+  Re-trigger: when Tim wires the Workshop install callback.
+
+- Finding: No Clear / Shutdown method on WorkshopHook.
+  Why deferred: static event survives process lifetime; currently low practical impact, but inconsistent with the broader lifecycle-cleanup direction.
+  Fix sketch: add `WorkshopHook.Clear()` that nulls the event, then call it from ModManager.Shutdown.
+  Re-trigger: cross-cutting lifecycle cleanup pass.
 
 ### ModNetworkLayer.cs
 
@@ -164,6 +361,13 @@ or intentionally rejected. Do not keep a completed-history trail.
   Why deferred: needs Cecil verification of NetworkLobbyManagerBase / NetworkEventManager lifetime.
   Fix sketch: verify whether they can become invalid/freed during lobby teardown or host migration; if yes, add GodotObject.IsInstanceValid guards in UnhookTransport before -= operations.
   Re-trigger: Task #15 IsInstanceValid sweep.
+
+### VoteUI.cs
+
+- Finding: Vote-resolution dispatch repeats at 3 sites: SubmitVote, OnTimeout, and OnNativeDialogCompleted.
+  Why deferred: callback-flow risk; each path differs in native-dialog cleanup behavior (DismissActive needed vs just clearing flag vs no native involvement).
+  Fix sketch: extract private Resolve(bool voteYes, bool needNativeDismiss) only after vote-flow/timer regression coverage exists.
+  Re-trigger: vote-tally / vote-flow regression coverage.
 
 ### ModP2PTransfer.cs
 
@@ -222,7 +426,7 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 - Finding: No format-contract regression coverage.
   Why deferred: not readability work; infrastructure needed before touching persistence, wire, report-output, or filename-sanitization behavior.
-  Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity), (f) lifecycle-hook coverage: SessionStartHooks install idempotence, Host/Offline dispatch, callback exception isolation, last-install-wins behavior, Bootstrap startup/shutdown sentinel behavior, and ModManager subsystem teardown order.
+  Fix sketch: add to ModFrameworkSelfTest — (a) config persistence roundtrip (save/reload/corrupt-fallback/type-mismatch/schema), (b) NetworkEvent wire-format roundtrip + golden cross-version payloads for all 7 wrappers; transfer-specific subtests covering in-order chunks, out-of-order chunks, duplicate chunks, hash mismatch, size cap, write failure, and scheduler fairness; network-lifecycle subtests covering transport mode transitions, hook/unhook, debug-peer mode guard (Offline-session-only), peer-auth rejection (non-lobby sender), targeted transfer rejection (wrong TargetUserId), and OnTransportReset firing exactly once per transition, (c) crash-report golden sample with timestamp normalization, (d) filename Sanitize golden inputs/outputs, (e) ModLogger log-line format + file output (timestamp format, padded level tags, exception join format, UTF-8 file append, Environment.NewLine terminator, ring buffer order/capacity), (f) lifecycle-hook coverage: SessionStartHooks install idempotence, Host/Offline dispatch, callback exception isolation, last-install-wins behavior, Bootstrap startup/shutdown sentinel behavior, and ModManager subsystem teardown order, (g) DebugPeerConfig roundtrip / schema-default tests for user://modframework-debug-peer.json (load/save/normalize idempotence, Enabled=false short-circuit, missing-field defaults, debug-peer snapshot generation).
   Re-trigger: before any persistence / wire / report-format / path-sanitization / log-format refactor. Gates these deferred refactors:
     - ModConfig CreateConfigDocumentTemplate + EnsureFilePath extractions
     - ModNetworkContracts NetworkEvent dedup + 32700-byte cap helper
@@ -255,6 +459,16 @@ or intentionally rejected. Do not keep a completed-history trail.
   Fix sketch: add ModVoteSession tests for strict-majority pass, ties fail, duplicate voter dedup, case-insensitive voter dedup, resolution threshold, minimum-player clamp, ClearAllVotes mid-tally, late votes after resolution, and duplicate StartVote no-op behavior.
   Re-trigger: before any vote-session tally/quorum/timeout refactor (gates the dead-Manifest-field cleanup + future VoteCoordinator split).
 
+- Finding: No vote-flow/UI regression coverage.
+  Why deferred: not readability work; VoteUI behavior depends on timers, native-dialog fallback, callback ordering, and scene-tree UI state.
+  Fix sketch: add tests/manual harness for native-dialog fallback after retry window, 15s timeout auto-NO, DismissVote no-callback behavior, MouseFilter visible/hidden behavior, and callback dispatch ordering across SubmitVote / OnTimeout / OnNativeDialogCompleted.
+  Re-trigger: before any VoteUI callback/timer/native-dialog refactor (gates the deferred VoteUI Resolve helper extraction).
+
+- Finding: No Pratfall API contract verification / Cecil sweep.
+  Why deferred: infrastructure verification, not readability work.
+  Fix sketch: Cecil-verify native Pratfall contracts the framework relies on: ModManifest.LoadedAssembly setter behavior, ModManager.Mods / LoadedMods accessor semantics, DialogUIShowOptions fields, NetworkLobbyManagerBase / NetworkEventManager lifetime, and other reflected/native API assumptions.
+  Re-trigger: before refactors that depend on native Pratfall member semantics, or after Pratfall updates.
+
 - Finding: No protocol version field on NetworkEvent wrappers.
   Why deferred: protocol design decision, not pure readability.
   Fix sketch: add explicit `_proto_version` field to each NetworkEvent's JSON payload + receiver-side compatibility checks. Define explicit semver-style compatibility rules.
@@ -279,33 +493,43 @@ or intentionally rejected. Do not keep a completed-history trail.
 
 ## Helper-cluster watchlist
 
-Track cross-file patterns across the mod-author helper cluster:
-- ModGameEventHelper.cs (audited)
-- ModButtonPromptHelper.cs (un-audited)
-- ModDropPoolHelper.cs (un-audited)
-- ModSaveDataHelper.cs (un-audited)
+All 5 helpers audited:
+- ModGameEventHelper.cs — IDisposable handle, unsubscribe from GameEventBus
+- ModButtonPromptHelper.cs — context-string cleanup via ClearContext(context)
+- ModDropPoolHelper.cs — IDisposable handle, removes pool entry by reference equality; caches Godot.Resource refs (Task #2 suspect)
+- ModSaveDataHelper.cs — IDisposable handle, unsubscribe from SavegameManager.OnGameWillSave; persistence-sensitive by default
+- ModLocalizationHelper.cs — IDisposable handle, deletes locale file + triggers localization rescan (Register side); ForceEnableUserLocales is a separate one-way Harmony patch, excluded from this cluster
 
-Initial observations (from ModGameEventHelper.cs):
-- IDisposable subscription wrapper pattern.
-- Idempotent Dispose nulls private callback field.
-- Argument validation uses ArgumentNullException.ThrowIfNull and ArgumentException for empty strings.
-- User callback invocation wrapped in try/catch.
-- Handler exceptions log via GD.PrintErr and do NOT route to ModCrashReporter (intentional; see frequency-based policy below).
-- **Handler exception policy**: use frequency-based handling. Rare lifecycle callbacks like OnLoad / OnUnload (called ~twice per mod lifetime) route to ModCrashReporter for full debug context. High-frequency callbacks like game-event handlers (hundreds-to-thousands per session) stay log-only to avoid crash-report flooding from a single repeating bug. Future helpers should follow this rule based on expected call frequency.
-- Filter-then-invoke pattern implemented inside event lambdas.
+**Helper-cluster final verdict:**
 
-Extraction candidates (decisions deferred until helper cluster fully audited):
-- Shared subscription/registration handle IF IDisposable wrappers recur in 2+ helpers.
-- Shared callback exception wrapper IF the try/catch/log pattern is identical across helpers.
-- Shared argument-validation helper ONLY if it stays simpler than inline validation.
+- Shared ModSubscription / ModRegistrationHandle abstraction: REJECTED.
+  Reason: 4 of 5 helpers use IDisposable, but the Dispose bodies are semantically different:
+  - ModGameEventHelper: unsubscribe from GameEventBus
+  - ModDropPoolHelper: remove a specific pool entry by reference equality
+  - ModSaveDataHelper: unsubscribe from SavegameManager.OnGameWillSave
+  - ModLocalizationHelper: delete locale file + trigger localization rescan
+  Named registration classes are clearer than a generic cleanup wrapper. The 5th helper makes the Dispose-body diversity more pronounced, not less.
+- Shared try/catch + log wrapper: REJECTED.
+  Reason: external-call sites differ by what they wrap (Pratfall API call vs user-callback dispatch) and exception routing depends on frequency policy; a generic wrapper hides that distinction.
+- Shared argument-validation helper: REJECTED.
+  Reason: per-helper validation details (which args, which exception types, which messages) are clearer inline; no single-call-site simplification.
 
-Re-trigger: after ModButtonPromptHelper, ModDropPoolHelper, and ModSaveDataHelper audits complete.
+**Outliers / per-file notes:**
+- ModButtonPromptHelper: context-string cleanup outlier (no IDisposable); keep inline cleanup pattern.
+- ModDropPoolHelper: Task #2 suspect for cached Godot.Resource refs (_pool, _entry); verify lifetime semantics before any pool-helper refactor.
+- ModSaveDataHelper: persistence-sensitive (writes save-data JSON); any future refactor gated by format-contract regression coverage.
+
+**Handler exception policy (frequency-based, applies cluster-wide):**
+- Rare lifecycle callbacks (~2 per mod, e.g., OnLoad/OnUnload, settings-widget creation) → log + ModCrashReporter.
+- User-action frequency (1-100 per session, e.g., ModButtonPromptHelper.Show, settings value-changed) → log only.
+- High-frequency (>100 per session, e.g., ModGameEventHelper handlers, per-frame) → log only.
+- Helper wrapping a Pratfall API call (no user code dispatched) → log only regardless of frequency (the exception came from Pratfall, not user code; crash report has no actionable info).
 
 **Documentation policy for helper-cluster files:**
-- High-frequency callback helpers should document their exception policy before v1.0.
-- Current policy: high-frequency mod callbacks catch and log handler exceptions only; they do not route each occurrence through ModCrashReporter to avoid report flooding. Rare lifecycle callbacks (OnLoad/OnUnload, ~twice per mod lifetime) DO route through ModCrashReporter.
-- Decision deferred: where exception-policy doc lives (per-method XML doc for IntelliSense, file-level comment for grep, or both).
-- Re-trigger: after ModButtonPromptHelper, ModDropPoolHelper, and ModSaveDataHelper are audited; pick consistent style across the cluster.
+- Pre-v1.0 docs pass should add an "Exception handling in framework helpers" section to MOD_AUTHORS_GUIDE_FRAMEWORK.md with the frequency-based policy table + per-helper classification.
+- Decision deferred: where per-method exception-policy doc lives (XML doc for IntelliSense, file-level comment for grep, or both).
+
+Re-trigger: only if a 5th helper appears or one of the existing 4 grows substantially.
 
 ## Helper approval rule (reference)
 
@@ -364,6 +588,20 @@ material for the deferred lifecycle-readability refactors; not a task list.
 3. WorkshopSubscriber.Shutdown (try/catch wrap)
 4. NativeModUiSuppressor.Shutdown (try/catch wrap)
 5. OfficialModBridge.Shutdown (try/catch wrap)
+
+### Paired-design invariants
+
+When modifying one side of these pairs, verify the other still satisfies the invariant:
+
+- OfficialModBridge ↔ NativeModListMirror — OfficialModBridge suppresses native loader file I/O; NativeModListMirror mirrors framework state into native ModManager.Mods / LoadedMods. Mirror.Sync must run after Bridge.Install and after framework scan/load state is ready.
+
+- OfficialModBridge ↔ NativeModUiSuppressor — both neuter native ModManager surfaces: loader/file I/O vs UI/anti-cheat-facing counts. They should share the same Harmony lifecycle policy.
+
+- WorkshopHook ↔ ManifestManager.ScanWorkshopMods — Workshop install notification should trigger framework rescan/refresh behavior.
+
+- SessionStartHooks ↔ ModManager.PersistDesiredEnabledState — session start is the last safe point for applying/persisting desired enabled state before gameplay.
+
+- VoteUI ↔ NativeDialogBridge — VoteUI may use native dialog presentation; NativeDialogBridge.DismissActive must remain safe when a peer resolves before the user responds.
 
 ### Cross-file invariants (DO NOT REORDER)
 

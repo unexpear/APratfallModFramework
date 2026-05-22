@@ -125,9 +125,9 @@ public static class ModCompatibilityResolver
 
 public enum ModCompatibilityDecisionKind
 {
-    RemoteCandidate,
-    PeerMissing,
-    Ignored,
+    RemoteCandidate = 0,
+    PeerMissing = 1,
+    Ignored = 2,
 }
 
 public sealed class ModCompatibilityDecision

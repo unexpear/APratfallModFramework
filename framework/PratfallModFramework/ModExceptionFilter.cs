@@ -30,17 +30,17 @@ public static class ModExceptionFilter
 
         // Find Log.OnException(object, FirstChanceExceptionEventArgs)
         MethodInfo? onException = null;
-        foreach (var asm in gameAlc.Assemblies)
+        foreach (var assembly in gameAlc.Assemblies)
         {
-            if (asm.GetName().Name != "Pratfall") continue;
-            foreach (var t in asm.GetTypes())
+            if (assembly.GetName().Name != "Pratfall") continue;
+            foreach (var type in assembly.GetTypes())
             {
-                if (t.Name != "Log") continue;
-                var mi = t.GetMethod("OnException", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+                if (type.Name != "Log") continue;
+                var method = type.GetMethod("OnException", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
                     [typeof(object), typeof(FirstChanceExceptionEventArgs)]);
-                if (mi != null)
+                if (method != null)
                 {
-                    onException = mi;
+                    onException = method;
                     break;
                 }
             }

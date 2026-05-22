@@ -2317,6 +2317,98 @@ public static class ModFrameworkSelfTest
         return -1;
     }
 
+    // Pure SessionModResolver coverage (P1): the session-scoped mod-matching decision matrix.
+    // No network/UI — constructs host state + peer snapshots directly and asserts the plan.
+    public static HelperTestResult RunSessionModResolverTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. All players compatible -> both auto-enabled, no warnings/votes.
+            {
+                var host = new ModLocalState { InstalledManifests = { NewManifestV("moda", "1.0.0"), NewManifestV("modb", "1.0.0") }, EnabledModIds = { "moda", "modb" } };
+                var peer = new ModPeerSnapshot { UserId = "p1", InstalledManifests = { NewManifestV("moda", "1.0.0"), NewManifestV("modb", "1.0.0") } };
+                var plan = SessionModResolver.Resolve(host, new[] { peer });
+                if (plan.Warnings.Count != 0 || plan.PendingVotes.Count != 0) { r.ErrorMessage = $"all-compatible: warnings={plan.Warnings.Count} votes={plan.PendingVotes.Count}"; return r; }
+                if (plan.EffectiveSessionModSet.Count != 2 || !plan.EffectiveSessionModSet.Contains("moda") || !plan.EffectiveSessionModSet.Contains("modb"))
+                { r.ErrorMessage = $"all-compatible: effective=[{string.Join(",", plan.EffectiveSessionModSet)}]"; return r; }
+                r.StepsPassed.Add("all compatible -> both auto-enabled, no warnings/votes");
+            }
+
+            // 2. A player is missing the mod -> disabled-for-session + unsafe unanimous override.
+            {
+                var host = new ModLocalState { InstalledManifests = { NewManifestV("moda", "1.0.0") }, EnabledModIds = { "moda" } };
+                var peer = new ModPeerSnapshot { UserId = "p1" }; // installs nothing
+                var plan = SessionModResolver.Resolve(host, new[] { peer });
+                if (plan.EffectiveSessionModSet.Contains("moda")) { r.ErrorMessage = "missing: moda must not be effective"; return r; }
+                if (!plan.DisabledForSession.Contains("moda")) { r.ErrorMessage = "missing: moda must be disabled-for-session"; return r; }
+                if (!plan.Warnings.Any(w => w.Kind == SessionWarningKind.MissingForPlayer && w.ModId == "moda" && w.AffectedPlayers.Contains("p1")))
+                { r.ErrorMessage = "missing: expected MissingForPlayer(moda, p1)"; return r; }
+                var vote = plan.PendingVotes.FirstOrDefault(d => d.ModId == "moda");
+                if (vote == null || vote.Safety != SessionDecisionSafety.Unsafe || vote.VoteRule != SessionVoteRule.Unanimous)
+                { r.ErrorMessage = "missing: expected unsafe unanimous pending vote"; return r; }
+                r.StepsPassed.Add("missing-for-player -> disabled + unsafe unanimous override");
+            }
+
+            // 3. Version mismatch -> disabled + VersionMismatch warning.
+            {
+                var host = new ModLocalState { InstalledManifests = { NewManifestV("moda", "2.0.0") }, EnabledModIds = { "moda" } };
+                var peer = new ModPeerSnapshot { UserId = "p1", InstalledManifests = { NewManifestV("moda", "1.0.0") } };
+                var plan = SessionModResolver.Resolve(host, new[] { peer });
+                if (plan.EffectiveSessionModSet.Contains("moda")) { r.ErrorMessage = "version: moda must not be effective"; return r; }
+                if (!plan.Warnings.Any(w => w.Kind == SessionWarningKind.VersionMismatch && w.ModId == "moda")) { r.ErrorMessage = "version: expected VersionMismatch(moda)"; return r; }
+                r.StepsPassed.Add("version-mismatch -> disabled + VersionMismatch warning");
+            }
+
+            // 4. Missing dependency (required mod not in the host's enabled set) -> disabled + warning.
+            {
+                var depMod = new ModManifest { Id = "moda", Name = "moda", Version = "1.0.0", Multiplayer = new ModMultiplayer { Requires = new List<string> { "modlib" } } };
+                var host = new ModLocalState { InstalledManifests = { depMod }, EnabledModIds = { "moda" } };
+                var peer = new ModPeerSnapshot { UserId = "p1", InstalledManifests = { NewManifestV("moda", "1.0.0") } };
+                var plan = SessionModResolver.Resolve(host, new[] { peer });
+                if (!plan.Warnings.Any(w => w.Kind == SessionWarningKind.MissingDependency && w.ModId == "moda")) { r.ErrorMessage = "dep: expected MissingDependency(moda)"; return r; }
+                if (plan.EffectiveSessionModSet.Contains("moda")) { r.ErrorMessage = "dep: moda must not be effective"; return r; }
+                r.StepsPassed.Add("missing-dependency -> disabled + MissingDependency warning");
+            }
+
+            // 5. Declared conflict -> later-listed mod disabled (unanimous keep-both), earlier stays effective.
+            {
+                var a = NewManifestV("moda", "1.0.0");
+                var b = new ModManifest { Id = "modb", Name = "modb", Version = "1.0.0", Multiplayer = new ModMultiplayer { ConflictsWith = new List<string> { "moda" } } };
+                var host = new ModLocalState { InstalledManifests = { a, b }, EnabledModIds = { "moda", "modb" } };
+                var peer = new ModPeerSnapshot { UserId = "p1", InstalledManifests = { NewManifestV("moda", "1.0.0"), NewManifestV("modb", "1.0.0") } };
+                var plan = SessionModResolver.Resolve(host, new[] { peer });
+                if (!plan.EffectiveSessionModSet.Contains("moda")) { r.ErrorMessage = "conflict: moda (earlier) should stay effective"; return r; }
+                if (plan.EffectiveSessionModSet.Contains("modb")) { r.ErrorMessage = "conflict: modb (later) should be disabled"; return r; }
+                if (!plan.Warnings.Any(w => w.Kind == SessionWarningKind.DeclaredConflict && w.ModId == "modb")) { r.ErrorMessage = "conflict: expected DeclaredConflict(modb)"; return r; }
+                var vote = plan.PendingVotes.FirstOrDefault(d => d.ModId == "modb");
+                if (vote == null || vote.VoteRule != SessionVoteRule.Unanimous) { r.ErrorMessage = "conflict: expected unanimous keep-both vote for modb"; return r; }
+                r.StepsPassed.Add("declared conflict -> later disabled (unanimous keep-both), earlier effective");
+            }
+
+            // 6. Resolve never mutates the host's saved enabled state.
+            {
+                var host = new ModLocalState { InstalledManifests = { NewManifestV("moda", "1.0.0") }, EnabledModIds = { "moda" } };
+                host.Normalize();
+                var before = new HashSet<string>(host.EnabledModIds, StringComparer.OrdinalIgnoreCase);
+                SessionModResolver.Resolve(host, Array.Empty<ModPeerSnapshot>());
+                if (!before.SetEquals(host.EnabledModIds)) { r.ErrorMessage = $"host enabled state mutated: now [{string.Join(",", host.EnabledModIds)}]"; return r; }
+                r.StepsPassed.Add("Resolve does not mutate host saved enabled state");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static ModManifest NewManifestV(string id, string version) =>
+        new() { Id = id, Name = id, Version = version };
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

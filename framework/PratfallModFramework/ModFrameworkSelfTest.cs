@@ -1951,6 +1951,91 @@ public static class ModFrameworkSelfTest
         }
     }
 
+    // Path-resolution coverage for the user-data-subfolder resolvers, before the deferred
+    // PathUtil.ResolveUserDataSubfolder consolidation. Asserts every resolver shares the
+    // same user-data root + ends with its expected subfolder, and locks in the create-vs-
+    // no-create variance the consolidation must preserve (config/logs create their dir;
+    // crash-reports/mods/localization/saves do not). Skips with a note when platform is down.
+    public static HelperTestResult RunPathResolutionTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            var platform = global::Game.Platform;
+            string? root = null;
+            if (platform != null)
+            {
+                var raw = platform.GetUserDataPath();
+                if (!string.IsNullOrWhiteSpace(raw))
+                {
+                    root = ProjectSettings.GlobalizePath(raw);
+                    if (string.IsNullOrWhiteSpace(root)) root = raw;
+                }
+            }
+            if (root == null)
+            {
+                r.StepsPassed.Add("user-data path unavailable (platform not up) — path-resolution checks skipped");
+                r.Success = true;
+                return r;
+            }
+
+            (string method, Type type, string subfolder, bool creates)[] folderResolvers =
+            {
+                ("ResolveConfigFolder", typeof(ModConfig), "modframework-config", true),
+                ("ResolveLogFolder", typeof(ModLogger), "modframework-logs", true),
+                ("ResolveCrashReportFolder", typeof(ModCrashReporter), "modframework-crash-reports", false),
+                ("ResolveModsRoot", typeof(ModCrashReporter), "mods", false),
+                ("GetUserLocaleFolder", typeof(ModLocalizationHelper), "localization", false),
+            };
+
+            foreach (var (method, type, subfolder, creates) in folderResolvers)
+            {
+                var folder = InvokeStaticStringResolver(type, method);
+                if (folder == null) { r.ErrorMessage = $"{type.Name}.{method}() returned null while platform is up"; return r; }
+                if (!folder.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                { r.ErrorMessage = $"{method}: \"{folder}\" not under user-data root \"{root}\""; return r; }
+                if (!string.Equals(Path.GetFileName(folder.TrimEnd('/', '\\')), subfolder, StringComparison.Ordinal))
+                { r.ErrorMessage = $"{method}: expected subfolder \"{subfolder}\", got \"{Path.GetFileName(folder)}\""; return r; }
+                if (creates && !Directory.Exists(folder))
+                { r.ErrorMessage = $"{method} should create its directory but {folder} does not exist"; return r; }
+            }
+            r.StepsPassed.Add("5 folder resolvers share user-data root + expected subfolders; config/logs create their dir");
+
+            // ModSaveDataHelper.GetModSaveFilePath -> <root>/modframework-saves/<id>.json
+            var savePath = ModSaveDataHelper.GetModSaveFilePath("SelfTestPathMod");
+            if (savePath == null) { r.ErrorMessage = "GetModSaveFilePath returned null while platform is up"; return r; }
+            if (!savePath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) { r.ErrorMessage = $"save path not under root: {savePath}"; return r; }
+            if (!savePath.EndsWith(".json", StringComparison.Ordinal)) { r.ErrorMessage = $"save path not .json: {savePath}"; return r; }
+            var saveDir = Path.GetFileName(Path.GetDirectoryName(savePath)!);
+            if (!string.Equals(saveDir, "modframework-saves", StringComparison.Ordinal)) { r.ErrorMessage = $"save subfolder: {saveDir}"; return r; }
+            r.StepsPassed.Add("GetModSaveFilePath -> <root>/modframework-saves/<id>.json");
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    // Invokes a parameterless static string-returning resolver by name (type or nested type).
+    // Handles both internal (ModConfig/ModLogger) and private (ModCrashReporter/Localization) resolvers.
+    private static string? InvokeStaticStringResolver(Type owner, string name)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        var m = owner.GetMethod(name, F, null, Type.EmptyTypes, null);
+        if (m == null)
+            foreach (var nested in owner.GetNestedTypes(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+            {
+                m = nested.GetMethod(name, F, null, Type.EmptyTypes, null);
+                if (m != null) break;
+            }
+        return (string?)m?.Invoke(null, null);
+    }
+
     // DebugPeerConfig coverage. Object-level logic (defaults, normalize idempotence,
     // snapshot, vote resolution, apply-result, mirror) is exercised by constructing the
     // config directly; the TryLoad file path is exercised against the real ConfigPath with

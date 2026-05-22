@@ -485,10 +485,10 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Fix sketch: track a per-fingerprint "already failed to load" set; skip the retry / suppress the duplicate report until the fingerprint changes or the user re-enables.
   Re-trigger: crash-report-policy pass, or if broken-mod crash-report spam becomes a real annoyance.
 
-- Finding: Quarantine feature removed, but stale references remain.
-  Observed: QuarantineRoutingResult no longer exists in the framework, yet StressQuarantineMod (external stress-mod) references it (OnLoad throws TypeLoadException at runtime) and SMOKE_TEST.md section 7 ("trusted-only quarantine") + its trust-policy mentions document a flow the source no longer has.
-  Why deferred: cleanup/docs — not framework code (the stress-mod is external; the doc is stale).
-  Fix sketch: retire/rebuild StressQuarantineMod; remove or update SMOKE_TEST.md section 7 (+ trust-policy mentions) to match the current source. Decide whether quarantine is gone for good or a planned feature.
+- Finding: Quarantine feature removed, but stale doc references remain.
+  StressQuarantineMod (the external stress-mod that referenced the removed QuarantineRoutingResult and threw TypeLoadException in OnLoad) was REMOVED 2026-05-22 — deployed copy + state entries deleted — after it served as the real-mod fail-closed validation fixture for finding #1 (see the in-game validation block above). Still stale: SMOKE_TEST.md section 7 ("trusted-only quarantine") + its trust-policy mentions document a flow the source no longer has.
+  Why deferred: docs cleanup (folded into #6), not framework code.
+  Fix sketch: remove or update SMOKE_TEST.md section 7 (+ trust-policy mentions) to match the current source. Decide whether quarantine is gone for good or a planned feature.
   Re-trigger: pre-v1.0 docs/cleanup pass.
 
 - Helper-cluster subscription/disposal regression coverage: EXISTS (ModFrameworkSelfTest.RunGameEventDispatchTests + RunDropPoolSelectiveDisposeTest, commit 3894e3e).

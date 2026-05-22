@@ -1757,6 +1757,113 @@ public static class ModFrameworkSelfTest
         try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 
+    // Log-format coverage for ModLogger: line shape, padded level tags, exception join,
+    // ring-buffer order/capacity, per-mod isolation, and UTF-8 file output. Locks in the
+    // format that ModCrashReporter embeds before any log/report-format refactor. Uses
+    // GUID-suffixed mod ids (fresh ring per run); all .log files cleaned up in finally.
+    public static HelperTestResult RunLogFormatTests()
+    {
+        var r = new HelperTestResult();
+        var ids = new List<string>();
+        var folder = ModLogger.ResolveLogFolder();
+        try
+        {
+            // 1. Line format: timestamp shape + padded level tag + message.
+            {
+                var id = $"SelfTestLogFmt_{Guid.NewGuid():N}"; ids.Add(id);
+                var log = ModLogger.For(id);
+                log.Info("hello"); log.Warn("watch"); log.Debug("dbg"); log.Error("err");
+                var lines = ModLogger.GetRecentLines(id);
+                if (lines.Count != 4) { r.ErrorMessage = $"expected 4 ring lines, got {lines.Count}"; return r; }
+                if (!HasTimestampPrefix(lines[0]) || !lines[0].Contains("[INFO ] hello")) { r.ErrorMessage = $"info line: \"{lines[0]}\""; return r; }
+                if (!lines[1].Contains("[WARN ] watch")) { r.ErrorMessage = $"warn line: \"{lines[1]}\""; return r; }
+                if (!lines[2].Contains("[DEBUG] dbg")) { r.ErrorMessage = $"debug line: \"{lines[2]}\""; return r; }
+                if (!lines[3].Contains("[ERROR] err")) { r.ErrorMessage = $"error line: \"{lines[3]}\""; return r; }
+                r.StepsPassed.Add("line format: timestamp shape + padded level tags");
+            }
+
+            // 2. Exception join format: TypeName + message.
+            {
+                var id = $"SelfTestLogExc_{Guid.NewGuid():N}"; ids.Add(id);
+                ModLogger.For(id).Error("boom", new InvalidOperationException("the why"));
+                var last = ModLogger.GetRecentLines(id)[^1];
+                if (!last.Contains("| InvalidOperationException: the why")) { r.ErrorMessage = $"exception join: \"{last}\""; return r; }
+                r.StepsPassed.Add("exception join format: TypeName: message");
+            }
+
+            // 3. Ring buffer order: oldest -> newest.
+            {
+                var id = $"SelfTestLogOrder_{Guid.NewGuid():N}"; ids.Add(id);
+                var log = ModLogger.For(id);
+                log.Info("a"); log.Info("b"); log.Info("c");
+                var lines = ModLogger.GetRecentLines(id);
+                if (lines.Count != 3 || !lines[0].EndsWith("] a", StringComparison.Ordinal) || !lines[1].EndsWith("] b", StringComparison.Ordinal) || !lines[2].EndsWith("] c", StringComparison.Ordinal))
+                { r.ErrorMessage = $"ring order: [{string.Join(" | ", lines)}]"; return r; }
+                r.StepsPassed.Add("ring buffer preserves oldest->newest order");
+            }
+
+            // 4. Ring buffer capacity / eviction (cap = 200).
+            {
+                var id = $"SelfTestLogCap_{Guid.NewGuid():N}"; ids.Add(id);
+                var log = ModLogger.For(id);
+                for (var i = 0; i < 250; i++) log.Info($"line{i}");
+                var lines = ModLogger.GetRecentLines(id);
+                if (lines.Count != 200) { r.ErrorMessage = $"ring cap expected 200, got {lines.Count}"; return r; }
+                if (!lines[0].EndsWith("] line50", StringComparison.Ordinal) || !lines[^1].EndsWith("] line249", StringComparison.Ordinal))
+                { r.ErrorMessage = $"eviction: first=\"{lines[0]}\" last=\"{lines[^1]}\""; return r; }
+                r.StepsPassed.Add("ring buffer caps at 200 + evicts oldest");
+            }
+
+            // 5. GetRecentLines is per-mod isolated.
+            {
+                var id1 = $"SelfTestLogA_{Guid.NewGuid():N}"; ids.Add(id1);
+                var id2 = $"SelfTestLogB_{Guid.NewGuid():N}"; ids.Add(id2);
+                ModLogger.For(id1).Info("only-in-1");
+                ModLogger.For(id2).Info("only-in-2");
+                var l1 = ModLogger.GetRecentLines(id1);
+                var l2 = ModLogger.GetRecentLines(id2);
+                if (l1.Count != 1 || !l1[0].Contains("only-in-1") || l1[0].Contains("only-in-2")) { r.ErrorMessage = "GetRecentLines(id1) not isolated"; return r; }
+                if (l2.Count != 1 || !l2[0].Contains("only-in-2")) { r.ErrorMessage = "GetRecentLines(id2) not isolated"; return r; }
+                r.StepsPassed.Add("GetRecentLines isolated per mod id");
+            }
+
+            // 6. File output: UTF-8 append + Environment.NewLine terminator.
+            if (folder == null)
+            {
+                r.StepsPassed.Add("ResolveLogFolder null — log file output check skipped");
+            }
+            else
+            {
+                var id = $"SelfTestLogFile{Guid.NewGuid():N}"; ids.Add(id);
+                var log = ModLogger.For(id);
+                log.Info("fileline1"); log.Info("fileline2");
+                var path = Path.Combine(folder, id + ".log");
+                if (!File.Exists(path)) { r.ErrorMessage = $"log file not written at {path}"; return r; }
+                var text = File.ReadAllText(path, System.Text.Encoding.UTF8);
+                if (!text.Contains("fileline1") || !text.Contains("fileline2")) { r.ErrorMessage = "log file missing expected lines"; return r; }
+                if (!text.Contains("fileline1" + System.Environment.NewLine)) { r.ErrorMessage = "log file not Environment.NewLine-terminated"; return r; }
+                r.StepsPassed.Add("log file: UTF-8 append + Environment.NewLine terminator");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+        finally
+        {
+            if (folder != null)
+                foreach (var id in ids)
+                    TryDeleteFile(Path.Combine(folder, id + ".log"));
+        }
+    }
+
+    private static bool HasTimestampPrefix(string line) =>
+        System.Text.RegularExpressions.Regex.IsMatch(line, @"^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} ");
+
     private static string? ResolveCrashReportFolderForTest()
     {
         try

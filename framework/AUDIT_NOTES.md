@@ -478,10 +478,11 @@ Wire-format coverage: EXISTS (ModFrameworkSelfTest.RunWireFormatRoundtripTests +
   Execution status: compiled + behavior-verified by reading ModVoteSession; NOT yet executed in-game (runs via the stress-mod harness; ModVoteSession uses GD.Print which needs the Godot runtime). Upgrade this line to "executed successfully" after the first in-game harness run.
   Unblocks (refactors NOT yet applied): ModVoteSession dead VoteState.Manifest cleanup; VoteCoordinator split planning.
 
-- Finding: No vote-flow/UI regression coverage.
-  Why deferred: not readability work; VoteUI behavior depends on timers, native-dialog fallback, callback ordering, and scene-tree UI state.
-  Fix sketch: add tests/manual harness for native-dialog fallback after retry window, 15s timeout auto-NO, DismissVote no-callback behavior, MouseFilter visible/hidden behavior, and callback dispatch ordering across SubmitVote / OnTimeout / OnNativeDialogCompleted.
-  Re-trigger: before any VoteUI callback/timer/native-dialog refactor (gates the deferred VoteUI Resolve helper extraction).
+- Finding: Vote-flow/UI regression coverage — GAP (intentionally not built; would require fake infrastructure).
+  Underlying vote TALLY logic IS covered (RunVoteTallyTests, fa4c730 — ModVoteSession). What's uncovered is the VoteUI layer: 15s timeout auto-NO, native-dialog fallback after the retry window, DismissVote no-callback behavior, MouseFilter visible/hidden, and resolution dispatch ordering across SubmitVote / OnTimeout / OnNativeDialogCompleted.
+  Why not built: VoteUI is a scene-tree Node driven by SceneTreeTimers (15s + retry) + NativeDialogBridge. Exercising the resolution callbacks synchronously needs either driving the UI (button clicks) or faking the timers/native-dialog — fake infrastructure, which the coverage phase deliberately avoided. Recorded as a gap rather than faked.
+  Fix sketch: a UI/timer/native-dialog test harness (drive SceneTreeTimer advance + a stub DialogUI) OR a manual in-game test checklist.
+  Re-trigger: before any VoteUI callback/timer/native-dialog refactor (gates the deferred VoteUI Resolve helper extraction); build the harness first.
 
 - Finding: No Pratfall API contract verification / Cecil sweep.
   Why deferred: infrastructure verification, not readability work.

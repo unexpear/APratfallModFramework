@@ -30,7 +30,7 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [17.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
     - [17.6 `GameplayTags.*` (40)](#gameplaytags-40)
     - [17.7 `Constants.EventId*` (57)](#constantseventid-57)
-    - [17.8 Entity hierarchy & `IEntity` (23 entities, 184 component-accessors)](#entity-hierarchy--ientity)
+    - [17.8 Entity hierarchy & `IEntity` (24 entities, 184 component-accessors)](#entity-hierarchy--ientity)
     - [17.9 `IComponent` implementors (184)](#icomponent-implementors-184)
     - [17.10 Public interfaces (13)](#public-interfaces-13)
     - [17.11 `res://` path conventions](#res-path-conventions)
@@ -395,6 +395,8 @@ public static class ModEntry
 
 Pratfall publishes events via `GameEventBus.SendEvent<T>(GameplayTag tag, T eventData)` where `T` implements `IGameEvent`. The bus doesn't filter — every subscriber sees every event. Filter inside your handler.
 
+**You don't need `GameEventBus` for your mod's own logic.** It exists mainly so the game's stats / achievements can react to gameplay without hard coupling (per Robert, #mod-dev). Use it to *react to events the game fires* — like the player-death example below — but for your mod's own internal control flow, just call your own method directly rather than routing through the bus.
+
 **Use the pre-defined `GameplayTags` static class for the tag reference** — Pratfall ships ~40 named `GameplayTag` constants (loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor). `GameplayTag.Equals` compares by `.Tag` string, so an Equals check against `GameplayTags.X` always works.
 
 ```csharp
@@ -478,7 +480,7 @@ public static class ModEntry
             GD.Print("[MyMod] no HUD yet — toast deferred to next level load");
             return;
         }
-        // Real signature: Show(string message, double durationSeconds, bool playSound)
+        // Real signature: Show(string message, double duration, bool playSound)
         toaster.Show("MyMod loaded!", 3.0, playSound: true);
     }
 }
@@ -712,7 +714,7 @@ Key facts:
 
 `NetworkEventManager.SendEvent<T>` and `NetworkFrameEvent.GetEvent<T>` are constrained `where T : INetworkEvent`, so **your payload type must implement `INetworkEvent`** — a `Serialize(ByteBufferWriter)` and a `Deserialize(ByteBufferReader)` that write/read your fields in the *same order*. The receive handler signature is `void (ushort eventId, NetworkFrameEvent eventData)`; the `eventId` is not the payload — read it with `eventData.GetEvent<T>()`. Sender identity is **not** exposed to the handler, so embed it in the payload if you need it.
 
-**`SendEvent` does NOT loop back to the sender (Cecil-verified — it only serializes the payload onto the outgoing frame, it never invokes the local handler).** If the host calls `SendEvent`, only the *other* players' `OnNetworkEventReceived` fires — the host's does not. Same for a client: it won't receive its own event. So don't put your state-change logic *only* inside `OnNetworkEventReceived` — factor it into a shared `Apply…` method that the **sender calls locally right after `SendEvent`** and that **receivers call from the handler**. (`GameEventBus` is a separate, local pub/sub system and does not have this caveat.) The whole block below is verified to compile against the current build.
+**`SendEvent` does NOT loop back to the sender — this holds whether you call it on `Network.EventManager` or on a `NetworkComponent` (Cecil-verified: both paths only serialize the payload onto the outgoing frame; neither invokes the local handler).** If the host calls `SendEvent`, only the *other* players' `OnNetworkEventReceived` fires — the host's does not. Same for a client: it won't receive its own event. So don't put your state-change logic *only* inside `OnNetworkEventReceived` — factor it into a shared `Apply…` method that the **sender calls locally right after `SendEvent`** and that **receivers call from the handler**. (`GameEventBus` is a separate, local pub/sub system and does not have this caveat.) The whole block below is verified to compile against the current build.
 
 ```csharp
 using Godot;
@@ -1225,7 +1227,7 @@ GameModeManager, etc.)            DynamicParticleManager,
                                   CharacterEditorCamera, etc.)
 ```
 
-Concrete entities (23 total, Cecil-counted):
+Concrete entities (24 total, Cecil-counted):
 - `NodeEntity`, `Node3DEntity`, `RigidBody3DEntity`, `StaticBody3DEntity` — base classes
 - `Player` (extends `RigidBody3DEntity`) — **the main thing mods care about**
 - `WorldEntity`, `YarnBallEntity` — world-root entities
@@ -1316,7 +1318,7 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 ### Public interfaces (13)
 
 - `IComponent` — every component implements this. 184 implementors (see above).
-- `IEntity` — every entity implements this. 23 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IEntity` — every entity implements this. 24 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
 - `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
 - `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.

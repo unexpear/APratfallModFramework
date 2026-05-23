@@ -29,7 +29,7 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [17.4 Configs & Settings (26)](#configs--settings-26)
     - [17.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
     - [17.6 `GameplayTags.*` (40)](#gameplaytags-40)
-    - [17.7 `Constants.EventId*` (56)](#constantseventid-56)
+    - [17.7 `Constants.EventId*` (57)](#constantseventid-57)
     - [17.8 Entity hierarchy & `IEntity` (23 entities, 184 component-accessors)](#entity-hierarchy--ientity)
     - [17.9 `IComponent` implementors (184)](#icomponent-implementors-184)
     - [17.10 Public interfaces (13)](#public-interfaces-13)
@@ -165,7 +165,7 @@ public static class ModEntry
 
 **Unload is cooperative, not forced.** Disabling a mod runs your `ModDestroy` and asks the runtime to unload the `AssemblyLoadContext`, but the runtime CANNOT actually free the assembly while anything still references it. Things that will silently keep your mod alive in memory after disable:
 
-- **Static event subscriptions you didn't unsubscribe** — `GameEventBus.OnGameEventReceived += handler` without a matching `-=` (also `SavegameManager.OnGameWillSave`, `Network.Instance.EventManager.OnNetworkEventReceived`, etc.)
+- **Static event subscriptions you didn't unsubscribe** — `GameEventBus.OnGameEventReceived += handler` without a matching `-=` (also `SavegameManager.OnGameWillSave`, `Network.EventManager.OnNetworkEventReceived`, etc.)
 - **Background threads / `Task.Run` that's still running** — pinned to your assembly via captured `this`
 - **Harmony patches you didn't `UnpatchAll`** — patched MethodInfo objects retain references to your patch methods
 - **Cached `Type` / `MethodInfo` / `Delegate` references** held by game-side dictionaries (e.g. type caches in `Newtonsoft.Json` / `System.Text.Json`)
@@ -484,7 +484,7 @@ public static class ModEntry
 }
 ```
 
-For a toast that all players in a multiplayer lobby see, wrap the call in a `Network.Instance.EventManager.SendEvent(...)` broadcast on `Constants.EventIdShowToast = 138` instead — the game already handles that event-id and pops the toast on every receiver.
+For a toast that all players in a multiplayer lobby see, wrap the call in a `Network.EventManager.SendEvent(...)` broadcast on `Constants.EventIdShowToast = 138` instead — the game already handles that event-id and pops the toast on every receiver.
 
 Gotchas:
 - Queued internally — calling `Show` rapidly queues messages; they play in order, not simultaneously.
@@ -567,7 +567,7 @@ public static class ModEntry
         // SpawnNetworkPrefab returns a failure result. Pratfall doesn't currently
         // expose a mod-friendly NetworkPrefabsConfig registration API — content
         // mods that need replicated spawn need framework-helper support.
-        var componentMgr = Network.Instance?.ComponentManager;
+        var componentMgr = Network.ComponentManager;
         if (componentMgr == null) return;
         var result = componentMgr.SpawnNetworkPrefab(_propScene, Game.RootNode);
         // result.Node is the spawned root, result.Status indicates success/failure.
@@ -590,7 +590,7 @@ Gotchas:
 
 ## Recipe: React to level load
 
-Pratfall has no public `OnSceneLoaded` event on `SceneManager`. The way to react to "a level just finished loading" from vanilla is to subscribe to `Network.Instance.EventManager.OnNetworkEventReceived` and filter for the loaded-level event id.
+Pratfall has no public `OnSceneLoaded` event on `SceneManager`. The way to react to "a level just finished loading" from vanilla is to subscribe to `Network.EventManager.OnNetworkEventReceived` and filter for the loaded-level event id.
 
 ```csharp
 using Godot;
@@ -601,7 +601,7 @@ public static class ModEntry
 
     public static void ModInit()
     {
-        var mgr = Network.Instance?.EventManager;
+        var mgr = Network.EventManager;
         if (mgr == null)
         {
             GD.PrintErr("[MyMod] Network.EventManager not ready");
@@ -622,7 +622,7 @@ public static class ModEntry
 
     public static void ModDestroy()
     {
-        var mgr = Network.Instance?.EventManager;
+        var mgr = Network.EventManager;
         if (_sub != null && mgr != null)
             mgr.OnNetworkEventReceived -= _sub;
         _sub = null;
@@ -631,15 +631,15 @@ public static class ModEntry
 ```
 
 Gotchas:
-- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-56) table.
-- `Network.Instance.EventManager` is **the** subscription target — not a static `NetworkEventManager` class. The events fire whether you're host, client, or singleplayer.
+- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-57) table.
+- `Network.EventManager` is **the** subscription target — a **static property** that returns the live `NetworkEventManager` instance (use `Network.EventManager`, never `Network.Instance.EventManager`; every `Network.*` manager is a static accessor). The events fire whether you're host, client, or singleplayer.
 - The `NetworkFrameEvent` payload exposes `EventId`, `TargetId`, and `Data` (the raw bytes). For loaded-level you don't need the payload; for other events, call `ev.GetEvent<YourEventType>()` to deserialize.
 
 ## Recipe: Multiplayer patterns
 
-> **These are basic patterns, not a complete sync protocol.** A host check and a late-join hook do NOT by themselves make a mod multiplayer-safe. Pratfall has a two-layer network stack (low-level frame messages + high-level tagged events) and the safer path for any mod that changes gameplay rules, saved state, inventory, drops, or authority is to build explicit per-mod sync via `Network.Instance.EventManager.SendEvent` with a custom event id and sender identity embedded in the payload. If you haven't built that, treat your mod as **"all players need this mod installed and enabled"** and say so in your README — don't rely on host-only logic working invisibly for clients. The decoded protocol map (local research notes) covers the full stack; the recipes below cover only the entry-level patterns.
+> **These are basic patterns, not a complete sync protocol.** A host check and a late-join hook do NOT by themselves make a mod multiplayer-safe. Pratfall has a two-layer network stack (low-level frame messages + high-level tagged events) and the safer path for any mod that changes gameplay rules, saved state, inventory, drops, or authority is to build explicit per-mod sync via `Network.EventManager.SendEvent` with a custom event id and sender identity embedded in the payload. If you haven't built that, treat your mod as **"all players need this mod installed and enabled"** and say so in your README — don't rely on host-only logic working invisibly for clients. The decoded protocol map (local research notes) covers the full stack; the recipes below cover only the entry-level patterns.
 
-Vanilla Pratfall doesn't have a single `IsHost` shortcut — host/client identity lives on `Network.Instance.LobbyManager`. The patterns below cover the four things multiplayer mods always need to do.
+Vanilla Pratfall doesn't have a single `IsHost` shortcut — host/client identity lives on `Network.LobbyManager`. The patterns below cover the four things multiplayer mods always need to do.
 
 ```csharp
 using Godot;
@@ -648,7 +648,7 @@ public static class ModEntry
 {
     public static void ModInit()
     {
-        var lobby = Network.Instance?.LobbyManager;
+        var lobby = Network.LobbyManager;
         if (lobby == null)
         {
             // Singleplayer or pre-lobby — Network isn't up. No-op.
@@ -661,19 +661,19 @@ public static class ModEntry
     }
 
     private static bool IsHost()
-        => Network.Instance?.LobbyManager?.IsLobbyOwner ?? false;
+        => Network.LobbyManager?.IsLobbyOwner ?? false;
 
     private static bool IsSingleplayer()
-        => Network.Instance?.LobbyManager?.IsSingleplayerLobby ?? true;
+        => Network.LobbyManager?.IsSingleplayerLobby ?? true;
 
     private static void OnMemberJoined(INetworkLobbyMember member)
     {
         if (!IsHost()) return;  // only the host replays state to new joiners
-        // Send mod state to the joiner via Network.Instance.EventManager.SendEvent
-        // with a custom eventId outside 100–153 and 230–231 to avoid collisions
+        // Send mod state to the joiner via Network.EventManager.SendEvent
+        // with a custom eventId outside 100–154 and 230–231 to avoid collisions
         // (see the Constants.EventId* table for the used range).
         // const ushort MyModStateSyncId = 50000;
-        // Network.Instance.EventManager.SendEvent(MyModStateSyncId, mySnapshot,
+        // Network.EventManager.SendEvent(MyModStateSyncId, mySnapshot,
         //     NetworkMessageSendOption.Reliable, "MyMod.StateSync");
         GD.Print($"[MyMod] new member joined (index={member.Index}); replaying state");
     }
@@ -685,7 +685,7 @@ public static class ModEntry
 
     public static void ModDestroy()
     {
-        var lobby = Network.Instance?.LobbyManager;
+        var lobby = Network.LobbyManager;
         if (lobby == null) return;
         lobby.OnMemberJoined -= OnMemberJoined;
         lobby.OnMemberLeft   -= OnMemberLeft;
@@ -694,18 +694,69 @@ public static class ModEntry
 ```
 
 Key facts:
-- **Host check:** `Network.Instance.LobbyManager.IsLobbyOwner` (bool property on `NetworkLobbyManagerBase`). There is **no** `Network.IsHost` shortcut — that's invented and doesn't exist.
-- **Singleplayer check:** `Network.Instance.LobbyManager.IsSingleplayerLobby`. Always true for offline play even though `Network` itself is still up.
-- **Local member identity:** `Network.Instance.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
-- **All members:** `Network.Instance.LobbyManager.LobbyMembers` (List).
+- **Host check:** `Network.LobbyManager.IsLobbyOwner` (bool property on `NetworkLobbyManagerBase`). There is **no** `Network.IsHost` shortcut — that's invented and doesn't exist.
+- **Singleplayer check:** `Network.LobbyManager.IsSingleplayerLobby`. Always true for offline play even though `Network` itself is still up.
+- **Local member identity:** `Network.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
+- **All members:** `Network.LobbyManager.LobbyMembers` (List).
 - **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<INetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
-- **Custom network event ids:** pick anything outside `100–153` (gameplay events) and `230–231` (stats events) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
+- **Custom network event ids:** pick anything outside `100–154` (gameplay events) and `230–231` (stats events) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
 - **README compatibility tag:** mod authors in comparable communities (Risk of Rain 2, Lethal Company, REPO) self-tag mods as one of:
   - **Client-side only** — visual / UI only; the host doesn't need your mod, lobby members with or without it are compatible
   - **Host-only** — only the host runs the logic; clients are unaffected
   - **All players need this** — protocol-level changes; mismatched lobbies break in subtle ways
 
   Pratfall's mod framework can negotiate this automatically when both sides have it, but vanilla mods should at least *declare* it in their README so players know what to expect.
+
+### Custom network events — the payload must implement `INetworkEvent`
+
+`NetworkEventManager.SendEvent<T>` and `NetworkFrameEvent.GetEvent<T>` are constrained `where T : INetworkEvent`, so **your payload type must implement `INetworkEvent`** — a `Serialize(ByteBufferWriter)` and a `Deserialize(ByteBufferReader)` that write/read your fields in the *same order*. The receive handler signature is `void (ushort eventId, NetworkFrameEvent eventData)`; the `eventId` is not the payload — read it with `eventData.GetEvent<T>()`. Sender identity is **not** exposed to the handler, so embed it in the payload if you need it. (The whole block below is verified to compile against the current build.)
+
+```csharp
+using Godot;
+
+// Payload — must implement INetworkEvent.
+public class MyModState : INetworkEvent
+{
+    public int HolderId;
+    public void Serialize(ByteBufferWriter writer) { writer.Write(HolderId); }
+    public void Deserialize(ByteBufferReader reader) { HolderId = reader.ReadInt32(); }
+}
+
+public static class ModEntry
+{
+    private const ushort MyEventId = 50000;   // outside the game's 100–154 / 230–231 range
+
+    public static void ModInit()
+    {
+        // Managers are STATIC accessors; the manager is null until the network is up.
+        var mgr = Network.EventManager;
+        if (mgr != null) mgr.OnNetworkEventReceived += OnNetEvent;
+    }
+
+    public static void ModDestroy()
+    {
+        var mgr = Network.EventManager;
+        if (mgr != null) mgr.OnNetworkEventReceived -= OnNetEvent;   // always unsubscribe
+    }
+
+    private static void OnNetEvent(ushort eventId, NetworkFrameEvent eventData)
+    {
+        if (eventId != MyEventId) return;
+        MyModState state = eventData.GetEvent<MyModState>();
+        GD.Print($"[MyMod] holder = {state.HolderId}");
+    }
+
+    // Host-authoritative: host decides + broadcasts, clients mirror.
+    public static void HostBroadcast(int holderId)
+    {
+        if (!(Network.LobbyManager?.IsLobbyOwner ?? false)) return;     // host only
+        Network.EventManager?.SendEvent(MyEventId, new MyModState { HolderId = holderId },
+            NetworkMessageSendOption.Reliable, "MyMod.State");
+    }
+}
+```
+
+`ByteBufferWriter` / `ByteBufferReader` expose typed primitives — `Write(int/uint/float/bool/string/byte)` and `ReadInt32() / ReadSingle() / ReadBoolean() / ReadString(defaultValue) / …`. For a real-world payload shape, copy `CustomGameManager.CustomGameSettingsNetworkEvent`.
 
 ## Recipe: Extend a drop pool
 
@@ -903,13 +954,13 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Find the local player's components | `Player.LocalPlayer.<ComponentName>Component` — every component on `IEntity` is a property (see [Entity hierarchy](#entity-hierarchy--ientity)) |
 | React to a save | `SavegameManager.OnGameWillSave` / `OnGameDidSave` ([recipe](#recipe-persist-mod-data)) |
 | React to a player dying | Subscribe `GameEventBus.OnGameEventReceived` and compare `tag.Equals(GameplayTags.Stats_Gameplay_Player_Death)` ([recipe](#recipe-listen-to-game-events)) |
-| Send a custom network message | `Network.Instance.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-56). `Network.Instance.EventManager` is an instance, not a static class |
+| Send a custom network message | `Network.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — `T` must implement `INetworkEvent`; pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-57). `Network.EventManager` is a static property returning the live instance |
 | Add a HUD prompt ("Press [A]") | `ButtonPrompBarController.Instance.AddButtonPrompt(...)` ([recipe](#recipe-show-hud-button-hints)) |
 | Add an in-game language | Drop a JSON in `<userData>/localization/` ([recipe](#recipe-add-a-language)) |
 | Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
 | Add a custom `Node` / `Resource` type | Set `AddAssemblyToGodot: true` in manifest ([recipe](#recipe-custom-godot-types)) |
 | Change a game mode / level / color | **DON'T** — those arrays are save-coupled by index. See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
-| Spawn an entity from code | `ScenePoolManager.Instance.Instantiate(packedScene, parent)` for local-only, `Network.Instance.ComponentManager.SpawnNetworkPrefab(prefab, parent)` for replicated ([recipe](#recipe-spawn-an-entity)) |
+| Spawn an entity from code | `ScenePoolManager.Instance.Instantiate(packedScene, parent)` for local-only, `Network.ComponentManager.SpawnNetworkPrefab(prefab, parent)` for replicated ([recipe](#recipe-spawn-an-entity)) |
 | Hook game ticks | Override `_Process` / `_PhysicsProcess` on a `Node` you parent under `Game.RootNode`, or use `MainThreadDispatcher.Instance.Enqueue(Action)` for one-shot off-thread → main-thread dispatch |
 | Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
 | Know which config is "the game settings" | `Game.Config` — but it's a struct with `init`-only setters, you can read but not mutate |
@@ -1072,7 +1123,7 @@ Mod-relevant public events (filtered to public `add_*` methods on Pratfall's own
 | `OnGameDidSave` | `SavegameManager` (static) | `SaveDataCallback ()` | Fires after save |
 | `OnLocalChanged` | `LocalizationManager` (static) | `LocaleChanged (string locale)` | Active language changed — refresh any cached translated strings |
 | `OnGameEventReceived` | `GameEventBus` (static) | `GameEventReceived (GameplayTag, IGameEvent)` | Game-wide pub/sub ([recipe](#recipe-listen-to-game-events)) |
-| `OnNetworkEventReceived` | `Network.Instance.EventManager` (instance) | `NetworkEventReceived (...)` | Low-level network event — `Constants.EventId*` IDs. `Network.Instance` is null until the Network singleton is `_Ready`; gate subscription on a non-null check |
+| `OnNetworkEventReceived` | `Network.EventManager` (static prop → instance) | `NetworkEventReceived(ushort eventId, NetworkFrameEvent eventData)` | Low-level network event — `Constants.EventId*` IDs. `Network.EventManager` is null until the network is `_Ready`; gate subscription on a non-null check |
 | `OnGetNetworkSpawnParent` | `NetworkComponentManager` | `NetworkSpawnParentCallback` | Override the parent node for spawned networked objects |
 | `OnGcTiming` | `GcTimingListener` | `Action<GcTiming>` | GC-pause measurements (perf instrumentation) |
 | `OnValueChanged` / `OnRemoteValueChanged` | `NetworkVar<T>` / `NetworkVarNode<T>` | `Action<T>` | Per-instance — fires when a replicated value changes |
@@ -1106,9 +1157,9 @@ There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLo
 **Harvestables** (ground-resource categories)
 - `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
 
-### `Constants.EventId*` (56)
+### `Constants.EventId*` (57)
 
-`ushort` (System.UInt16) constants holding numeric event IDs (`Constants.EventIdJump = 129`). Used by `Network.Instance.EventManager.SendEvent(UInt16 eventId, T evt, NetworkMessageSendOption opt, string eventIdName)` for **low-level network messages** — the `eventIdName` parameter is a separate human-readable debug-name string, NOT the event id itself. Different system from `GameEventBus` / `GameplayTags` — don't mix them.
+`ushort` (System.UInt16) constants holding numeric event IDs (`Constants.EventIdJump = 129`). Used by `Network.EventManager.SendEvent(UInt16 eventId, T evt, NetworkMessageSendOption opt, string eventIdName)` for **low-level network messages** — the `eventIdName` parameter is a separate human-readable debug-name string, NOT the event id itself. Different system from `GameEventBus` / `GameplayTags` — don't mix them.
 
 Sorted by numeric ID:
 
@@ -1142,8 +1193,9 @@ Sorted by numeric ID:
 | 125 | `EventIdPickaxeAction` | 153 | `EventIdRequestMarkLateJoin` |
 | 126 | `EventIdEnemySpit` | 230 | `EventIdGameModeChanged` |
 | 127 | `EventIdGenerateBranch` | 231 | `EventIdSubmitSpeedrunTime` |
+| 154 | `EventIdDropInteractable` |  |  |
 
-Used range: 100–153 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
+Used range: 100–154 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
 
 ### Entity hierarchy & `IEntity`
 
@@ -1251,7 +1303,7 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 - `IComponent` — every component implements this. 184 implementors (see above).
 - `IEntity` — every entity implements this. 23 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
-- `INetworkEvent` — payload type for `Network.Instance.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
+- `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
 - `INetworkMessage` — base for `INetworkEvent`.
 - `INetworkLobby` / `INetworkLobbyMember` — multiplayer-lobby abstractions (Steam vs EOS hide behind these).
 - `INetworkVoicePlayer` — voice-chat abstraction.
@@ -1351,7 +1403,7 @@ Before posting a mod for others:
 - **Use Tim's [`quad-head/pratfall-example-mod`](https://github.com/quad-head/pratfall-example-mod) as the known-good baseline**, not your own first attempt. If the example mod loads cleanly on the same Pratfall build and install path but yours doesn't, assume the problem is in your mod first, not the loader. (Mods from this repo's `sample-mods/` folder work for framework development but should NOT be the only proof that the vanilla loader path works — they share too much surface with the framework codebase. Game version, install path, launch flags, and enabled state still matter; rule those out before blaming the loader.)
 - When the Pratfall community has enough public mods, test alongside the **3 most-used mods** available for the same Pratfall build. Conflicts you don't expect show up in 3 minutes of play.
 - Test on **both Steam-installed paths** if you have a friend who installs Pratfall to `D:\` instead of `C:\Program Files (x86)\Steam`. Hard-coded paths are a classic break.
-- Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.Instance.LobbyManager` properly — and per the [multiplayer-patterns disclaimer](#recipe-multiplayer-patterns), if you don't have explicit per-mod state sync, the lobby is your only way to know whether host-vs-client divergence ships.
+- Test in a **2-player lobby** if your mod has any multiplayer behavior. Singleplayer doesn't exercise `Network.LobbyManager` properly — and per the [multiplayer-patterns disclaimer](#recipe-multiplayer-patterns), if you don't have explicit per-mod state sync, the lobby is your only way to know whether host-vs-client divergence ships.
 
 ## Distribution conventions
 
@@ -1544,9 +1596,9 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 - **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-17.)
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
 - **Don't mutate save-coupled arrays.** `PlayerColorsConfig.Colors`, `GameModeManager.Modes`, `LevelManager.LevelPrefabs` are all indexed by save-game data — mutating them invalidates existing player saves.
-- **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.Instance.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
+- **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
 - **`Game.Config` is a value-type struct with `init`-only setters.** Mods cannot mutate config flags at runtime — not even via reflection (the `modreq(IsExternalInit)` modifier enforces this at the C# language level, and even reflection-based hacks would write to a copy because `Game.Config` returns the struct by value). If `Game.Config.AllowUserLocalization == false` on the shipped build, your mod can't flip it; either ship a JSON-only locale that side-loads via `TranslationServer.AddTranslation` directly, or wait for the dev to enable the flag.
-- **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub — `GameEventBus` IS a singleton with `Instance`, but the event itself is static). `Constants.EventId*` are `const ushort` numeric IDs (values like `129`, `115`) for `Network.Instance.EventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel — `NetworkEventManager` is an *instance* accessed through the `Network` singleton, NOT a static class). Don't mix them — subscribing to a `GameEventBus` handler hoping a numeric event id will match would match nothing.
+- **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub — `GameEventBus` IS a singleton with `Instance`, but the event itself is static). `Constants.EventId*` are `const ushort` numeric IDs (values like `129`, `115`) for `Network.EventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel — `NetworkEventManager` is an *instance* accessed through the `Network` singleton, NOT a static class). Don't mix them — subscribing to a `GameEventBus` handler hoping a numeric event id will match would match nothing.
 - **`ModEntry` class name is exact.** Pratfall uses `assembly.GetType("ModEntry")` — case-sensitive, no namespace.
 - **`ModInit` / `ModDestroy` reentrance.** Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent: every subscription paired with an unsubscribe, every array growth paired with a shrink.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's `ModEntry` — the GC needs to collect your assembly's load context.

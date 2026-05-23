@@ -33,6 +33,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Shared backup-safety logic, single source of truth with the CLI patcher. -->
+    <Compile Include="..\Shared\BackupSafety.cs" Link="BackupSafety.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\PratfallModFramework\PratfallModFramework.csproj">
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <Private>false</Private>

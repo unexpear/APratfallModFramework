@@ -13,4 +13,9 @@
     <PackageReference Include="Mono.Cecil" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Shared backup-safety logic, single source of truth with the Installer. -->
+    <Compile Include="..\Shared\BackupSafety.cs" Link="BackupSafety.cs" />
+  </ItemGroup>
+
 </Project>

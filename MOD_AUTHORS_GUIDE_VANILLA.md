@@ -710,50 +710,62 @@ Key facts:
 
 ### Custom network events — the payload must implement `INetworkEvent`
 
-`NetworkEventManager.SendEvent<T>` and `NetworkFrameEvent.GetEvent<T>` are constrained `where T : INetworkEvent`, so **your payload type must implement `INetworkEvent`** — a `Serialize(ByteBufferWriter)` and a `Deserialize(ByteBufferReader)` that write/read your fields in the *same order*. The receive handler signature is `void (ushort eventId, NetworkFrameEvent eventData)`; the `eventId` is not the payload — read it with `eventData.GetEvent<T>()`. Sender identity is **not** exposed to the handler, so embed it in the payload if you need it. (The whole block below is verified to compile against the current build.)
+`NetworkEventManager.SendEvent<T>` and `NetworkFrameEvent.GetEvent<T>` are constrained `where T : INetworkEvent`, so **your payload type must implement `INetworkEvent`** — a `Serialize(ByteBufferWriter)` and a `Deserialize(ByteBufferReader)` that write/read your fields in the *same order*. The receive handler signature is `void (ushort eventId, NetworkFrameEvent eventData)`; the `eventId` is not the payload — read it with `eventData.GetEvent<T>()`. Sender identity is **not** exposed to the handler, so embed it in the payload if you need it.
+
+**`SendEvent` does NOT loop back to the sender (Cecil-verified — it only serializes the payload onto the outgoing frame, it never invokes the local handler).** If the host calls `SendEvent`, only the *other* players' `OnNetworkEventReceived` fires — the host's does not. Same for a client: it won't receive its own event. So don't put your state-change logic *only* inside `OnNetworkEventReceived` — factor it into a shared `Apply…` method that the **sender calls locally right after `SendEvent`** and that **receivers call from the handler**. (`GameEventBus` is a separate, local pub/sub system and does not have this caveat.) The whole block below is verified to compile against the current build.
 
 ```csharp
 using Godot;
 
-// Payload — must implement INetworkEvent.
-public class MyModState : INetworkEvent
-{
-    public int HolderId;
-    public void Serialize(ByteBufferWriter writer) { writer.Write(HolderId); }
-    public void Deserialize(ByteBufferReader reader) { HolderId = reader.ReadInt32(); }
-}
-
 public static class ModEntry
 {
-    private const ushort MyEventId = 50000;   // outside the game's 100–154 / 230–231 range
+    private const ushort CrownEventId = 50000;   // outside the game's 100–154 / 230–231 range
 
     public static void ModInit()
     {
         // Managers are STATIC accessors; the manager is null until the network is up.
-        var mgr = Network.EventManager;
-        if (mgr != null) mgr.OnNetworkEventReceived += OnNetEvent;
+        if (Network.EventManager != null)
+            Network.EventManager.OnNetworkEventReceived += OnNetEvent;
     }
 
     public static void ModDestroy()
     {
-        var mgr = Network.EventManager;
-        if (mgr != null) mgr.OnNetworkEventReceived -= OnNetEvent;   // always unsubscribe
+        if (Network.EventManager != null)
+            Network.EventManager.OnNetworkEventReceived -= OnNetEvent;   // always unsubscribe
     }
 
     private static void OnNetEvent(ushort eventId, NetworkFrameEvent eventData)
     {
-        if (eventId != MyEventId) return;
-        MyModState state = eventData.GetEvent<MyModState>();
-        GD.Print($"[MyMod] holder = {state.HolderId}");
+        if (eventId != CrownEventId) return;
+        CrownState state = eventData.GetEvent<CrownState>();
+        ApplyCrownState(state);                  // receivers apply here
     }
 
-    // Host-authoritative: host decides + broadcasts, clients mirror.
-    public static void HostBroadcast(int holderId)
+    // Host-authoritative: host decides, applies locally, then broadcasts.
+    public static void HostAssignCrown(int holderId)
     {
-        if (!(Network.LobbyManager?.IsLobbyOwner ?? false)) return;     // host only
-        Network.EventManager?.SendEvent(MyEventId, new MyModState { HolderId = holderId },
-            NetworkMessageSendOption.Reliable, "MyMod.State");
+        if (Network.LobbyManager == null || Network.EventManager == null) return;
+        if (!Network.LobbyManager.IsLobbyOwner) return;                  // host only
+
+        var state = new CrownState { HolderId = holderId };
+        ApplyCrownState(state);                  // sender applies locally — SendEvent won't loop back!
+        Network.EventManager.SendEvent(CrownEventId, state, NetworkMessageSendOption.Reliable, "crown");
     }
+
+    // Shared by both paths: receivers call it from OnNetEvent, the sender calls it after SendEvent.
+    private static void ApplyCrownState(CrownState state)
+    {
+        GD.Print($"[CrownMod] crown holder = {state.HolderId}");
+        // move/update your marker here
+    }
+}
+
+// Payload — must implement INetworkEvent.
+public class CrownState : INetworkEvent
+{
+    public int HolderId;
+    public void Serialize(ByteBufferWriter writer) { writer.Write(HolderId); }
+    public void Deserialize(ByteBufferReader reader) { HolderId = reader.ReadInt32(); }
 }
 ```
 

@@ -570,7 +570,8 @@ public static class ModEntry
         var componentMgr = Network.ComponentManager;
         if (componentMgr == null) return;
         var result = componentMgr.SpawnNetworkPrefab(_propScene, Game.RootNode);
-        // result.Node is the spawned root, result.Status indicates success/failure.
+        // result.RootNode is the spawned node; result.IsValid() is the success check.
+        if (result.IsValid()) _spawned = result.RootNode;
     }
 
     public static void ModDestroy()
@@ -862,8 +863,8 @@ What's NOT in the PCK:
 
 Typical use cases for unpacking:
 
-- Find the `res://` path of a vanilla scene or texture you want to swap out via `ResourceLoader.LoadOverride(...)` or by mounting your own PCK at the same path.
-- Read a Pratfall `.tres` config to understand its structure before extending it (e.g., `DropPoolConfig`, `LevelConfig`).
+- Find the `res://` path of a vanilla scene or texture you want to swap out by mounting your own PCK at the same path (the supported override mechanism — see [Overriding Pratfall's own assets](#overriding-pratfalls-own-assets)).
+- Read a Pratfall `.tres` config to understand its structure before extending it (e.g., `GameModeBaseConfig`, `BiomeConfig`, `MaterialConfig`).
 - Locate the right `AudioStream` / `SpriteFrames` resource path to reference in your mod's code.
 
 ### Packing your mod's assets into a `.pck`
@@ -967,7 +968,7 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 
 ### Singletons (73)
 
-A *singleton* here is a public class with a static `Instance` field or static-getter property. Access via `<Name>.Instance.<Member>`. Many are HUD/UI controllers that are **null on the main menu** — they only exist while a gameplay scene is loaded.
+A *singleton* here is a public class with a static `Instance` field or static-getter property. Access via `<Name>.Instance.<Member>`. Many are HUD/UI controllers that are **null on the main menu** — they only exist while a gameplay scene is loaded. (Generic/internal infrastructure singletons such as `NodeCounter<T>` are omitted — they're not author-facing.)
 
 **Game state & flow**
 - `GameController` — top-level game state, level loading orchestration
@@ -1011,6 +1012,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `PlayerCompassHudController` — off-screen player markers
 - `PlayerEmoteUIController` — emote wheel
 - `ChaosTricksManager` — random-event ("chaos trick") scheduler
+- `CrowdControlManager` — Crowd Control integration
 
 **UI controllers** (most are null until the relevant screen is open)
 - `ButtonPrompBarController` — HUD prompt bar (null on main menu)
@@ -1079,7 +1081,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `InputSettingsHelper` — keybind/gamepad-mapping IO
 - `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
 - `LifecycleHelper` — lifecycle-handler registration helpers
-- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(Action onComplete)`, `LoadedMods` (List<ModManifest>), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mod folder — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (defined but currently unused per Cecil), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
+- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> of mod folder names), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mod folder — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (defined but currently unused per Cecil), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
 - `NetworkHelper` — common multiplayer helpers
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
@@ -1228,8 +1230,9 @@ var hp = Player.LocalPlayer?.PlayerHealthComponent;
 // MaxFoodValue (UInt16 cap), FoodNormalized / HungerNormalized (0-1 floats),
 // FoodConsumptionPerSecond, HungrySoundThreshold, HungrySound. There is NO
 // CurrentHealth / MaxHealth field — those are on Pratfall's other body
-// (HitPointsComponent etc.). For "fill me up to max food":
-if (hp != null) hp.FoodValue = hp.MaxFoodValue;
+// (HitPointsComponent etc.). FoodValue is read-only — use AddFood to change it.
+// For "fill me up to max food":
+if (hp != null) hp.AddFood((ushort)(hp.MaxFoodValue - hp.FoodValue));
 
 // Same pattern for any component on any entity:
 var flare = Player.LocalPlayer?.ThrowFlareComponent;
@@ -1304,7 +1307,7 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 - `IEntity` — every entity implements this. 23 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
 - `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
-- `INetworkMessage` — base for `INetworkEvent`.
+- `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.
 - `INetworkLobby` / `INetworkLobbyMember` — multiplayer-lobby abstractions (Steam vs EOS hide behind these).
 - `INetworkVoicePlayer` — voice-chat abstraction.
 - `ILifecycleHandler` — opt into `LifecycleManager`-ordered `_Process` / `_PhysicsProcess` ticks. Most managers implement this.

@@ -58,6 +58,7 @@ public class ModManager : IDisposable
     // checker to evaluate the UNION of local + remote mod sets.
     private readonly Dictionary<string, ModPeerSnapshot> _peerSnapshots = new(StringComparer.OrdinalIgnoreCase);
     private ModCompatibilityChecker.Report? _latestCompatibilityReport;
+    private SessionResolutionPlan? _latestSessionPlan;
     // Pairs the user has already resolved (or deferred) this session, so we don't loop
     // re-prompting the same conflict every state change. Key is "sortedA|sortedB".
     private readonly HashSet<string> _conflictPairsHandled = new(StringComparer.OrdinalIgnoreCase);
@@ -580,6 +581,7 @@ public class ModManager : IDisposable
             _networkLayer.BroadcastManifest();
 
         RefreshCompatibilityReport();
+        RefreshSessionResolutionPlan();
     }
 
     private void UnloadAllMods()
@@ -877,6 +879,37 @@ public class ModManager : IDisposable
     }
 
     public ModCompatibilityChecker.Report? GetLatestCompatibilityReport() => _latestCompatibilityReport;
+
+    // P2 (session mod resolver): host-side, compute the session resolution PLAN — the host's
+    // desired/installed mods vs every peer's manifest snapshot — via the pure resolver. This
+    // only computes/caches/exposes the plan; vote execution (P3) and session-scoped apply (P4)
+    // are later phases. Inputs come from sources that already exist: BuildLocalState() and the
+    // _peerSnapshots populated from manifest broadcasts. See SESSION_MOD_RESOLVER_PLAN.md.
+    private void RefreshSessionResolutionPlan()
+    {
+        // Only the host computes the authoritative plan; clients receive its outcome later.
+        if (!_networkLayer.IsLocalHost)
+        {
+            _latestSessionPlan = null;
+            return;
+        }
+
+        try
+        {
+            var plan = SessionModResolver.Resolve(BuildLocalState(), _peerSnapshots.Values.ToList());
+            _latestSessionPlan = plan;
+
+            // Only log when the plan is non-trivial (something disabled or awaiting a vote).
+            if (plan.PendingVotes.Count > 0 || plan.DisabledForSession.Count > 0)
+                GD.Print($"[ModFramework] Session resolver: {plan}");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] RefreshSessionResolutionPlan failed: {ex.Message}");
+        }
+    }
+
+    public SessionResolutionPlan? GetLatestSessionResolutionPlan() => _latestSessionPlan;
 
     // Pure read-only manifest + file listing + declared-patch info. No side effects.
     // For the user-consent "I've reviewed this mod" gate, see ScanMod below.

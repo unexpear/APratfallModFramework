@@ -101,6 +101,8 @@ MyMod/
 </Project>
 ```
 
+**Alternate build path:** if you export via the Godot editor instead of `dotnet build`, the compiled DLL ends up under `<your Godot project>/.godot/mono/temp/bin/`; copy it into your mod folder manually. The csproj `InstallMod` target above is the equivalent for the dotnet-build flow.
+
 **Heads up on the install path.** Pratfall's official `ModManager` looks for mods under `<Pratfall install folder>\mods\` in shipped builds (verified against `ModManager.CreateModDirectory` IL — it calls `OS.GetExecutablePath()` and appends `mods`). The `<userData>/mods` path (under `%APPDATA%\Pratfall\mods`) is **only used when running from the Godot editor** — shipped Pratfall ignores it. If you've seen guides or framework helpers point at AppData, those are framework-specific conventions, not the vanilla loader.
 
 **`manifest.json`** — Pratfall's loader expects PascalCase keys:
@@ -258,6 +260,8 @@ Caveats with the direct-mutation pattern:
 - Many "feels like a component on Player" things are actually `IEntity`-inherited properties that can be null when the specific component instance isn't present. Null-check before dereferencing.
 
 If you genuinely need Harmony patches (transpilers, prefix-with-skip, advanced argument injection), the cleanest path on vanilla is option 1 above. Mods targeting the **Pratfall Mod Framework** instead get a `[ModPatch]` attribute that handles Harmony loading, attribute scanning, and unpatch-on-disable — see [MOD_AUTHORS_GUIDE_FRAMEWORK.md](MOD_AUTHORS_GUIDE_FRAMEWORK.md) for that pattern.
+
+**Alternative — Node in `root.tscn`, no patching.** For simple "re-apply each frame" tweaks, ship a `[GlobalClass] partial class Foo : Node` inside your mod's `root.tscn` and do the work in `_Process`. Robert's [Infinite Flare mod](https://github.com/quad-head/pratfall-infinite-flare-mod) (`FlareModifier.cs`) takes this route — every `_Process` tick it re-sets `Player.LocalPlayer.ThrowFlareComponent.MaxFlares` and `FlareRecoverySeconds`. Relies on the [auto-instantiated `root.tscn`](#auto-instantiated-root-scene-roottscn); no Harmony required. Trade-offs: you redo the work every frame instead of once, and you still own null-checking the entity.
 
 ## Recipe: Add a language
 
@@ -587,6 +591,7 @@ public static class ModEntry
 
 Gotchas:
 - **Replicated spawn requires prefab registration.** `NetworkPrefabsConfig` is loaded from game data and not mod-author-extensible from vanilla today — practically you can only replicate prefabs the game already knows about. Local-only spawn has no such restriction.
+- **Network prefabs are identified by index — registration order must match across clients.** For custom networked prefabs, every client must have the same network prefab registration/order. The network path identifies prefabs by index, so mismatched prefab lists can desync or spawn the wrong thing. (Cecil-verified: `SpawnNetworkPrefab` resolves the scene to a byte index via `NetworkPrefabManager.GetPrefabIndex`, and the receiver instantiates by that index.)
 - `Game.RootNode` is the right parent for "persists across the session"; for "lives for one level", parent under a scene-specific node (e.g. via `SceneManager.Instance.GetLoadedScenes()`).
 - `ScenePoolManager.Instance` is null very early in boot; defer spawning until at least one scene has loaded.
 - `Game.RootNode` is null in the very-early bootstrap window too — your `ModInit` runs after it's set, but be aware.

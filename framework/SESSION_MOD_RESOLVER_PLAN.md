@@ -68,6 +68,83 @@ Host has `RagdollPlus` and `PhysicsRewrite` enabled; they declare mutual conflic
 - Never auto-enable both. Decision: keep one, disable the other for the session (Safe majority vote: which to keep). **[D]** unresolved declared conflict → default to disabling the lower-priority / later-added mod for this session, unless a unanimous override explicitly keeps both.
 - Keeping BOTH despite the declared conflict = UnsafeOverride → unanimous; rejected → one stays disabled.
 
+## Hard policy — P4 (session-scoped apply) + P5 (acquisition / download / install)
+
+> **Core rule:** Lobby votes decide the desired session set. User consent, safety checks, permissions, and storage decide what runs on that user's machine.
+
+This is the gating contract for implementing P4 (apply) and any P5 (acquisition / download / install). It is **not optional, not bypassable.** Record it here before any apply/download behavior is built.
+
+### Hard rules (invariants — never broken)
+
+1. A vote must never force a player to download, install, enable, or run code.
+2. No majority vote can override local user consent.
+3. No automatic download.
+4. No automatic install.
+5. No automatic enable of newly acquired code.
+6. Saved enabled-mod state must not be mutated.
+7. Session enables are temporary only.
+
+### Voting policy (refines §4)
+
+- **Safe / session-shaping decisions** (e.g., `DisableForSession`, which-of-two-to-keep) — **majority** via the existing `ModVoteSession` (default rule).
+- **Unsafe compatibility overrides** — **unanimous** (early-fail on first No, per P3). One No fails the override.
+- "Unsafe" includes:
+  - missing dependency
+  - declared conflict between two would-be-effective mods
+  - major version mismatch
+  - a player is missing a mod the resolved plan would require
+  - force-keeping two mods that declare mutual conflict
+- Failed vote **OR** timeout → safe default = **disable the mod for this session**.
+
+### Personal-consent policy (per player, after the session plan is voted)
+
+Even after the lobby votes the plan, each player is asked individually before anything is downloaded, installed, or enabled on their machine.
+
+**If the voted plan requires a mod the player does not have:**
+- Show that player two options:
+  1. **Download / install** and stay.
+  2. **Leave session.**
+- If they decline → they leave cleanly.
+- The session may continue only if the remaining lobby still satisfies the resolved plan; otherwise the session is renegotiated or aborted.
+
+**If the player already has the mod but it is currently disabled (per their saved preference):**
+- Show that player two options:
+  1. **Enable for this session only.**
+  2. **Leave session.**
+- **Do not mutate their saved enabled-mod preference.** Session enable is in-memory / session-scoped only — restored on session end.
+
+### Local-capability policy (every client, before any download / install / enable)
+
+Before touching the file system or loading new code, the client MUST verify all of:
+
+- enough free disk space (in staging AND final destination)
+- write permission to the mod folder (or staging folder)
+- the download can complete (source reachable, transfer doesn't fail mid-stream)
+- extraction succeeds
+- hash / fingerprint matches the expected value
+- the mod passes the user-check / fingerprint gate (no auto-trust of newly-acquired code)
+- the user has explicitly consented to install + enable
+
+If any check fails (no disk space, permission denied, hash mismatch, etc.):
+- **Do not** install.
+- **Do not** enable.
+- **Do not** write partial files into the live mods folder.
+- Show: 1. Free space / choose another location / retry. 2. Leave session.
+- Clean up temporary download files where possible.
+
+### Staged install flow (the only acceptable path)
+
+```
+download  →  temp staging folder  →  verify  →  user confirms  →  move into mods folder  →  session-enable only
+```
+
+**Never stream directly into the active mods folder.** A failed, cancelled, or partial download must not leave the live mods folder in a broken or partially-installed state. Temp staging is cleaned on failure.
+
+### Relationship to existing scope
+
+- **P4 (apply):** must satisfy every rule above. Session-scoped enable/disable only; restore saved state on session end; no mutation of saved preference.
+- **P5 (acquisition / download / install):** design-captured here; implementation remains deferred per [§9 / "What NOT to build yet"](#9-what-not-to-build-yet) until this policy is wired in. When P5 lands, it MUST follow the staged install flow above.
+
 ## 8. V1 implementation plan (phased; design only)
 
 - **P1 — pure resolver:** `SessionModResolver.Resolve(DesiredHostModSet, inventories, rules) → SessionResolutionPlan`. No network, no UI. Unit-testable; extends the existing ModCompatibilityChecker. **Cheapest + highest-value first slice.**

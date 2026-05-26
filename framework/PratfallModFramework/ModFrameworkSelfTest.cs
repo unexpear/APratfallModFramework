@@ -1261,6 +1261,45 @@ public static class ModFrameworkSelfTest
                 r.StepsPassed.Add("duplicate StartVote is a no-op");
             }
 
+            // 10. Unanimous: all yes passes once every expected voter has voted yes.
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3, rule: SessionVoteRule.Unanimous);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                s.CastVote("v", "c", true);
+                if (outcome != true) { r.ErrorMessage = $"unanimous all-yes expected PASS, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("unanimous all-yes passes");
+            }
+
+            // 11. Unanimous: first No fails EARLY (before all expected votes arrive).
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3, rule: SessionVoteRule.Unanimous);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", false); // <- fails immediately, before "c" votes
+                if (outcome != false) { r.ErrorMessage = $"unanimous first-no expected early FAIL, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("unanimous fails early on first No");
+            }
+
+            // 12. Unanimous: missing votes do NOT resolve (no timeout system — documented gap).
+            {
+                var s = new ModVoteSession();
+                bool? outcome = null;
+                s.OnVoteResolved += (_, passed) => outcome = passed;
+                s.StartVote("v", NewVoteManifest("Mod1"), totalPlayers: 3, rule: SessionVoteRule.Unanimous);
+                s.CastVote("v", "a", true);
+                s.CastVote("v", "b", true);
+                // "c" never votes — outcome stays null. ModVoteSession has no timeout today; if
+                // a deadline mechanism is added later, this test will need an update.
+                if (outcome != null) { r.ErrorMessage = $"unanimous incomplete should not resolve, got {OutcomeText(outcome)}"; return r; }
+                r.StepsPassed.Add("unanimous missing-vote does not resolve (no timeout — documented gap)");
+            }
+
             r.Success = true;
             return r;
         }

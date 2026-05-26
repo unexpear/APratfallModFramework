@@ -33,6 +33,10 @@ public class ModManager : IDisposable
     private readonly ModNetworkLayer _networkLayer = new();
     private readonly ModVoteSession _voteSession = new();
     private readonly ModP2PTransfer _transfer = new();
+    // P3 (session-resolver votes): namespace voteIds with this prefix so session-resolver
+    // votes don't collide with the existing compatibility-vote flow that shares _voteSession.
+    private const string SessionVotePrefix = "session:";
+    private readonly HashSet<string> _activeSessionVoteIds = new(StringComparer.OrdinalIgnoreCase);
     private VoteUI? _voteUI;
     private List<ModManifest> _localMods = new();
     private readonly Dictionary<string, bool> _desiredEnabled = new(StringComparer.OrdinalIgnoreCase);
@@ -902,6 +906,9 @@ public class ModManager : IDisposable
             // Only log when the plan is non-trivial (something disabled or awaiting a vote).
             if (plan.PendingVotes.Count > 0 || plan.DisabledForSession.Count > 0)
                 GD.Print($"[ModFramework] Session resolver: {plan}");
+
+            // P3: drive PendingVotes through ModVoteSession (host-side, Unanimous rule).
+            StartSessionVotesFor(plan);
         }
         catch (Exception ex)
         {
@@ -910,6 +917,97 @@ public class ModManager : IDisposable
     }
 
     public SessionResolutionPlan? GetLatestSessionResolutionPlan() => _latestSessionPlan;
+
+    // P3: for each PendingVote in the just-computed plan, start a Unanimous vote on the shared
+    // ModVoteSession (namespaced via SessionVotePrefix) and broadcast a vote request to peers.
+    // The host casts an implicit Yes immediately (it chose to enable the mod by putting it in
+    // its desired set) so the count semantics match the existing compatibility flow, which uses
+    // ExpectedVotes = ConnectedPlayerCount and the host casts locally. Idempotent: already-active
+    // or already-resolved session voteIds are skipped.
+    private void StartSessionVotesFor(SessionResolutionPlan plan)
+    {
+        if (!_networkLayer.IsLocalHost) return;
+        var localUserId = _networkLayer.LocalUserId;
+        if (string.IsNullOrWhiteSpace(localUserId)) return;
+        var expectedVotes = _networkLayer.ConnectedPlayerCount;
+        if (expectedVotes <= 0) return;
+
+        foreach (var pending in plan.PendingVotes)
+        {
+            var voteId = SessionVotePrefix + pending.ModId;
+            if (!_activeSessionVoteIds.Add(voteId)) continue; // already active
+            if (plan.ApprovedOverrides.Contains(pending.ModId) || plan.RejectedOverrides.Contains(pending.ModId))
+            {
+                _activeSessionVoteIds.Remove(voteId);
+                continue;
+            }
+            var manifest = _localMods.FirstOrDefault(m => string.Equals(m.Id, pending.ModId, StringComparison.OrdinalIgnoreCase));
+            if (manifest == null)
+            {
+                _activeSessionVoteIds.Remove(voteId);
+                continue;
+            }
+
+            _voteSession.StartVote(voteId, manifest, expectedVotes, SessionVoteRule.Unanimous);
+            // Host implicit Yes: the host already opted in by putting this mod in desired — we
+            // don't UI-prompt the host for session votes (they're an automated process). Also
+            // matches existing count semantics (ExpectedVotes includes the host).
+            _voteSession.CastVote(voteId, localUserId, voteYes: true);
+
+            var body = string.IsNullOrWhiteSpace(pending.Reason)
+                ? "Host is asking to enable this mod for the session."
+                : pending.Reason;
+            if (pending.Warnings.Count > 0)
+                body += "\n\n" + string.Join("\n", pending.Warnings.Select(w => "• " + w.Detail));
+
+            var request = new ModVoteRequest
+            {
+                VoteId = voteId,
+                SourceUserId = localUserId,
+                EffectiveMode = manifest.GetEffectiveNetworkMode(),
+                Title = $"Session override: {manifest.Name} {manifest.Version}",
+                Body = body,
+                ExpectedVotes = expectedVotes,
+                Manifest = manifest,
+            };
+            request.Normalize();
+            _networkLayer.BroadcastVoteRequest(request);
+
+            GD.Print($"[ModFramework] Session vote started: {voteId} (Unanimous, expects {expectedVotes})");
+        }
+    }
+
+    // P3: handle session-resolver vote outcomes. Updates the cached plan state only — actual
+    // session-scoped enable/disable application is P4.
+    private void OnSessionVoteResolved(string voteId, bool passed)
+    {
+        _activeSessionVoteIds.Remove(voteId);
+        var plan = _latestSessionPlan;
+        if (plan == null) return;
+
+        var modId = voteId.Substring(SessionVotePrefix.Length);
+        if (passed)
+        {
+            plan.ApprovedOverrides.Add(modId);
+            plan.DisabledForSession.Remove(modId);
+            plan.EffectiveSessionModSet.Add(modId);
+            GD.Print($"[ModFramework] Session override APPROVED: {modId}");
+        }
+        else
+        {
+            plan.RejectedOverrides.Add(modId);
+            // Keep in DisabledForSession (already added by the P1 resolver).
+            GD.Print($"[ModFramework] Session override REJECTED: {modId}");
+        }
+
+        var allResolved = plan.PendingVotes.All(p =>
+            plan.ApprovedOverrides.Contains(p.ModId) || plan.RejectedOverrides.Contains(p.ModId));
+        if (allResolved)
+        {
+            plan.Resolved = true;
+            GD.Print($"[ModFramework] Session resolver plan resolved: {plan}");
+        }
+    }
 
     // Pure read-only manifest + file listing + declared-patch info. No side effects.
     // For the user-consent "I've reviewed this mod" gate, see ScanMod below.
@@ -1305,6 +1403,14 @@ public class ModManager : IDisposable
 
     private void OnVoteResolved(string voteId, bool passed)
     {
+        // P3: route session-resolver votes (prefixed) to their own handler — they don't use
+        // the compatibility vote-request bookkeeping and don't broadcast a ModVoteResult.
+        if (voteId.StartsWith(SessionVotePrefix, StringComparison.Ordinal))
+        {
+            OnSessionVoteResolved(voteId, passed);
+            return;
+        }
+
         if (!_activeVoteRequests.Remove(voteId, out var activeRequest))
             return;
 

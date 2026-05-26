@@ -8,7 +8,8 @@ public class ModVoteSession
 
     public event Action<string, bool>? OnVoteResolved;
 
-    public void StartVote(string voteId, ModManifest manifest, int totalPlayers)
+    // rule defaults to Majority so existing compatibility-vote callers stay byte-equivalent.
+    public void StartVote(string voteId, ModManifest manifest, int totalPlayers, SessionVoteRule rule = SessionVoteRule.Majority)
     {
         if (_activeVotes.ContainsKey(voteId))
         {
@@ -22,9 +23,10 @@ public class ModVoteSession
             YesVotes = 0,
             NoVotes = 0,
             ExpectedVotes = Math.Max(totalPlayers, 1),
+            Rule = rule,
             VotedPeers = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
         };
-        GD.Print($"[ModFramework] Vote started for mod: {voteId} ({manifest.Name})");
+        GD.Print($"[ModFramework] Vote started for mod: {voteId} ({manifest.Name}) rule={rule}");
     }
 
     public void CastVote(string voteId, string voterId, bool voteYes)
@@ -42,15 +44,29 @@ public class ModVoteSession
     private void CheckVoteResult(string voteId)
     {
         var vote = _activeVotes[voteId];
-        var totalVotes = vote.VotedPeers.Count;
 
+        // Unanimous early-fail: any No -> fail immediately, no need to wait for the rest.
+        if (vote.Rule == SessionVoteRule.Unanimous && vote.NoVotes > 0)
+        {
+            Resolve(voteId, vote, passed: false);
+            return;
+        }
+
+        var totalVotes = vote.VotedPeers.Count;
         if (totalVotes >= vote.ExpectedVotes)
         {
-            bool passed = vote.YesVotes > vote.NoVotes;
-            GD.Print($"[ModFramework] Vote for {voteId}: {(passed ? "PASSED" : "FAILED")} ({vote.YesVotes}/{vote.NoVotes})");
-            OnVoteResolved?.Invoke(voteId, passed);
-            _activeVotes.Remove(voteId);
+            bool passed = vote.Rule == SessionVoteRule.Unanimous
+                ? vote.NoVotes == 0 && vote.YesVotes == vote.ExpectedVotes
+                : vote.YesVotes > vote.NoVotes;
+            Resolve(voteId, vote, passed);
         }
+    }
+
+    private void Resolve(string voteId, VoteState vote, bool passed)
+    {
+        GD.Print($"[ModFramework] Vote for {voteId}: {(passed ? "PASSED" : "FAILED")} ({vote.YesVotes}/{vote.NoVotes}, rule={vote.Rule})");
+        OnVoteResolved?.Invoke(voteId, passed);
+        _activeVotes.Remove(voteId);
     }
 
     public void ClearAllVotes()
@@ -65,6 +81,7 @@ public class ModVoteSession
         public int YesVotes;
         public int NoVotes;
         public int ExpectedVotes;
+        public SessionVoteRule Rule = SessionVoteRule.Majority;
         public HashSet<string> VotedPeers = new(System.StringComparer.OrdinalIgnoreCase);
     }
 }

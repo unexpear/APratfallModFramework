@@ -2576,4 +2576,155 @@ public static class ModFrameworkSelfTest
         var del = field.GetValue(null) as Delegate;
         return del?.GetInvocationList().Length ?? 0;
     }
+
+    // P4.0: pure-planner tests for SessionApplyPlanner. Strict per the Hard policy
+    // (Option A): only Multiplayer.Mode == "local_only" mods are hot-eligible. Everything
+    // else needing a runtime change yields UnsafeHotEnableRequiresRejoin. The planner
+    // must never mutate its IReadOnly* input dictionaries.
+#pragma warning disable CA1861 // test-only inline arrays as helper args; perf irrelevant
+    public static HelperTestResult RunSessionApplyPlannerTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. local_only installed disabled, required by plan -> EnableInstalledForSession.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModA" });
+                var installed = new List<ModManifest> { NewLocalOnlyMod("ModA") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.EnableInstalledForSession)
+                { r.ErrorMessage = $"#1 expected EnableInstalledForSession, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("local_only installed disabled required -> EnableInstalledForSession");
+            }
+
+            // 2. local_only enabled but disabled by plan -> DisableForSession.
+            {
+                var plan = NewResolvedPlan(disabled: new[] { "ModA" });
+                var installed = new List<ModManifest> { NewLocalOnlyMod("ModA") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.DisableForSession)
+                { r.ErrorMessage = $"#2 expected DisableForSession, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("local_only enabled but disabled-by-plan -> DisableForSession");
+            }
+
+            // 3. Missing required mod -> MissingRequiredMod.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModMissing" });
+                var installed = new List<ModManifest>();
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.MissingRequiredMod)
+                { r.ErrorMessage = $"#3 expected MissingRequiredMod, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("missing required mod -> MissingRequiredMod");
+            }
+
+            // 4. Non-local_only installed disabled required -> UnsafeHotEnableRequiresRejoin.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModA" });
+                var installed = new List<ModManifest> { NewNonLocalMod("ModA") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.UnsafeHotEnableRequiresRejoin)
+                { r.ErrorMessage = $"#4 expected UnsafeHotEnableRequiresRejoin, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("non-local_only installed disabled required -> UnsafeHotEnableRequiresRejoin");
+            }
+
+            // 5. No change needed.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModA" });
+                var installed = new List<ModManifest> { NewLocalOnlyMod("ModA") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.NoChange)
+                { r.ErrorMessage = $"#5 expected NoChange, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("already-on, plan wants on -> NoChange");
+            }
+
+            // 6. Unresolved plan -> single CannotContinue, no apply actions.
+            {
+                var plan = NewUnresolvedPlan(effective: new[] { "ModA" });
+                var installed = new List<ModManifest> { NewLocalOnlyMod("ModA") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.CannotContinue)
+                { r.ErrorMessage = $"#6 expected single CannotContinue, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("unresolved plan -> CannotContinue, no apply actions");
+            }
+
+            // 7. Planner does not mutate saved desired or runtime state.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModA" }, disabled: new[] { "ModB" });
+                var installed = new List<ModManifest> { NewLocalOnlyMod("ModA"), NewLocalOnlyMod("ModB") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false, ["ModB"] = true };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = false, ["ModB"] = true };
+                var desiredCopy = new Dictionary<string, bool>(desired, StringComparer.OrdinalIgnoreCase);
+                var runtimeCopy = new Dictionary<string, bool>(runtime, StringComparer.OrdinalIgnoreCase);
+                SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (!DictionariesEqual(desired, desiredCopy))
+                { r.ErrorMessage = "#7 planner mutated `desiredEnabled`"; return r; }
+                if (!DictionariesEqual(runtime, runtimeCopy))
+                { r.ErrorMessage = "#7 planner mutated `runtimeEnabled`"; return r; }
+                r.StepsPassed.Add("planner does not mutate desiredEnabled or runtimeEnabled inputs");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static SessionResolutionPlan NewResolvedPlan(string[]? effective = null, string[]? disabled = null)
+    {
+        var plan = new SessionResolutionPlan { Resolved = true };
+        if (effective != null) foreach (var id in effective) plan.EffectiveSessionModSet.Add(id);
+        if (disabled != null) foreach (var id in disabled) plan.DisabledForSession.Add(id);
+        return plan;
+    }
+
+    private static SessionResolutionPlan NewUnresolvedPlan(string[]? effective = null, string[]? disabled = null)
+    {
+        var plan = new SessionResolutionPlan { Resolved = false };
+        if (effective != null) foreach (var id in effective) plan.EffectiveSessionModSet.Add(id);
+        if (disabled != null) foreach (var id in disabled) plan.DisabledForSession.Add(id);
+        return plan;
+    }
+
+    private static ModManifest NewLocalOnlyMod(string id)
+    {
+        var m = new ModManifest { Id = id, Name = id, Version = "1.0.0" };
+        m.Multiplayer.Mode = ModNetworkModes.LocalOnly;
+        return m;
+    }
+
+    private static ModManifest NewNonLocalMod(string id)
+    {
+        // Auto is the default; the planner classifies anything not LocalOnly as needing rejoin.
+        var m = new ModManifest { Id = id, Name = id, Version = "1.0.0" };
+        m.Multiplayer.Mode = ModNetworkModes.Auto;
+        return m;
+    }
+
+    private static string ActionsText(List<SessionApplyAction> actions) =>
+        actions.Count == 0 ? "(none)" : string.Join(", ", actions.Select(a => a.ToString()));
+
+    private static bool DictionariesEqual(Dictionary<string, bool> a, Dictionary<string, bool> b)
+    {
+        if (a.Count != b.Count) return false;
+        foreach (var pair in a)
+            if (!b.TryGetValue(pair.Key, out var bv) || bv != pair.Value) return false;
+        return true;
+    }
+#pragma warning restore CA1861
 }

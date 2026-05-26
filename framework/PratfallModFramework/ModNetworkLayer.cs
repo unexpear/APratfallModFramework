@@ -14,6 +14,11 @@ public sealed class ModNetworkLayer : IDisposable
     private const ushort TransferRequestEventId = 62004;
     private const ushort TransferChunkEventId = 62005;
     private const ushort ConfigSyncEventId = 62006;
+    // P4.0: reserved network event id for ModSessionPlanResolvedNetworkEvent. The contract
+    // is defined in ModNetworkContracts.cs; broadcast/receive wiring is deferred to P4.1.
+#pragma warning disable CA1823 // reserved for P4.1 wiring; intentionally unused in P4.0
+    private const ushort SessionPlanResolvedEventId = 62007;
+#pragma warning restore CA1823
 
     private Func<ModLocalState>? _snapshotProvider;
     private Godot.Timer? _pollTimer;

@@ -511,3 +511,71 @@ public sealed class ModConfigSyncNetworkEvent : INetworkEvent
         SnapshotJson = reader.ReadString("{}");
     }
 }
+
+// P4.0 contract: host → all clients, broadcast once SessionResolutionPlan.Resolved flips
+// true. Carries the final per-mod resolution outcomes so each client can run
+// SessionApplyPlanner locally. Reserved event id 62007 (declared in ModNetworkLayer.cs).
+// Broadcast/receive WIRING is deferred to P4.1 — P4.0 only ships the contract +
+// (de)serialization shape.
+public sealed class ModSessionPlanResolvedNetworkEvent : INetworkEvent
+{
+    public string SenderUserId { get; set; } = "";
+    public byte SenderIndex { get; set; }
+    public string PlanJson { get; set; } = "{}";
+
+    public static ModSessionPlanResolvedNetworkEvent Create(string senderUserId, byte senderIndex, SessionResolutionPlan plan)
+    {
+        var envelope = new SessionPlanEnvelope
+        {
+            EffectiveSessionModSet = plan.EffectiveSessionModSet.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList(),
+            DisabledForSession = plan.DisabledForSession.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList(),
+            ApprovedOverrides = plan.ApprovedOverrides.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList(),
+            RejectedOverrides = plan.RejectedOverrides.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToList(),
+            Resolved = plan.Resolved,
+        };
+        return new ModSessionPlanResolvedNetworkEvent
+        {
+            SenderUserId = senderUserId,
+            SenderIndex = senderIndex,
+            PlanJson = JsonSerializer.Serialize(envelope, ModNetworkJson.Options),
+        };
+    }
+
+    public SessionResolutionPlan ToPlan()
+    {
+        var envelope = JsonSerializer.Deserialize<SessionPlanEnvelope>(PlanJson, ModNetworkJson.Options) ?? new SessionPlanEnvelope();
+        var plan = new SessionResolutionPlan { Resolved = envelope.Resolved };
+        if (envelope.EffectiveSessionModSet != null)
+            foreach (var id in envelope.EffectiveSessionModSet) plan.EffectiveSessionModSet.Add(id);
+        if (envelope.DisabledForSession != null)
+            foreach (var id in envelope.DisabledForSession) plan.DisabledForSession.Add(id);
+        if (envelope.ApprovedOverrides != null)
+            foreach (var id in envelope.ApprovedOverrides) plan.ApprovedOverrides.Add(id);
+        if (envelope.RejectedOverrides != null)
+            foreach (var id in envelope.RejectedOverrides) plan.RejectedOverrides.Add(id);
+        return plan;
+    }
+
+    public void Serialize(ByteBufferWriter writer)
+    {
+        writer.Write(SenderUserId);
+        writer.Write(SenderIndex);
+        writer.Write(PlanJson);
+    }
+
+    public void Deserialize(ByteBufferReader reader)
+    {
+        SenderUserId = reader.ReadString("");
+        SenderIndex = reader.ReadByte();
+        PlanJson = reader.ReadString("{}");
+    }
+}
+
+internal sealed class SessionPlanEnvelope
+{
+    public List<string>? EffectiveSessionModSet { get; set; }
+    public List<string>? DisabledForSession { get; set; }
+    public List<string>? ApprovedOverrides { get; set; }
+    public List<string>? RejectedOverrides { get; set; }
+    public bool Resolved { get; set; }
+}

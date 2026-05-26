@@ -2727,4 +2727,109 @@ public static class ModFrameworkSelfTest
         return true;
     }
 #pragma warning restore CA1861
+
+    // P4.1: envelope round-trip + signature dedup tests for the session-plan broadcast.
+    // Pure — no ModManager instance, no network, no scene tree. Locks in the wire-contract
+    // shape and the dedup invariant that prevents repeated broadcasts of identical plans.
+    public static HelperTestResult RunSessionPlanBroadcastTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // 1. Envelope round-trip: Create -> Serialize/Deserialize (via PlanJson) -> ToPlan
+            //    preserves the 5 broadcast-relevant fields. Warnings/Decisions/PendingVotes
+            //    are intentionally NOT in the envelope (clients don't need them in P4.x).
+            {
+                var src = new SessionResolutionPlan { Resolved = true };
+                src.EffectiveSessionModSet.Add("ModA");
+                src.EffectiveSessionModSet.Add("ModB");
+                src.DisabledForSession.Add("ModC");
+                src.ApprovedOverrides.Add("ModA");
+                src.RejectedOverrides.Add("ModC");
+
+                var evt = ModSessionPlanResolvedNetworkEvent.Create("host-user", 0, src);
+                var roundTrip = new ModSessionPlanResolvedNetworkEvent
+                {
+                    SenderUserId = evt.SenderUserId,
+                    SenderIndex = evt.SenderIndex,
+                    PlanJson = evt.PlanJson,
+                };
+                var rebuilt = roundTrip.ToPlan();
+
+                if (!rebuilt.Resolved) { r.ErrorMessage = "#1 Resolved lost in round-trip"; return r; }
+                if (!SetsEqual(rebuilt.EffectiveSessionModSet, src.EffectiveSessionModSet))
+                { r.ErrorMessage = "#1 EffectiveSessionModSet round-trip mismatch"; return r; }
+                if (!SetsEqual(rebuilt.DisabledForSession, src.DisabledForSession))
+                { r.ErrorMessage = "#1 DisabledForSession round-trip mismatch"; return r; }
+                if (!SetsEqual(rebuilt.ApprovedOverrides, src.ApprovedOverrides))
+                { r.ErrorMessage = "#1 ApprovedOverrides round-trip mismatch"; return r; }
+                if (!SetsEqual(rebuilt.RejectedOverrides, src.RejectedOverrides))
+                { r.ErrorMessage = "#1 RejectedOverrides round-trip mismatch"; return r; }
+                r.StepsPassed.Add("envelope round-trip preserves 4 sets + Resolved");
+            }
+
+            // 2. Signature is insertion-order-independent (the Create + signature code both
+            //    sort case-insensitively, so identical content -> identical signature).
+            {
+                var a = new SessionResolutionPlan { Resolved = true };
+                a.EffectiveSessionModSet.Add("ModA");
+                a.EffectiveSessionModSet.Add("ModB");
+                a.DisabledForSession.Add("ModC");
+
+                var b = new SessionResolutionPlan { Resolved = true };
+                b.EffectiveSessionModSet.Add("ModB"); // different insertion order
+                b.EffectiveSessionModSet.Add("ModA");
+                b.DisabledForSession.Add("ModC");
+
+                var sigA = ModManager.ComputePlanSignature(a);
+                var sigB = ModManager.ComputePlanSignature(b);
+                if (sigA != sigB) { r.ErrorMessage = $"#2 identical plans differ in signature: {sigA} vs {sigB}"; return r; }
+                r.StepsPassed.Add("signature is insertion-order-independent");
+            }
+
+            // 3. Different plan content -> different signature.
+            {
+                var a = new SessionResolutionPlan { Resolved = true };
+                a.EffectiveSessionModSet.Add("ModA");
+
+                var b = new SessionResolutionPlan { Resolved = true };
+                b.EffectiveSessionModSet.Add("ModA");
+                b.EffectiveSessionModSet.Add("ModB"); // extra mod
+
+                var sigA = ModManager.ComputePlanSignature(a);
+                var sigB = ModManager.ComputePlanSignature(b);
+                if (sigA == sigB) { r.ErrorMessage = "#3 different plans yielded identical signature"; return r; }
+                r.StepsPassed.Add("signature differs when plan content differs");
+            }
+
+            // 4. Resolved flag is part of the signature (same sets, different Resolved -> different sig).
+            {
+                var a = new SessionResolutionPlan { Resolved = true };
+                a.EffectiveSessionModSet.Add("ModA");
+
+                var b = new SessionResolutionPlan { Resolved = false };
+                b.EffectiveSessionModSet.Add("ModA");
+
+                var sigA = ModManager.ComputePlanSignature(a);
+                var sigB = ModManager.ComputePlanSignature(b);
+                if (sigA == sigB) { r.ErrorMessage = "#4 Resolved flag not reflected in signature"; return r; }
+                r.StepsPassed.Add("Resolved flag is part of the signature");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+
+    private static bool SetsEqual(HashSet<string> a, HashSet<string> b)
+    {
+        if (a.Count != b.Count) return false;
+        foreach (var x in a) if (!b.Contains(x)) return false;
+        return true;
+    }
 }

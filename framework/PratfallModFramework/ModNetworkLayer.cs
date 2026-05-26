@@ -14,11 +14,10 @@ public sealed class ModNetworkLayer : IDisposable
     private const ushort TransferRequestEventId = 62004;
     private const ushort TransferChunkEventId = 62005;
     private const ushort ConfigSyncEventId = 62006;
-    // P4.0: reserved network event id for ModSessionPlanResolvedNetworkEvent. The contract
-    // is defined in ModNetworkContracts.cs; broadcast/receive wiring is deferred to P4.1.
-#pragma warning disable CA1823 // reserved for P4.1 wiring; intentionally unused in P4.0
+    // P4.0 contract / P4.1 wiring: ModSessionPlanResolvedNetworkEvent — host broadcasts the
+    // final resolved plan to clients (see BroadcastSessionPlanResolved + the
+    // OnNetworkEventReceived dispatcher case below).
     private const ushort SessionPlanResolvedEventId = 62007;
-#pragma warning restore CA1823
 
     private Func<ModLocalState>? _snapshotProvider;
     private Godot.Timer? _pollTimer;
@@ -39,6 +38,10 @@ public sealed class ModNetworkLayer : IDisposable
     // CSync: host broadcasts ConfigEntry values for entries marked Description.Synced=true.
     // The string arg is the senderUserId (will be the lobby host's id under normal play).
     public event Action<string /*senderUserId*/, ModConfigSyncSnapshot>? OnConfigSyncReceived;
+    // P4.1: host → all clients with the final resolved SessionResolutionPlan. Host doesn't
+    // receive its own broadcast (no-loopback). Carries enough state for clients to populate
+    // _latestSessionPlan and run SessionApplyPlanner locally.
+    public event Action<string /*senderUserId*/, SessionResolutionPlan>? OnSessionPlanResolvedReceived;
     public event Action<string>? OnMemberLeftLobby;
     public event Action? OnTransportReset;
 
@@ -201,6 +204,22 @@ public sealed class ModNetworkLayer : IDisposable
         result.Normalize();
         var payload = ModVoteResultNetworkEvent.Create(localUserId, LocalMemberIndex, result);
         SendReliableGlobalEvent(VoteResultEventId, payload, "ModFramework.VoteResult");
+    }
+
+    // P4.1: host broadcasts the final resolved SessionResolutionPlan to clients. Idempotency
+    // is the CALLER's responsibility (ModManager dedups by plan signature before invoking).
+    // Debug-peer mode is single-process so there are no real peers to send to; we skip there.
+    public void BroadcastSessionPlanResolved(SessionResolutionPlan plan)
+    {
+        if (_transportMode == TransportMode.Debug)
+            return;
+        if (!_isHooked)
+            return;
+        var localUserId = LocalUserId;
+        if (string.IsNullOrWhiteSpace(localUserId))
+            return;
+        var payload = ModSessionPlanResolvedNetworkEvent.Create(localUserId, LocalMemberIndex, plan);
+        SendReliableGlobalEvent(SessionPlanResolvedEventId, payload, "ModFramework.SessionPlanResolved");
     }
 
     public void RequestModTransfer(string sourceUserId, string modId, string modVersion)
@@ -454,6 +473,12 @@ public sealed class ModNetworkLayer : IDisposable
                 var configSyncEvent = eventData.GetEvent<ModConfigSyncNetworkEvent>();
                 if (!SenderIsLobbyMember(configSyncEvent.SenderUserId)) return;
                 OnConfigSyncReceived?.Invoke(configSyncEvent.SenderUserId, configSyncEvent.ToSnapshot());
+                return;
+
+            case SessionPlanResolvedEventId:
+                var sessionPlanEvent = eventData.GetEvent<ModSessionPlanResolvedNetworkEvent>();
+                if (!SenderIsLobbyMember(sessionPlanEvent.SenderUserId)) return;
+                OnSessionPlanResolvedReceived?.Invoke(sessionPlanEvent.SenderUserId, sessionPlanEvent.ToPlan());
                 return;
         }
     }

@@ -37,6 +37,10 @@ public class ModManager : IDisposable
     // votes don't collide with the existing compatibility-vote flow that shares _voteSession.
     private const string SessionVotePrefix = "session:";
     private readonly HashSet<string> _activeSessionVoteIds = new(StringComparer.OrdinalIgnoreCase);
+    // P4.1: dedup signatures for the host's broadcast and the client's receive. Identical
+    // signature means identical plan content, so we skip re-broadcasting / re-processing.
+    private string? _lastBroadcastPlanSignature;
+    private string? _lastReceivedPlanSignature;
     private VoteUI? _voteUI;
     private List<ModManifest> _localMods = new();
     private readonly Dictionary<string, bool> _desiredEnabled = new(StringComparer.OrdinalIgnoreCase);
@@ -151,6 +155,7 @@ public class ModManager : IDisposable
         _networkLayer.OnTransferRequestReceived += OnTransferRequestReceived;
         _networkLayer.OnTransferChunkReceived += OnTransferChunkReceived;
         _networkLayer.OnConfigSyncReceived += OnConfigSyncReceived;
+        _networkLayer.OnSessionPlanResolvedReceived += OnSessionPlanResolvedReceived;
         WorkshopHook.OnWorkshopItemInstalled += OnWorkshopItemInstalled;
         _networkLayer.OnMemberLeftLobby += OnLobbyMemberLeft;
         _networkLayer.OnTransportReset += OnTransportReset;
@@ -909,6 +914,13 @@ public class ModManager : IDisposable
 
             // P3: drive PendingVotes through ModVoteSession (host-side, Unanimous rule).
             StartSessionVotesFor(plan);
+
+            // P4.1: handle the "no PendingVotes" path — if every PendingVote already has an
+            // outcome (vacuously true when PendingVotes is empty / clean lobby), the plan is
+            // resolved right now and we broadcast it to clients. The vote-driven path is
+            // covered by OnSessionVoteResolved below.
+            if (TryMarkPlanResolved(plan))
+                BroadcastSessionPlanIfHost(plan);
         }
         catch (Exception ex)
         {
@@ -1006,6 +1018,76 @@ public class ModManager : IDisposable
         {
             plan.Resolved = true;
             GD.Print($"[ModFramework] Session resolver plan resolved: {plan}");
+            // P4.1: vote-driven path — final vote just resolved, broadcast to clients.
+            BroadcastSessionPlanIfHost(plan);
+        }
+    }
+
+    // P4.1: tests whether this plan should now be considered resolved. True when every
+    // PendingVote has an Approved or Rejected outcome (vacuously true when PendingVotes
+    // is empty). Returns true IFF the plan transitioned from not-resolved to resolved by
+    // this call — so callers can use the return value as a "should I broadcast now?" gate.
+    private static bool TryMarkPlanResolved(SessionResolutionPlan plan)
+    {
+        if (plan.Resolved) return false;
+        var allResolved = plan.PendingVotes.All(p =>
+            plan.ApprovedOverrides.Contains(p.ModId) || plan.RejectedOverrides.Contains(p.ModId));
+        if (!allResolved) return false;
+        plan.Resolved = true;
+        return true;
+    }
+
+    // P4.1: host-side broadcast of the resolved plan. Dedup by content signature so repeated
+    // RefreshSessionResolutionPlan calls producing the same plan don't re-broadcast.
+    private void BroadcastSessionPlanIfHost(SessionResolutionPlan plan)
+    {
+        if (!_networkLayer.IsLocalHost) return;
+        if (!plan.Resolved) return;
+        var signature = ComputePlanSignature(plan);
+        if (string.Equals(signature, _lastBroadcastPlanSignature, StringComparison.Ordinal)) return;
+        _lastBroadcastPlanSignature = signature;
+        _networkLayer.BroadcastSessionPlanResolved(plan);
+        GD.Print($"[ModFramework] Session plan broadcast to clients: {plan}");
+    }
+
+    // P4.1: stable signature of a plan's broadcast-relevant fields. Used by both the host's
+    // broadcast dedup and the client's receive dedup. Built from the four sets (sorted
+    // case-insensitively) + Resolved flag — identical signature means identical plan content.
+    internal static string ComputePlanSignature(SessionResolutionPlan plan)
+    {
+        return "R=" + (plan.Resolved ? "1" : "0") +
+               "|E=[" + string.Join(",", plan.EffectiveSessionModSet.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) + "]" +
+               "|D=[" + string.Join(",", plan.DisabledForSession.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) + "]" +
+               "|A=[" + string.Join(",", plan.ApprovedOverrides.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) + "]" +
+               "|X=[" + string.Join(",", plan.RejectedOverrides.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) + "]";
+    }
+
+    // P4.1: client-side receive — only from the lobby owner (host); dedup by signature;
+    // populate local _latestSessionPlan; run SessionApplyPlanner for LOGGING only. No apply
+    // behavior. Consent prompts + runtime toggle land in P4.2/P4.3.
+    private void OnSessionPlanResolvedReceived(string senderUserId, SessionResolutionPlan plan)
+    {
+        var lobbyOwnerUserId = _networkLayer.LobbyOwnerUserId;
+        if (string.IsNullOrWhiteSpace(lobbyOwnerUserId) ||
+            !string.Equals(lobbyOwnerUserId, senderUserId, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var signature = ComputePlanSignature(plan);
+        if (string.Equals(signature, _lastReceivedPlanSignature, StringComparison.Ordinal)) return;
+        _lastReceivedPlanSignature = signature;
+
+        _latestSessionPlan = plan;
+        GD.Print($"[ModFramework] Session plan received from host: {plan}");
+
+        try
+        {
+            var actions = SessionApplyPlanner.Plan(plan, _localMods, _desiredEnabled, _modEnabled);
+            foreach (var action in actions)
+                GD.Print($"[ModFramework]   planner: {action}");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] SessionApplyPlanner failed on client: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

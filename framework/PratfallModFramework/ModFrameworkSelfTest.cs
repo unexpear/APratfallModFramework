@@ -2832,4 +2832,263 @@ public static class ModFrameworkSelfTest
         foreach (var x in a) if (!b.Contains(x)) return false;
         return true;
     }
+
+    // P4.2: per-action consent prompt + decision-record bookkeeping. Tests drive
+    // SessionConsentCoordinator directly with a synchronous PromptOverride, then
+    // verify the recorded decision per case. Also verifies dedup (no double prompt
+    // for the same plan/action), the headless auto-default path, and that
+    // ModManager.BuildSessionConsentPromptArgs emits the user-approved wording.
+    // Strictly P4.2 scope: no loader / no _modEnabled / no _desiredEnabled / no
+    // network. The coordinator never touches those — by construction (it doesn't
+    // hold a reference to any ModManager field).
+#pragma warning disable CA1861 // test-only inline tuple arrays as helper args; perf irrelevant
+    public static HelperTestResult RunSessionConsentTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            const string sig = "test-plan-sig";
+
+            // 1. EnableInstalledForSession + Approve -> ApprovedEnable; LeaveRequired stays false.
+            {
+                var coord = new SessionConsentCoordinator();
+                var promptCount = 0;
+                coord.PromptOverride = action =>
+                {
+                    promptCount++;
+                    return SessionConsentDecision.ApprovedEnable;
+                };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (promptCount != 1) { r.ErrorMessage = $"#1 expected 1 prompt, got {promptCount}"; return r; }
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.ApprovedEnable)
+                { r.ErrorMessage = $"#1 expected ApprovedEnable, got {coord.GetDecision(action, sig)}"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#1 LeaveRequired should be false after Approve"; return r; }
+                r.StepsPassed.Add("EnableInstalledForSession + approve -> ApprovedEnable, no leave");
+            }
+
+            // 2. EnableInstalledForSession + Decline (user picked Leave) -> LeaveRequired; flag set.
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.LeaveRequired;
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#2 expected LeaveRequired, got {coord.GetDecision(action, sig)}"; return r; }
+                if (!coord.LeaveRequired) { r.ErrorMessage = "#2 LeaveRequired flag must be true after a decline"; return r; }
+                r.StepsPassed.Add("EnableInstalledForSession + decline -> LeaveRequired + flag");
+            }
+
+            // 3. DisableForSession + Approve -> ApprovedDisable.
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.ApprovedDisable;
+                var action = new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.DisableForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.ApprovedDisable)
+                { r.ErrorMessage = $"#3 expected ApprovedDisable, got {coord.GetDecision(action, sig)}"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#3 LeaveRequired should be false after Approve"; return r; }
+                r.StepsPassed.Add("DisableForSession + approve -> ApprovedDisable");
+            }
+
+            // 4. MissingRequiredMod -> LeaveRequired (only the leave button; no download path).
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.LeaveRequired;
+                var action = new SessionApplyAction { ModId = "ModMissing", Kind = SessionApplyActionKind.MissingRequiredMod };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#4 expected LeaveRequired, got {coord.GetDecision(action, sig)}"; return r; }
+                r.StepsPassed.Add("MissingRequiredMod -> LeaveRequired, no download/install path");
+            }
+
+            // 5. UnsafeHotEnableRequiresRejoin -> LeaveRequired.
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.LeaveRequired;
+                var action = new SessionApplyAction { ModId = "ModNonLocal", Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#5 expected LeaveRequired, got {coord.GetDecision(action, sig)}"; return r; }
+                if (!coord.LeaveRequired) { r.ErrorMessage = "#5 LeaveRequired flag must be true"; return r; }
+                r.StepsPassed.Add("UnsafeHotEnableRequiresRejoin -> LeaveRequired + flag");
+            }
+
+            // 6. CannotContinue -> Acknowledged (informational; no leave required).
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.Acknowledged;
+                var action = new SessionApplyAction { ModId = "", Kind = SessionApplyActionKind.CannotContinue };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.Acknowledged)
+                { r.ErrorMessage = $"#6 expected Acknowledged, got {coord.GetDecision(action, sig)}"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#6 Acknowledged must not set LeaveRequired"; return r; }
+                r.StepsPassed.Add("CannotContinue -> Acknowledged, no leave");
+            }
+
+            // 7. NoChange actions are filtered out entirely — never prompt, never record.
+            {
+                var coord = new SessionConsentCoordinator();
+                var promptCount = 0;
+                coord.PromptOverride = _ => { promptCount++; return SessionConsentDecision.Acknowledged; };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.NoChange };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (promptCount != 0) { r.ErrorMessage = $"#7 NoChange should not prompt; got {promptCount}"; return r; }
+                if (coord.Decisions.Count != 0) { r.ErrorMessage = $"#7 NoChange should not record a decision; got {coord.Decisions.Count}"; return r; }
+                r.StepsPassed.Add("NoChange -> no prompt, no record");
+            }
+
+            // 8. Duplicate same-plan/same-action: enqueue twice -> still only one prompt fires.
+            {
+                var coord = new SessionConsentCoordinator();
+                var promptCount = 0;
+                coord.PromptOverride = _ => { promptCount++; return SessionConsentDecision.ApprovedEnable; };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                coord.EnqueueActions(new[] { action }, sig); // re-enqueue same action under same plan
+                if (promptCount != 1) { r.ErrorMessage = $"#8 expected 1 prompt across two enqueues, got {promptCount}"; return r; }
+                if (coord.Decisions.Count != 1) { r.ErrorMessage = $"#8 expected 1 recorded decision, got {coord.Decisions.Count}"; return r; }
+                r.StepsPassed.Add("duplicate same-plan/same-action -> single prompt + single decision");
+            }
+
+            // 9. Multiple actions in one plan -> all enqueued, processed sequentially, all recorded.
+            {
+                var coord = new SessionConsentCoordinator();
+                var prompted = new List<string>();
+                coord.PromptOverride = a => { prompted.Add(a.ModId); return SessionConsentDecision.ApprovedEnable; };
+                var actions = new[]
+                {
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModC", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                };
+                coord.EnqueueActions(actions, sig);
+                if (prompted.Count != 3) { r.ErrorMessage = $"#9 expected 3 prompts, got {prompted.Count}"; return r; }
+                if (prompted[0] != "ModA" || prompted[1] != "ModB" || prompted[2] != "ModC")
+                { r.ErrorMessage = $"#9 prompt order wrong: {string.Join(",", prompted)}"; return r; }
+                if (coord.Decisions.Count != 3) { r.ErrorMessage = $"#9 expected 3 decisions, got {coord.Decisions.Count}"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#9 all approved -> LeaveRequired must be false"; return r; }
+                r.StepsPassed.Add("multiple actions -> sequential processing in declared order");
+            }
+
+            // 10. Mixed approve/decline across multiple actions: any LeaveRequired sets the flag.
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = a => a.ModId == "ModB" ? SessionConsentDecision.LeaveRequired : SessionConsentDecision.ApprovedEnable;
+                var actions = new[]
+                {
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModC", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                };
+                coord.EnqueueActions(actions, sig);
+                if (coord.Decisions.Count != 3) { r.ErrorMessage = $"#10 expected 3 decisions, got {coord.Decisions.Count}"; return r; }
+                if (!coord.LeaveRequired) { r.ErrorMessage = "#10 one LeaveRequired in batch should set flag"; return r; }
+                r.StepsPassed.Add("mixed approve/decline -> LeaveRequired flag latches on any decline");
+            }
+
+            // 11. Headless / no UI / no override -> auto-default LeaveRequired for non-CannotContinue,
+            //     Acknowledged for CannotContinue. Safety: a user who can't see a prompt didn't consent.
+            {
+                var coord = new SessionConsentCoordinator(); // no PromptOverride, no ShowPrompt, no Log
+                var enable = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                var cant = new SessionApplyAction { ModId = "", Kind = SessionApplyActionKind.CannotContinue };
+                coord.EnqueueActions(new[] { enable, cant }, sig);
+                if (coord.GetDecision(enable, sig) != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#11 headless EnableInstalled should default to LeaveRequired; got {coord.GetDecision(enable, sig)}"; return r; }
+                if (coord.GetDecision(cant, sig) != SessionConsentDecision.Acknowledged)
+                { r.ErrorMessage = $"#11 headless CannotContinue should default to Acknowledged; got {coord.GetDecision(cant, sig)}"; return r; }
+                r.StepsPassed.Add("headless auto-default: Leave for actionable, Acknowledged for informational");
+            }
+
+            // 12. Different plan signature -> same action key differs -> reprompt for fresh plan.
+            //     P4.1 dedup at the receive layer already prevents identical-signature redelivery,
+            //     but the coordinator's per-plan keying is the second layer of defense.
+            {
+                var coord = new SessionConsentCoordinator();
+                var prompted = new List<string>();
+                coord.PromptOverride = a => { prompted.Add(a.ModId + "@" + (prompted.Count + 1)); return SessionConsentDecision.ApprovedEnable; };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, "plan-sig-1");
+                coord.EnqueueActions(new[] { action }, "plan-sig-2");
+                if (prompted.Count != 2) { r.ErrorMessage = $"#12 expected 2 prompts across 2 plan signatures, got {prompted.Count}"; return r; }
+                r.StepsPassed.Add("distinct plan signatures -> distinct decision keys -> fresh prompt");
+            }
+
+            // 13. Wording: BuildSessionConsentPromptArgs returns the user-approved title/body/buttons.
+            //     Static so it can be exercised without a ModManager instance; mod name resolves
+            //     from the supplied local-manifest list, falling back to ModId when not installed.
+            {
+                var manifests = new List<ModManifest>
+                {
+                    new ModManifest { Id = "ModA", Name = "Mod Alpha", Version = "1.2.3" },
+                };
+
+                ModManager.BuildSessionConsentPromptArgs(
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    manifests, out var title, out var body, out var choices);
+                if (title != "Session mod consent required") { r.ErrorMessage = $"#13a wrong title: {title}"; return r; }
+                if (!body.Contains("Mod Alpha 1.2.3")) { r.ErrorMessage = $"#13a body missing name+version: {body}"; return r; }
+                if (choices.Count != 2 || choices[0].Decision != SessionConsentDecision.ApprovedEnable
+                    || choices[1].Decision != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#13a EnableInstalled wrong button decisions"; return r; }
+
+                ModManager.BuildSessionConsentPromptArgs(
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.DisableForSession },
+                    manifests, out _, out var disableBody, out var disableChoices);
+                if (!disableBody.Contains("Mod Alpha 1.2.3")) { r.ErrorMessage = $"#13b body missing name+version"; return r; }
+                if (disableChoices.Count != 2 || disableChoices[0].Decision != SessionConsentDecision.ApprovedDisable
+                    || disableChoices[1].Decision != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#13b Disable wrong button decisions"; return r; }
+
+                ModManager.BuildSessionConsentPromptArgs(
+                    new SessionApplyAction { ModId = "ModMissing", Kind = SessionApplyActionKind.MissingRequiredMod },
+                    manifests, out var missingTitle, out var missingBody, out var missingChoices);
+                if (missingTitle != "Required mod missing") { r.ErrorMessage = $"#13c wrong title: {missingTitle}"; return r; }
+                if (!missingBody.Contains("ModMissing")) { r.ErrorMessage = $"#13c body missing modId fallback"; return r; }
+                // Spec: missing-mod prompt explicitly tells the user we do NOT download/install.
+                if (!missingBody.Contains("does not download or install")) { r.ErrorMessage = $"#13c body missing the no-download disclaimer"; return r; }
+                if (missingChoices.Count != 1 || missingChoices[0].Decision != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#13c MissingRequiredMod should have a single Leave button"; return r; }
+
+                ModManager.BuildSessionConsentPromptArgs(
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin },
+                    manifests, out var rejoinTitle, out _, out var rejoinChoices);
+                if (rejoinTitle != "Rejoin required") { r.ErrorMessage = $"#13d wrong title: {rejoinTitle}"; return r; }
+                if (rejoinChoices.Count != 2 ||
+                    rejoinChoices[0].Decision != SessionConsentDecision.LeaveRequired ||
+                    rejoinChoices[1].Decision != SessionConsentDecision.LeaveRequired)
+                { r.ErrorMessage = $"#13d UnsafeHotEnable both buttons should map to LeaveRequired (Leave + Cancel)"; return r; }
+
+                ModManager.BuildSessionConsentPromptArgs(
+                    new SessionApplyAction { ModId = "", Kind = SessionApplyActionKind.CannotContinue },
+                    manifests, out var cantTitle, out _, out var cantChoices);
+                if (cantTitle != "Session mod plan cannot continue") { r.ErrorMessage = $"#13e wrong title: {cantTitle}"; return r; }
+                if (cantChoices.Count != 1 || cantChoices[0].Decision != SessionConsentDecision.Acknowledged)
+                { r.ErrorMessage = $"#13e CannotContinue should have a single OK button -> Acknowledged"; return r; }
+
+                r.StepsPassed.Add("BuildSessionConsentPromptArgs returns spec-conforming title/body/buttons for all 5 cases");
+            }
+
+            // 14. Composite key stability: same (planSignature, kind, modId) -> same key string.
+            {
+                var a = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                var k1 = SessionConsentCoordinator.BuildKey(a, "sig-X");
+                var k2 = SessionConsentCoordinator.BuildKey(a, "sig-X");
+                if (k1 != k2) { r.ErrorMessage = "#14 same inputs should produce identical key"; return r; }
+                var k3 = SessionConsentCoordinator.BuildKey(a, "sig-Y");
+                if (k1 == k3) { r.ErrorMessage = "#14 different plan signature should produce different key"; return r; }
+                r.StepsPassed.Add("composite key stable per (planSig, kind, modId)");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+#pragma warning restore CA1861
 }

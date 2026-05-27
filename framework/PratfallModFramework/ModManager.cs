@@ -41,6 +41,11 @@ public class ModManager : IDisposable
     // signature means identical plan content, so we skip re-broadcasting / re-processing.
     private string? _lastBroadcastPlanSignature;
     private string? _lastReceivedPlanSignature;
+    // P4.2: per-player local consent coordinator. Drives the dedicated prompt for each
+    // SessionApplyAction the planner emits and records the decision for P4.3. Test seam
+    // exposed as SessionConsentPromptOverride (Func<SessionApplyAction, SessionConsentDecision>?)
+    // so tests can answer synchronously without spinning up the Godot UI.
+    private readonly SessionConsentCoordinator _sessionConsent = new();
     private VoteUI? _voteUI;
     private List<ModManifest> _localMods = new();
     private readonly Dictionary<string, bool> _desiredEnabled = new(StringComparer.OrdinalIgnoreCase);
@@ -131,6 +136,17 @@ public class ModManager : IDisposable
 
         _voteUI = new VoteUI();
         tree.Root.AddChild(_voteUI);
+
+        // P4.2: route the consent coordinator's UI requests to the dedicated Godot prompt.
+        // PromptOverride is left null in production — tests set it directly via
+        // SessionConsentPromptOverride to answer synchronously.
+        _sessionConsent.Log = GD.Print;
+        _sessionConsent.ShowPrompt = (action, resolve) =>
+        {
+            if (_tree == null) { resolve(SessionConsentDecision.LeaveRequired); return; }
+            BuildSessionConsentPromptArgs(action, _localMods, out var title, out var body, out var choices);
+            MainMenuIntegration.ShowSessionConsentPrompt(_tree, title, body, choices, resolve);
+        };
 
         MainMenuIntegration.Install(tree,
             onModsPressed: () => GD.Print("[ModFramework] Mods dialog opened"),
@@ -1063,8 +1079,9 @@ public class ModManager : IDisposable
     }
 
     // P4.1: client-side receive — only from the lobby owner (host); dedup by signature;
-    // populate local _latestSessionPlan; run SessionApplyPlanner for LOGGING only. No apply
-    // behavior. Consent prompts + runtime toggle land in P4.2/P4.3.
+    // populate local _latestSessionPlan; run SessionApplyPlanner.
+    // P4.2: after logging the planner output, enqueue per-action local consent prompts.
+    // Consent decisions are recorded for P4.3; this layer never applies.
     private void OnSessionPlanResolvedReceived(string senderUserId, SessionResolutionPlan plan)
     {
         var lobbyOwnerUserId = _networkLayer.LobbyOwnerUserId;
@@ -1084,10 +1101,131 @@ public class ModManager : IDisposable
             var actions = SessionApplyPlanner.Plan(plan, _localMods, _desiredEnabled, _modEnabled);
             foreach (var action in actions)
                 GD.Print($"[ModFramework]   planner: {action}");
+            _sessionConsent.EnqueueActions(actions, signature);
         }
         catch (Exception ex)
         {
             GD.PrintErr($"[ModFramework] SessionApplyPlanner failed on client: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // P4.2 test seam: when set, the coordinator bypasses the UI prompt and answers
+    // synchronously with the override's return value. Tests use this to drive the
+    // queue without a Godot SceneTree.
+    public Func<SessionApplyAction, SessionConsentDecision>? SessionConsentPromptOverride
+    {
+        get => _sessionConsent.PromptOverride;
+        set => _sessionConsent.PromptOverride = value;
+    }
+
+    // P4.2 test inspection: read-only view of the coordinator's recorded decisions.
+    // Keyed by the coordinator's stable composite key (planSignature|kind|modId).
+    internal IReadOnlyDictionary<string, SessionConsentDecision> SessionConsentDecisionsForTests =>
+        _sessionConsent.Decisions;
+
+    // P4.2 test inspection: surface the "any decision was LeaveRequired" flag the
+    // session-apply state will read in P4.3.
+    internal bool SessionConsentLeaveRequiredForTests => _sessionConsent.LeaveRequired;
+
+    // P4.2: build the prompt's title/body/button list for a given action. Wording matches
+    // the user-approved spec; mod name + version are resolved from the supplied local
+    // manifest list if available, falling back to the mod id when not installed
+    // (MissingRequiredMod path). Static so tests can exercise the wording without a
+    // ModManager instance.
+    internal static void BuildSessionConsentPromptArgs(
+        SessionApplyAction action,
+        IReadOnlyList<ModManifest> localMods,
+        out string title,
+        out string body,
+        out IReadOnlyList<(string Label, SessionConsentDecision Decision)> choices)
+    {
+        var displayName = action.ModId;
+        var version = "";
+        if (localMods != null)
+        {
+            foreach (var m in localMods)
+            {
+                if (string.Equals(m.Id, action.ModId, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!string.IsNullOrWhiteSpace(m.Name)) displayName = m.Name;
+                    version = m.Version ?? "";
+                    break;
+                }
+            }
+        }
+        var nameAndVersion = string.IsNullOrWhiteSpace(version) ? displayName : displayName + " " + version;
+
+        switch (action.Kind)
+        {
+            case SessionApplyActionKind.EnableInstalledForSession:
+                title = "Session mod consent required";
+                body = "This session requires a mod you have installed but currently disabled:\n\n" +
+                       nameAndVersion + "\n\n" +
+                       "Choose whether to enable it for this session only.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("Enable for this session only", SessionConsentDecision.ApprovedEnable),
+                    ("Leave session", SessionConsentDecision.LeaveRequired),
+                };
+                return;
+
+            case SessionApplyActionKind.DisableForSession:
+                title = "Session mod consent required";
+                body = "This session requires temporarily disabling one of your currently enabled mods:\n\n" +
+                       nameAndVersion + "\n\n" +
+                       "This will not change your saved enabled-mod preference.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("Disable for this session and stay", SessionConsentDecision.ApprovedDisable),
+                    ("Leave session", SessionConsentDecision.LeaveRequired),
+                };
+                return;
+
+            case SessionApplyActionKind.MissingRequiredMod:
+                title = "Required mod missing";
+                body = "This session requires a mod you do not have installed:\n\n" +
+                       displayName + "\n\n" +
+                       "P4 does not download or install mods. Install it manually or through Workshop, then rejoin.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("Leave session", SessionConsentDecision.LeaveRequired),
+                };
+                return;
+
+            case SessionApplyActionKind.UnsafeHotEnableRequiresRejoin:
+                title = "Rejoin required";
+                body = "This mod cannot be safely enabled live because it may affect multiplayer/networked runtime state:\n\n" +
+                       nameAndVersion + "\n\n" +
+                       "Leave and rejoin after enabling/installing the required mod set.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("Leave session", SessionConsentDecision.LeaveRequired),
+                    ("Cancel", SessionConsentDecision.LeaveRequired),
+                };
+                return;
+
+            case SessionApplyActionKind.CannotContinue:
+                title = "Session mod plan cannot continue";
+                body = "The session mod plan is not resolved or cannot be applied safely.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("OK", SessionConsentDecision.Acknowledged),
+                };
+                return;
+
+            // LeaveRequired / NoChange as action kinds aren't expected to reach the prompt
+            // (NoChange is filtered out by the coordinator; LeaveRequired isn't currently
+            // emitted by the planner). Defensive default still records a safe Leave.
+            case SessionApplyActionKind.LeaveRequired:
+            case SessionApplyActionKind.NoChange:
+            default:
+                title = "Session mod consent required";
+                body = "An unexpected session-apply action arrived (" + action.Kind + " " + action.ModId + "). Leaving is the safe default.";
+                choices = new (string, SessionConsentDecision)[]
+                {
+                    ("Leave session", SessionConsentDecision.LeaveRequired),
+                };
+                return;
         }
     }
 

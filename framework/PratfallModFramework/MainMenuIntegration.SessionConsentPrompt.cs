@@ -10,7 +10,10 @@ namespace PratfallModFramework;
 // LeaveRequired so an accidental dismiss is treated as a safe decline.
 public static partial class MainMenuIntegration
 {
-    public static void ShowSessionConsentPrompt(SceneTree tree,
+    // INTERNAL: framework-internal helper. Only caller is ModManager wiring the
+    // SessionConsentCoordinator's ShowPrompt hook. Not exposed to external mods so
+    // they can't spawn fake consent prompts impersonating the framework.
+    internal static void ShowSessionConsentPrompt(SceneTree tree,
         string title, string body,
         IReadOnlyList<(string Label, SessionConsentDecision Decision)> choices,
         Action<SessionConsentDecision> onResolve)
@@ -110,5 +113,17 @@ public static partial class MainMenuIntegration
 
         WireVerticalFocus(focusables);
         if (focusables.Count > 0) focusables[0].CallDeferred("grab_focus");
+    }
+
+    // P4.2 hardening: dismiss any active session-consent prompt without firing its
+    // onResolve callback. Used by ResetSessionResolverRuntimeState on transport reset
+    // so a stale dialog from a prior connection can't be clicked into the now-cleared
+    // coordinator. Safe to call when no prompt is active (no-op). Does not touch any
+    // other framework dialog (Acquisition / Conflict / etc. own their own lifecycle).
+    internal static void DismissSessionConsentPrompt()
+    {
+        if (_tree?.Root == null) return;
+        var existing = _tree.Root.GetNodeOrNull("ModFrameworkSessionConsentLayer");
+        if (existing != null) existing.QueueFree();
     }
 }

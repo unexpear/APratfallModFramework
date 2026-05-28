@@ -3081,6 +3081,166 @@ public static class ModFrameworkSelfTest
                 r.StepsPassed.Add("composite key stable per (planSig, kind, modId)");
             }
 
+            // 15. P4.2 hardening — Reset() clears all per-connection coordinator state so a
+            //     reconnect can't see stale decisions from a prior session. Critical because
+            //     plan-signature dedup would otherwise silently suppress matching new prompts.
+            {
+                var coord = new SessionConsentCoordinator();
+                coord.PromptOverride = _ => SessionConsentDecision.LeaveRequired;
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+
+                // Connection #1: action arrives, user declines.
+                coord.EnqueueActions(new[] { action }, sig);
+                if (coord.Decisions.Count != 1) { r.ErrorMessage = "#15 setup: expected 1 decision before reset"; return r; }
+                if (!coord.LeaveRequired) { r.ErrorMessage = "#15 setup: expected LeaveRequired flag"; return r; }
+
+                // Transport reset (simulated): all per-connection state goes away.
+                coord.Reset();
+                if (coord.Decisions.Count != 0) { r.ErrorMessage = $"#15 Reset left {coord.Decisions.Count} decisions"; return r; }
+                if (coord.PendingCount != 0) { r.ErrorMessage = $"#15 Reset left {coord.PendingCount} pending"; return r; }
+                if (coord.InFlight) { r.ErrorMessage = "#15 Reset left InFlight=true"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#15 Reset left LeaveRequired latched"; return r; }
+
+                // Connection #2: SAME plan signature arrives again — must reprompt (no stale dedup).
+                var promptCountAfterReset = 0;
+                coord.PromptOverride = _ => { promptCountAfterReset++; return SessionConsentDecision.ApprovedEnable; };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (promptCountAfterReset != 1) { r.ErrorMessage = $"#15 expected fresh prompt after reset, got {promptCountAfterReset}"; return r; }
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.ApprovedEnable)
+                { r.ErrorMessage = $"#15 new decision should be ApprovedEnable, got {coord.GetDecision(action, sig)}"; return r; }
+                if (coord.LeaveRequired) { r.ErrorMessage = "#15 LeaveRequired must not have been resurrected from prior connection"; return r; }
+                r.StepsPassed.Add("Reset clears decisions/queue/in-flight/LeaveRequired; same-sig re-enqueue prompts fresh");
+            }
+
+            // 16. Reset preserves wiring bindings (PromptOverride/ShowPrompt/Log) — they're
+            //     not per-connection state, they're the host's plumbing. A reset should not
+            //     unwire the production UI path.
+            {
+                var coord = new SessionConsentCoordinator();
+                int showPromptCalls = 0, logCalls = 0;
+                coord.ShowPrompt = (_, resolve) => { showPromptCalls++; resolve(SessionConsentDecision.ApprovedEnable); };
+                coord.Log = _ => logCalls++;
+                coord.Reset();
+                if (coord.ShowPrompt == null) { r.ErrorMessage = "#16 Reset cleared ShowPrompt wiring"; return r; }
+                if (coord.Log == null) { r.ErrorMessage = "#16 Reset cleared Log wiring"; return r; }
+                // Sanity: post-reset wiring still drives a new action through.
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (showPromptCalls != 1) { r.ErrorMessage = $"#16 post-reset ShowPrompt should fire once, got {showPromptCalls}"; return r; }
+                if (logCalls < 1) { r.ErrorMessage = $"#16 post-reset Log should fire at least once, got {logCalls}"; return r; }
+                r.StepsPassed.Add("Reset preserves ShowPrompt/Log wiring (per-host bindings, not per-connection state)");
+            }
+
+            // 17. P4.2 hardening — stale callback after Reset must NOT inject a decision.
+            //     Models the transport-reset race: a queued Godot button-press signal fires
+            //     AFTER Reset clears state but the closure that captured the resolve
+            //     callback is still alive. Without the in-flight-key guard, Finalize would
+            //     unconditionally write to _decisions / latch _leaveRequired on the
+            //     freshly-reset coordinator. The guard in Finalize must drop the call.
+            {
+                var coord = new SessionConsentCoordinator();
+                Action<SessionConsentDecision>? captured = null;
+                coord.ShowPrompt = (_, resolve) => { captured = resolve; };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);
+                if (captured == null) { r.ErrorMessage = "#17 ShowPrompt should have captured a resolve callback"; return r; }
+
+                // Reset wipes state — simulates ModManager's ResetSessionResolverRuntimeState
+                // firing while the prompt is still on-screen.
+                coord.Reset();
+                if (coord.Decisions.Count != 0) { r.ErrorMessage = "#17 setup: Reset should leave Decisions empty"; return r; }
+
+                // Stale Godot button-press signal arrives AFTER Reset. The captured closure
+                // is still alive and would have written to _decisions without the guard.
+                captured!(SessionConsentDecision.LeaveRequired);
+                if (coord.Decisions.Count != 0)
+                { r.ErrorMessage = $"#17 stale callback after Reset injected {coord.Decisions.Count} decisions"; return r; }
+                if (coord.LeaveRequired)
+                { r.ErrorMessage = "#17 stale LeaveRequired callback latched the flag on the reset coordinator"; return r; }
+                if (coord.InFlight)
+                { r.ErrorMessage = "#17 stale callback flipped InFlight back to true"; return r; }
+                r.StepsPassed.Add("stale callback after Reset is dropped (no ghost decision, no latched flag)");
+            }
+
+            // 18. Stale callback from action A must not contaminate a freshly-running new
+            //     action B if a new plan arrived between Reset and the late callback. The
+            //     in-flight-key guard distinguishes "current prompt" from "previous prompt"
+            //     by composite key, not just by null-ness of the in-flight slot.
+            {
+                var coord = new SessionConsentCoordinator();
+                Action<SessionConsentDecision>? capturedA = null;
+                coord.ShowPrompt = (_, resolve) => { capturedA = resolve; };
+                var actionA = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { actionA }, "sig-1");
+
+                coord.Reset();
+
+                // New connection, new plan, new action B — coordinator is in-flight on B.
+                Action<SessionConsentDecision>? capturedB = null;
+                coord.ShowPrompt = (_, resolve) => { capturedB = resolve; };
+                var actionB = new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { actionB }, "sig-2");
+
+                // Stale A signal arrives now (delayed Godot dispatch). Must be ignored.
+                capturedA!(SessionConsentDecision.LeaveRequired);
+                // User then clicks the real B prompt.
+                capturedB!(SessionConsentDecision.ApprovedEnable);
+
+                if (coord.Decisions.Count != 1)
+                { r.ErrorMessage = $"#18 expected exactly 1 decision (B), got {coord.Decisions.Count}"; return r; }
+                if (coord.GetDecision(actionB, "sig-2") != SessionConsentDecision.ApprovedEnable)
+                { r.ErrorMessage = "#18 B decision was lost / wrong value"; return r; }
+                if (coord.GetDecision(actionA, "sig-1") != SessionConsentDecision.None)
+                { r.ErrorMessage = "#18 stale A decision contaminated the post-reset state"; return r; }
+                if (coord.LeaveRequired)
+                { r.ErrorMessage = "#18 stale A LeaveRequired latched the new connection's coordinator"; return r; }
+                r.StepsPassed.Add("stale callback from prior action cannot contaminate a freshly-queued new action");
+            }
+
+            // 19. CRITICAL — same composite key cross-Reset. Models quick disconnect /
+            //     reconnect to the SAME lobby where the host re-broadcasts the identical
+            //     plan: new prompt fires for the same (planSignature, kind, modId) as the
+            //     pre-Reset one. A content-based key guard would falsely match the stale
+            //     callback here and let it inject a phantom decision (worst case: phantom
+            //     LeaveRequired latching the new connection). The monotonic-token guard
+            //     must reject it because the captured token from the pre-Reset prompt is
+            //     older than the post-Reset token.
+            {
+                var coord = new SessionConsentCoordinator();
+                Action<SessionConsentDecision>? capturedStale = null;
+                coord.ShowPrompt = (_, resolve) => { capturedStale = resolve; };
+                var action = new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession };
+                coord.EnqueueActions(new[] { action }, sig);   // first prompt captured
+
+                coord.Reset();   // transport reset — clears state but stale closure still alive
+
+                // Reconnect to SAME lobby: SAME plan, SAME signature, SAME action -> SAME composite key.
+                Action<SessionConsentDecision>? capturedFresh = null;
+                coord.ShowPrompt = (_, resolve) => { capturedFresh = resolve; };
+                coord.EnqueueActions(new[] { action }, sig);   // fresh prompt with identical key
+
+                // Now the delayed Godot dispatch fires the stale (pre-Reset) callback.
+                // Worst possible payload: user had been about to click Leave.
+                capturedStale!(SessionConsentDecision.LeaveRequired);
+
+                // The token guard must have rejected the stale call: no decision yet, fresh
+                // prompt still in flight, _leaveRequired still false.
+                if (coord.Decisions.Count != 0)
+                { r.ErrorMessage = $"#19 stale callback wrote a phantom decision (decisions={coord.Decisions.Count})"; return r; }
+                if (coord.LeaveRequired)
+                { r.ErrorMessage = "#19 stale LeaveRequired callback latched the post-Reset coordinator"; return r; }
+                if (!coord.InFlight)
+                { r.ErrorMessage = "#19 fresh prompt should still be in flight (stale callback should not have flipped InFlight=false)"; return r; }
+
+                // User then makes their real choice on the fresh prompt.
+                capturedFresh!(SessionConsentDecision.ApprovedEnable);
+                if (coord.GetDecision(action, sig) != SessionConsentDecision.ApprovedEnable)
+                { r.ErrorMessage = $"#19 fresh decision was lost (got {coord.GetDecision(action, sig)})"; return r; }
+                if (coord.LeaveRequired)
+                { r.ErrorMessage = "#19 the actual ApprovedEnable should not have latched LeaveRequired"; return r; }
+                r.StepsPassed.Add("same composite key cross-Reset: stale callback rejected by token, real click recorded");
+            }
+
             r.Success = true;
             return r;
         }

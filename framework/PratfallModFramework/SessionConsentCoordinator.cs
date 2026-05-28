@@ -34,6 +34,14 @@ internal sealed class SessionConsentCoordinator
     private readonly Queue<(SessionApplyAction Action, string PlanSignature)> _pending = new();
     private readonly HashSet<string> _queuedKeys = new(StringComparer.Ordinal);
     private bool _inFlight;
+    // P4.2 hardening: monotonic token uniquely identifying the prompt currently in
+    // flight. Bumped on every new prompt AND on Reset, so a stale Finalize callback
+    // carrying its old token always fails the guard — even when the new in-flight
+    // action has the same composite key (same plan signature + kind + mod id) as the
+    // pre-Reset one, which happens in quick disconnect/reconnect to the same lobby.
+    // A content-based key check would falsely match in that case and let the stale
+    // decision "win" the race; the token check correctly rejects it.
+    private long _inFlightToken;
     private bool _leaveRequired;
 
     public IReadOnlyDictionary<string, SessionConsentDecision> Decisions => _decisions;
@@ -76,6 +84,7 @@ internal sealed class SessionConsentCoordinator
 
         var (action, planSignature) = _pending.Dequeue();
         _inFlight = true;
+        var token = ++_inFlightToken;
 
         // Priority: PromptOverride (tests) > ShowPrompt (real UI) > auto-default
         // (headless / no UI wired). Auto-default is the safe choice: a user who
@@ -84,21 +93,32 @@ internal sealed class SessionConsentCoordinator
         if (PromptOverride != null)
         {
             var decision = PromptOverride(action);
-            Finalize(action, planSignature, decision);
+            Finalize(action, planSignature, decision, token);
             return;
         }
 
         if (ShowPrompt != null)
         {
-            ShowPrompt(action, decision => Finalize(action, planSignature, decision));
+            ShowPrompt(action, decision => Finalize(action, planSignature, decision, token));
             return;
         }
 
-        Finalize(action, planSignature, AutoDefault(action));
+        Finalize(action, planSignature, AutoDefault(action), token);
     }
 
-    private void Finalize(SessionApplyAction action, string planSignature, SessionConsentDecision decision)
+    private void Finalize(SessionApplyAction action, string planSignature, SessionConsentDecision decision, long token)
     {
+        // P4.2 hardening: reject stale callbacks via monotonic token. If Reset() ran
+        // between prompt-show and the user's click, _inFlightToken was bumped — the
+        // captured token from the orphaned prompt is now older than _inFlightToken.
+        // If a new action started being prompted (even with the same composite key —
+        // realistic in quick disconnect/reconnect to the same lobby), the new prompt
+        // got its own fresh token, so the stale callback still fails the guard. The
+        // token is also bumped on a successful Finalize → TryDriveNext, so an over-
+        // eager duplicate Pressed signal that double-fires from the SAME prompt is
+        // also caught (its captured token != the new current token).
+        if (token != _inFlightToken) return;
+
         var key = BuildKey(action, planSignature);
         _decisions[key] = decision;
         _queuedKeys.Remove(key);
@@ -123,5 +143,23 @@ internal sealed class SessionConsentCoordinator
     {
         var key = BuildKey(action, planSignature);
         return _decisions.TryGetValue(key, out var d) ? d : SessionConsentDecision.None;
+    }
+
+    // P4.2 hardening: clear all per-connection state. Called by ModManager on transport
+    // reset so consent decisions made before a disconnect can't silently suppress fresh
+    // prompts after reconnect. Intentionally does NOT clear PromptOverride / ShowPrompt /
+    // Log — those are wiring bindings owned by the host, not per-session state.
+    public void Reset()
+    {
+        _decisions.Clear();
+        _pending.Clear();
+        _queuedKeys.Clear();
+        _inFlight = false;
+        // Bump the in-flight token so any pre-Reset prompt's captured token is now
+        // stale: a delayed Godot signal arriving after Reset will fail the guard in
+        // Finalize and be dropped, even if a new prompt arrived for the same action
+        // post-Reset (its token would be even newer than this one).
+        _inFlightToken++;
+        _leaveRequired = false;
     }
 }

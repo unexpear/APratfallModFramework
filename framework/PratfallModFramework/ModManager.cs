@@ -1128,9 +1128,11 @@ public class ModManager : IDisposable
     }
 
     // P4.2 test seam: when set, the coordinator bypasses the UI prompt and answers
-    // synchronously with the override's return value. Tests use this to drive the
-    // queue without a Godot SceneTree.
-    public Func<SessionApplyAction, SessionConsentDecision>? SessionConsentPromptOverride
+    // synchronously with the override's return value. INTERNAL so external mods cannot
+    // reach it via ModManager.Instance and silently auto-approve every session-apply
+    // decision — that would violate the hard policy: "user consent decides what runs
+    // on that user's machine."
+    internal Func<SessionApplyAction, SessionConsentDecision>? SessionConsentPromptOverride
     {
         get => _sessionConsent.PromptOverride;
         set => _sessionConsent.PromptOverride = value;
@@ -2197,6 +2199,47 @@ public class ModManager : IDisposable
     private void OnTransportReset()
     {
         ResetPendingVotes("network transport reset");
+        ResetSessionResolverRuntimeState("network transport reset");
+    }
+
+    // P4.2 hardening: clear P3+P4.x session-resolver runtime state on transport reset
+    // so a reconnect within the same lobby starts fresh. Without this, the P4.1 plan-
+    // signature dedup would silently drop the host's next broadcast if its content
+    // matched the pre-reset signature, AND the coordinator's recorded decisions would
+    // silently suppress matching new consent prompts. Decisions from a prior connection
+    // do not apply to a new connection.
+    //
+    // Strict scope — clears ONLY per-connection runtime state. Does NOT touch:
+    //   - _desiredEnabled (saved truth: the user's enabled-mod preference)
+    //   - enabled_mods.json / WriteLoadedModsToFile (user's saved preference on disk)
+    //   - _checkedFingerprints / fingerprint cache (user-check state)
+    //   - _localMods (installed mod list)
+    //   - _modEnabled (runtime loaded state — owned by ApplyDesiredModsForSession +
+    //     ToggleMod, not by the session-resolver lifecycle)
+    // Also dismisses any active consent dialog so a stale prompt can't be clicked into
+    // the now-cleared coordinator (clears the coordinator FIRST so any racey button
+    // press after this point finalizes into already-empty state, then frees the layer).
+    private void ResetSessionResolverRuntimeState(string reason)
+    {
+        if (_activeSessionVoteIds.Count == 0 &&
+            _latestSessionPlan == null &&
+            _lastBroadcastPlanSignature == null &&
+            _lastReceivedPlanSignature == null &&
+            _sessionConsent.Decisions.Count == 0 &&
+            _sessionConsent.PendingCount == 0 &&
+            !_sessionConsent.InFlight &&
+            !_sessionConsent.LeaveRequired)
+        {
+            return;
+        }
+
+        GD.Print($"[ModFramework] Clearing session-resolver state: {reason}");
+        _activeSessionVoteIds.Clear();
+        _latestSessionPlan = null;
+        _lastBroadcastPlanSignature = null;
+        _lastReceivedPlanSignature = null;
+        _sessionConsent.Reset();
+        MainMenuIntegration.DismissSessionConsentPrompt();
     }
 
     private void ResetPendingVotes(string reason)

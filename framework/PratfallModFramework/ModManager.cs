@@ -1055,6 +1055,12 @@ public class ModManager : IDisposable
 
     // P4.1: host-side broadcast of the resolved plan. Dedup by content signature so repeated
     // RefreshSessionResolutionPlan calls producing the same plan don't re-broadcast.
+    // P4.2: also runs the host's OWN local consent flow here. The network layer rejects
+    // self-broadcasts (SenderIsLobbyMember excludes the sender), so OnSessionPlanResolvedReceived
+    // never fires on the host — without this call the host would never be prompted for its own
+    // session-apply decisions while clients would be. Same signature gates both broadcast and
+    // host-side enqueue so a duplicate call (e.g. repeated RefreshSessionResolutionPlan with no
+    // plan change) is a no-op for both.
     private void BroadcastSessionPlanIfHost(SessionResolutionPlan plan)
     {
         if (!_networkLayer.IsLocalHost) return;
@@ -1064,6 +1070,27 @@ public class ModManager : IDisposable
         _lastBroadcastPlanSignature = signature;
         _networkLayer.BroadcastSessionPlanResolved(plan);
         GD.Print($"[ModFramework] Session plan broadcast to clients: {plan}");
+        EnqueueSessionConsentForResolvedPlan(plan, signature);
+    }
+
+    // P4.2: shared local-consent path used by BOTH the host (called from BroadcastSessionPlanIfHost
+    // after a fresh broadcast) and clients (called from OnSessionPlanResolvedReceived after the
+    // receive-side dedup). Runs the pure planner against this player's installed + desired +
+    // runtime state and hands the actions to the coordinator. The coordinator's per-(planSig,
+    // kind, modId) dedup means a stray duplicate call is harmless.
+    private void EnqueueSessionConsentForResolvedPlan(SessionResolutionPlan plan, string planSignature)
+    {
+        try
+        {
+            var actions = SessionApplyPlanner.Plan(plan, _localMods, _desiredEnabled, _modEnabled);
+            foreach (var action in actions)
+                GD.Print($"[ModFramework]   planner: {action}");
+            _sessionConsent.EnqueueActions(actions, planSignature);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] SessionApplyPlanner failed locally: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     // P4.1: stable signature of a plan's broadcast-relevant fields. Used by both the host's
@@ -1080,8 +1107,9 @@ public class ModManager : IDisposable
 
     // P4.1: client-side receive — only from the lobby owner (host); dedup by signature;
     // populate local _latestSessionPlan; run SessionApplyPlanner.
-    // P4.2: after logging the planner output, enqueue per-action local consent prompts.
-    // Consent decisions are recorded for P4.3; this layer never applies.
+    // P4.2: hands off to the shared EnqueueSessionConsentForResolvedPlan helper so the
+    // client consent flow stays in lock-step with the host's (which runs the same helper
+    // from BroadcastSessionPlanIfHost since the host doesn't receive its own broadcast).
     private void OnSessionPlanResolvedReceived(string senderUserId, SessionResolutionPlan plan)
     {
         var lobbyOwnerUserId = _networkLayer.LobbyOwnerUserId;
@@ -1096,17 +1124,7 @@ public class ModManager : IDisposable
         _latestSessionPlan = plan;
         GD.Print($"[ModFramework] Session plan received from host: {plan}");
 
-        try
-        {
-            var actions = SessionApplyPlanner.Plan(plan, _localMods, _desiredEnabled, _modEnabled);
-            foreach (var action in actions)
-                GD.Print($"[ModFramework]   planner: {action}");
-            _sessionConsent.EnqueueActions(actions, signature);
-        }
-        catch (Exception ex)
-        {
-            GD.PrintErr($"[ModFramework] SessionApplyPlanner failed on client: {ex.GetType().Name}: {ex.Message}");
-        }
+        EnqueueSessionConsentForResolvedPlan(plan, signature);
     }
 
     // P4.2 test seam: when set, the coordinator bypasses the UI prompt and answers

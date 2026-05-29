@@ -10,11 +10,16 @@ namespace PratfallModFramework;
 // P4.2/P4.3 work that consumes this planner's output. See SESSION_MOD_RESOLVER_PLAN.md
 // "Hard policy" section.
 //
-// Network-prefab safety (Hard policy, Option A — strict):
-//   Only mods declaring Multiplayer.Mode == "local_only" are eligible for live session
-//   enable/disable. Everything else needing a runtime change yields
-//   UnsafeHotEnableRequiresRejoin (player must leave + rejoin to apply the change
-//   deterministically, so NetworkPrefabsConfig indices stay aligned across clients).
+// Live-eligibility (Hard policy, Option A — strict, + P4.3 PCK rule):
+//   A mod is eligible for a live session enable/disable ONLY if BOTH hold:
+//     1. Multiplayer.Mode == "local_only"  (else hot-changing it could shift
+//        NetworkPrefabsConfig indices and desync replication), AND
+//     2. it does NOT mount a resource pack (RequiresPckMount == false). Godot 4 cannot
+//        unmount a PCK once LoadResourcePack mounts it (see ModManager.MountModPckIfAny),
+//        so a "temporary" enable/disable of a PCK-backed mod is not cleanly reversible —
+//        session restore would leave resources stranded on res://.
+//   Anything failing either test yields UnsafeHotEnableRequiresRejoin (player must
+//   leave + rejoin, or restart, to apply the change safely).
 public static class SessionApplyPlanner
 {
     public static List<SessionApplyAction> Plan(
@@ -66,13 +71,22 @@ public static class SessionApplyPlanner
                 continue;
             }
 
-            if (IsLocalOnly(manifest))
+            if (!IsLocalOnly(manifest))
             {
                 actions.Add(new SessionApplyAction
                 {
                     ModId = modId,
-                    Kind = SessionApplyActionKind.EnableInstalledForSession,
-                    Reason = "installed but disabled; local_only mod can be hot-enabled for this session (consent required at apply time)",
+                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
+                    Reason = $"mod is not local_only (Multiplayer.Mode='{NormalizeMode(manifest)}'); hot-enable could shift NetworkPrefabsConfig indices — leave + rejoin required to apply safely",
+                });
+            }
+            else if (RequiresPckMount(manifest))
+            {
+                actions.Add(new SessionApplyAction
+                {
+                    ModId = modId,
+                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
+                    Reason = "mod mounts a resource pack (Godot 4 cannot unmount PCKs) so a live enable is not cleanly reversible — leave + rejoin (or restart) required to apply safely",
                 });
             }
             else
@@ -80,8 +94,8 @@ public static class SessionApplyPlanner
                 actions.Add(new SessionApplyAction
                 {
                     ModId = modId,
-                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
-                    Reason = $"mod is not local_only (Multiplayer.Mode='{NormalizeMode(manifest)}'); hot-enable could shift NetworkPrefabsConfig indices — leave + rejoin required to apply safely",
+                    Kind = SessionApplyActionKind.EnableInstalledForSession,
+                    Reason = "installed but disabled; local_only mod with no resource pack can be hot-enabled for this session (consent required at apply time)",
                 });
             }
         }
@@ -112,13 +126,22 @@ public static class SessionApplyPlanner
                 continue;
             }
 
-            if (IsLocalOnly(manifest))
+            if (!IsLocalOnly(manifest))
             {
                 actions.Add(new SessionApplyAction
                 {
                     ModId = modId,
-                    Kind = SessionApplyActionKind.DisableForSession,
-                    Reason = "currently loaded; local_only mod can be hot-disabled for this session (consent required at apply time)",
+                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
+                    Reason = $"mod is not local_only (Multiplayer.Mode='{NormalizeMode(manifest)}'); hot-disable could shift NetworkPrefabsConfig indices — leave + rejoin required to apply safely",
+                });
+            }
+            else if (RequiresPckMount(manifest))
+            {
+                actions.Add(new SessionApplyAction
+                {
+                    ModId = modId,
+                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
+                    Reason = "mod mounts a resource pack (Godot 4 cannot unmount PCKs) so a live disable is not cleanly reversible — leave + rejoin (or restart) required to apply safely",
                 });
             }
             else
@@ -126,8 +149,8 @@ public static class SessionApplyPlanner
                 actions.Add(new SessionApplyAction
                 {
                     ModId = modId,
-                    Kind = SessionApplyActionKind.UnsafeHotEnableRequiresRejoin,
-                    Reason = $"mod is not local_only (Multiplayer.Mode='{NormalizeMode(manifest)}'); hot-disable could shift NetworkPrefabsConfig indices — leave + rejoin required to apply safely",
+                    Kind = SessionApplyActionKind.DisableForSession,
+                    Reason = "currently loaded; local_only mod with no resource pack can be hot-disabled for this session (consent required at apply time)",
                 });
             }
         }
@@ -143,6 +166,17 @@ public static class SessionApplyPlanner
         var mode = manifest.Multiplayer?.Mode;
         return string.Equals(mode, ModNetworkModes.LocalOnly, StringComparison.OrdinalIgnoreCase);
     }
+
+    // P4.3: true when the mod mounts an asset package that Godot 4 cannot unmount at
+    // runtime, making a live session enable/disable irreversible. Conservative union of
+    // both package signals: PckFile (the framework PCK-mount input read by
+    // ModManager.MountModPckIfAny) and PackageName (the official-loader package, also
+    // pck-backed). Either present ⇒ not live-eligible. Shared by the planner (to classify
+    // as UnsafeHotEnableRequiresRejoin) and by P4.3 apply as defense-in-depth.
+    internal static bool RequiresPckMount(ModManifest manifest) =>
+        manifest != null &&
+        (!string.IsNullOrWhiteSpace(manifest.PckFile) ||
+         !string.IsNullOrWhiteSpace(manifest.PackageName));
 
     private static string NormalizeMode(ModManifest manifest) =>
         ModNetworkModes.Normalize(manifest.Multiplayer?.Mode);

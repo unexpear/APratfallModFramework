@@ -2675,6 +2675,45 @@ public static class ModFrameworkSelfTest
                 r.StepsPassed.Add("planner does not mutate desiredEnabled or runtimeEnabled inputs");
             }
 
+            // 8. P4.3 PCK rule — local_only mod that mounts a PCK is NOT live-eligible for
+            //    enable; Godot 4 can't unmount PCKs so it must rejoin instead.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModPck" });
+                var installed = new List<ModManifest> { NewLocalOnlyPckMod("ModPck") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPck"] = false };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPck"] = false };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.UnsafeHotEnableRequiresRejoin)
+                { r.ErrorMessage = $"#8 expected UnsafeHotEnableRequiresRejoin for PCK enable, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("local_only + PCK enable -> UnsafeHotEnableRequiresRejoin (not live-eligible)");
+            }
+
+            // 9. P4.3 PCK rule — same for a session disable of a PCK-mounting local_only mod.
+            {
+                var plan = NewResolvedPlan(disabled: new[] { "ModPck" });
+                var installed = new List<ModManifest> { NewLocalOnlyPckMod("ModPck") };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPck"] = true };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPck"] = true };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.UnsafeHotEnableRequiresRejoin)
+                { r.ErrorMessage = $"#9 expected UnsafeHotEnableRequiresRejoin for PCK disable, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("local_only + PCK disable -> UnsafeHotEnableRequiresRejoin (not live-eligible)");
+            }
+
+            // 10. PackageName (official-loader package) is also a PCK signal -> not live-eligible.
+            {
+                var plan = NewResolvedPlan(effective: new[] { "ModPkg" });
+                var pkgMod = new ModManifest { Id = "ModPkg", Name = "ModPkg", Version = "1.0.0", PackageName = "modpkg.pck" };
+                pkgMod.Multiplayer.Mode = ModNetworkModes.LocalOnly;
+                var installed = new List<ModManifest> { pkgMod };
+                var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPkg"] = false };
+                var runtime = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModPkg"] = false };
+                var actions = SessionApplyPlanner.Plan(plan, installed, desired, runtime);
+                if (actions.Count != 1 || actions[0].Kind != SessionApplyActionKind.UnsafeHotEnableRequiresRejoin)
+                { r.ErrorMessage = $"#10 expected UnsafeHotEnableRequiresRejoin for PackageName mod, got {ActionsText(actions)}"; return r; }
+                r.StepsPassed.Add("local_only + PackageName -> UnsafeHotEnableRequiresRejoin (not live-eligible)");
+            }
+
             r.Success = true;
             return r;
         }
@@ -2713,6 +2752,14 @@ public static class ModFrameworkSelfTest
         // Auto is the default; the planner classifies anything not LocalOnly as needing rejoin.
         var m = new ModManifest { Id = id, Name = id, Version = "1.0.0" };
         m.Multiplayer.Mode = ModNetworkModes.Auto;
+        return m;
+    }
+
+    // local_only BUT mounts a PCK -> not live-eligible (Godot can't unmount PCKs).
+    private static ModManifest NewLocalOnlyPckMod(string id)
+    {
+        var m = new ModManifest { Id = id, Name = id, Version = "1.0.0", PckFile = id + ".pck" };
+        m.Multiplayer.Mode = ModNetworkModes.LocalOnly;
         return m;
     }
 
@@ -3239,6 +3286,201 @@ public static class ModFrameworkSelfTest
                 if (coord.LeaveRequired)
                 { r.ErrorMessage = "#19 the actual ApprovedEnable should not have latched LeaveRequired"; return r; }
                 r.StepsPassed.Add("same composite key cross-Reset: stale callback rejected by token, real click recorded");
+            }
+
+            // 20. P4.3 — OnQueueDrained fires EXACTLY ONCE for a multi-action SYNCHRONOUS
+            //     batch. Without the _drainNotified latch, the recursive sync Finalize chain
+            //     would re-fire it on every unwinding stack frame (one fire per action),
+            //     causing OnSessionConsentDrained -> apply/LeaveLobby to run N times.
+            {
+                var coord = new SessionConsentCoordinator();
+                var drainCount = 0;
+                coord.OnQueueDrained = () => drainCount++;
+                coord.PromptOverride = _ => SessionConsentDecision.ApprovedEnable; // synchronous
+                var actions = new[]
+                {
+                    new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                    new SessionApplyAction { ModId = "ModC", Kind = SessionApplyActionKind.EnableInstalledForSession },
+                };
+                coord.EnqueueActions(actions, sig);
+                if (drainCount != 1) { r.ErrorMessage = $"#20 OnQueueDrained must fire once for a 3-action sync batch, fired {drainCount}"; return r; }
+                r.StepsPassed.Add("OnQueueDrained fires exactly once per sync batch (no recursive multi-fire)");
+            }
+
+            // 21. OnQueueDrained does NOT fire for an all-NoChange / nothing-queued enqueue,
+            //     and a second real batch re-arms and fires once more.
+            {
+                var coord = new SessionConsentCoordinator();
+                var drainCount = 0;
+                coord.OnQueueDrained = () => drainCount++;
+                coord.PromptOverride = _ => SessionConsentDecision.ApprovedEnable;
+
+                // All-NoChange: nothing queued -> must not fire.
+                coord.EnqueueActions(new[] { new SessionApplyAction { ModId = "ModA", Kind = SessionApplyActionKind.NoChange } }, sig);
+                if (drainCount != 0) { r.ErrorMessage = $"#21 all-NoChange enqueue must not fire OnQueueDrained, fired {drainCount}"; return r; }
+
+                // Real batch #1 -> fires once.
+                coord.EnqueueActions(new[] { new SessionApplyAction { ModId = "ModB", Kind = SessionApplyActionKind.EnableInstalledForSession } }, sig);
+                if (drainCount != 1) { r.ErrorMessage = $"#21 first real batch should fire once, total {drainCount}"; return r; }
+
+                // Real batch #2 (different mod) -> re-arms and fires once more.
+                coord.EnqueueActions(new[] { new SessionApplyAction { ModId = "ModC", Kind = SessionApplyActionKind.EnableInstalledForSession } }, sig);
+                if (drainCount != 2) { r.ErrorMessage = $"#21 second real batch should re-arm and fire, total {drainCount}"; return r; }
+                r.StepsPassed.Add("OnQueueDrained: no fire on empty enqueue; re-arms per real batch");
+            }
+
+            r.Success = true;
+            return r;
+        }
+        catch (Exception ex)
+        {
+            r.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            return r;
+        }
+    }
+#pragma warning restore CA1861
+
+    // P4.3: pure apply/restore decision-layer tests for SessionRuntimePlanner +
+    // SessionRuntimeSnapshot. Loader-free — verifies which runtime ops the consent
+    // decisions translate into, the defense-in-depth eligibility re-check (Option A +
+    // PCK rule), and that restore reverts only session-applied mods to their snapshot
+    // state (incl. the double-restore / idempotent case).
+#pragma warning disable CA1861 // test-only inline arrays as helper args; perf irrelevant
+    public static HelperTestResult RunSessionRuntimePlannerTests()
+    {
+        var r = new HelperTestResult();
+        try
+        {
+            // Helpers local to this test.
+            ModManifest LocalOnly(string id) { var m = new ModManifest { Id = id, Name = id, Version = "1.0.0" }; m.Multiplayer.Mode = ModNetworkModes.LocalOnly; return m; }
+            ModManifest NonLocal(string id) { var m = new ModManifest { Id = id, Name = id, Version = "1.0.0" }; m.Multiplayer.Mode = ModNetworkModes.Auto; return m; }
+            ModManifest LocalOnlyPck(string id) { var m = new ModManifest { Id = id, Name = id, Version = "1.0.0", PckFile = id + ".pck" }; m.Multiplayer.Mode = ModNetworkModes.LocalOnly; return m; }
+            Dictionary<string, ModManifest> Map(params ModManifest[] ms)
+            { var d = new Dictionary<string, ModManifest>(StringComparer.OrdinalIgnoreCase); foreach (var m in ms) d[m.Id] = m; return d; }
+            SessionApplyAction Act(string id, SessionApplyActionKind k) => new SessionApplyAction { ModId = id, Kind = k };
+
+            // 1. Snapshot capture / MarkApplied / TryGetOriginal round-trip.
+            {
+                var modEnabled = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true, ["ModB"] = false };
+                var snap = SessionRuntimeSnapshot.CaptureFrom(modEnabled);
+                if (!snap.TryGetOriginal("ModA", out var a) || !a) { r.ErrorMessage = "#1 ModA original should be true"; return r; }
+                if (!snap.TryGetOriginal("ModB", out var b) || b) { r.ErrorMessage = "#1 ModB original should be false"; return r; }
+                if (snap.TryGetOriginal("ModX", out _)) { r.ErrorMessage = "#1 ModX should be absent"; return r; }
+                snap.MarkApplied("ModA"); snap.MarkApplied("ModA"); // idempotent
+                if (snap.SessionAppliedMods.Count != 1) { r.ErrorMessage = "#1 MarkApplied should be idempotent"; return r; }
+                r.StepsPassed.Add("snapshot capture/mark/original round-trip");
+            }
+
+            // 2. ApprovedEnable -> Enable; ApprovedDisable -> Disable (live-eligible mods).
+            {
+                var actions = new List<SessionApplyAction>
+                {
+                    Act("ModA", SessionApplyActionKind.EnableInstalledForSession),
+                    Act("ModB", SessionApplyActionKind.DisableForSession),
+                };
+                var decisions = new Dictionary<string, SessionConsentDecision>(StringComparer.Ordinal)
+                {
+                    ["ModA"] = SessionConsentDecision.ApprovedEnable,
+                    ["ModB"] = SessionConsentDecision.ApprovedDisable,
+                };
+                var ops = SessionRuntimePlanner.ComputeApplyActions(
+                    actions, a => decisions.GetValueOrDefault(a.ModId, SessionConsentDecision.None), Map(LocalOnly("ModA"), LocalOnly("ModB")));
+                if (ops.Count != 2) { r.ErrorMessage = $"#2 expected 2 ops, got {ops.Count}"; return r; }
+                var enableA = ops.Find(o => o.ModId == "ModA");
+                var disableB = ops.Find(o => o.ModId == "ModB");
+                if (enableA == null || enableA.Op != SessionRuntimePlanner.RuntimeOp.Enable) { r.ErrorMessage = "#2 ModA should be Enable"; return r; }
+                if (disableB == null || disableB.Op != SessionRuntimePlanner.RuntimeOp.Disable) { r.ErrorMessage = "#2 ModB should be Disable"; return r; }
+                r.StepsPassed.Add("ApprovedEnable->Enable, ApprovedDisable->Disable");
+            }
+
+            // 3. Acknowledged / None / LeaveRequired produce NO ops.
+            {
+                var actions = new List<SessionApplyAction>
+                {
+                    Act("ModA", SessionApplyActionKind.EnableInstalledForSession),
+                    Act("ModB", SessionApplyActionKind.DisableForSession),
+                    Act("ModC", SessionApplyActionKind.EnableInstalledForSession),
+                };
+                var decisions = new Dictionary<string, SessionConsentDecision>(StringComparer.Ordinal)
+                {
+                    ["ModA"] = SessionConsentDecision.Acknowledged,
+                    ["ModB"] = SessionConsentDecision.LeaveRequired,
+                    // ModC: no entry -> None
+                };
+                var ops = SessionRuntimePlanner.ComputeApplyActions(
+                    actions, a => decisions.GetValueOrDefault(a.ModId, SessionConsentDecision.None), Map(LocalOnly("ModA"), LocalOnly("ModB"), LocalOnly("ModC")));
+                if (ops.Count != 0) { r.ErrorMessage = $"#3 expected 0 ops for non-approved decisions, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("Acknowledged/None/LeaveRequired -> no apply ops");
+            }
+
+            // 4. Defense-in-depth: ApprovedEnable for a NON-local_only mod is refused.
+            //    (planner shouldn't pair these, but the apply layer re-checks anyway.)
+            {
+                var actions = new List<SessionApplyAction> { Act("ModNet", SessionApplyActionKind.EnableInstalledForSession) };
+                var decisions = new Dictionary<string, SessionConsentDecision>(StringComparer.Ordinal) { ["ModNet"] = SessionConsentDecision.ApprovedEnable };
+                var ops = SessionRuntimePlanner.ComputeApplyActions(
+                    actions, a => decisions.GetValueOrDefault(a.ModId, SessionConsentDecision.None), Map(NonLocal("ModNet")));
+                if (ops.Count != 0) { r.ErrorMessage = $"#4 non-local_only ApprovedEnable must be refused, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("defense-in-depth: non-local_only ApprovedEnable refused");
+            }
+
+            // 5. Defense-in-depth: ApprovedEnable for a PCK-mounting local_only mod is refused.
+            {
+                var actions = new List<SessionApplyAction> { Act("ModPck", SessionApplyActionKind.EnableInstalledForSession) };
+                var decisions = new Dictionary<string, SessionConsentDecision>(StringComparer.Ordinal) { ["ModPck"] = SessionConsentDecision.ApprovedEnable };
+                var ops = SessionRuntimePlanner.ComputeApplyActions(
+                    actions, a => decisions.GetValueOrDefault(a.ModId, SessionConsentDecision.None), Map(LocalOnlyPck("ModPck")));
+                if (ops.Count != 0) { r.ErrorMessage = $"#5 PCK local_only ApprovedEnable must be refused, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("defense-in-depth: PCK local_only ApprovedEnable refused");
+            }
+
+            // 6. Defense-in-depth: ApprovedDisable for a PCK-mounting local_only mod is refused.
+            {
+                var actions = new List<SessionApplyAction> { Act("ModPck", SessionApplyActionKind.DisableForSession) };
+                var decisions = new Dictionary<string, SessionConsentDecision>(StringComparer.Ordinal) { ["ModPck"] = SessionConsentDecision.ApprovedDisable };
+                var ops = SessionRuntimePlanner.ComputeApplyActions(
+                    actions, a => decisions.GetValueOrDefault(a.ModId, SessionConsentDecision.None), Map(LocalOnlyPck("ModPck")));
+                if (ops.Count != 0) { r.ErrorMessage = $"#6 PCK local_only ApprovedDisable must be refused, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("defense-in-depth: PCK local_only ApprovedDisable refused");
+            }
+
+            // 7. Restore reverts ONLY SessionAppliedMods, back to their snapshot value.
+            {
+                // Pre-session: ModA on, ModB off, ModC on. Session enabled ModB, disabled ModC.
+                var snap = SessionRuntimeSnapshot.CaptureFrom(new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+                { ["ModA"] = true, ["ModB"] = false, ["ModC"] = true });
+                snap.MarkApplied("ModB"); // we turned it on
+                snap.MarkApplied("ModC"); // we turned it off
+                // Current runtime now reflects the session changes:
+                var current = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModA"] = true, ["ModB"] = true, ["ModC"] = false };
+                var ops = SessionRuntimePlanner.ComputeRestoreActions(snap, current);
+                if (ops.Count != 2) { r.ErrorMessage = $"#7 expected 2 restore ops, got {ops.Count}"; return r; }
+                var b = ops.Find(o => o.ModId == "ModB");
+                var c = ops.Find(o => o.ModId == "ModC");
+                if (b == null || b.Op != SessionRuntimePlanner.RuntimeOp.Disable) { r.ErrorMessage = "#7 ModB should revert to Disable"; return r; }
+                if (c == null || c.Op != SessionRuntimePlanner.RuntimeOp.Enable) { r.ErrorMessage = "#7 ModC should revert to Enable"; return r; }
+                // ModA was never session-applied -> never in restore ops.
+                if (ops.Exists(o => o.ModId == "ModA")) { r.ErrorMessage = "#7 ModA must not be restored (never session-applied)"; return r; }
+                r.StepsPassed.Add("restore reverts only SessionAppliedMods to snapshot value");
+            }
+
+            // 8. Restore is a no-op when current already matches snapshot (idempotent / double-restore).
+            {
+                var snap = SessionRuntimeSnapshot.CaptureFrom(new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModB"] = false });
+                snap.MarkApplied("ModB");
+                // Already reverted: current ModB == snapshot ModB == false.
+                var current = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["ModB"] = false };
+                var ops = SessionRuntimePlanner.ComputeRestoreActions(snap, current);
+                if (ops.Count != 0) { r.ErrorMessage = $"#8 expected 0 ops when already at snapshot, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("restore no-op when current==snapshot (idempotent)");
+            }
+
+            // 9. Null snapshot -> no restore ops (the double-restore sentinel).
+            {
+                var ops = SessionRuntimePlanner.ComputeRestoreActions(null, new Dictionary<string, bool>());
+                if (ops.Count != 0) { r.ErrorMessage = $"#9 null snapshot must yield 0 ops, got {ops.Count}"; return r; }
+                r.StepsPassed.Add("null snapshot -> no restore ops");
             }
 
             r.Success = true;

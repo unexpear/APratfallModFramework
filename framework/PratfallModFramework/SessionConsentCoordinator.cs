@@ -29,11 +29,28 @@ internal sealed class SessionConsentCoordinator
     // don't want noise.
     public System.Action<string>? Log { get; set; }
 
+    // P4.3: fired exactly once each time the pending queue transitions to fully
+    // drained (last in-flight decision just finalized and nothing remains queued).
+    // ModManager subscribes to decide apply-vs-leave AFTER all consent is collected.
+    // Fires from the SAME (non-stale) Finalize that empties the queue, so it inherits
+    // the token guard — a stale callback that fails the token check never reaches the
+    // drain logic and never fires this. Does NOT fire if LeaveRequired latched is the
+    // caller's concern to check; the callback only signals "collection complete".
+    public System.Action? OnQueueDrained { get; set; }
+
     private readonly Dictionary<string, SessionConsentDecision> _decisions =
         new(StringComparer.Ordinal);
     private readonly Queue<(SessionApplyAction Action, string PlanSignature)> _pending = new();
     private readonly HashSet<string> _queuedKeys = new(StringComparer.Ordinal);
     private bool _inFlight;
+    // P4.3: arm/disarm latch so OnQueueDrained fires EXACTLY ONCE per drain. Armed
+    // (false) when EnqueueActions queues real work; the first Finalize that empties the
+    // queue fires the callback and disarms (true). Critical for the SYNCHRONOUS path
+    // (PromptOverride / headless AutoDefault): there, Finalize calls TryDriveNext which
+    // recurses through the whole batch, so without this latch every unwinding stack frame
+    // would re-observe "queue empty" and fire OnQueueDrained again (N fires for N actions).
+    // Starts true (disarmed): an empty coordinator has nothing to drain.
+    private bool _drainNotified = true;
     // P4.2 hardening: monotonic token uniquely identifying the prompt currently in
     // flight. Bumped on every new prompt AND on Reset, so a stale Finalize callback
     // carrying its old token always fails the guard — even when the new in-flight
@@ -60,6 +77,7 @@ internal sealed class SessionConsentCoordinator
     public void EnqueueActions(IReadOnlyList<SessionApplyAction> actions, string planSignature)
     {
         if (actions == null) return;
+        var enqueuedAny = false;
         foreach (var action in actions)
         {
             // NoChange: nothing to prompt about. The planner emits these for
@@ -73,7 +91,11 @@ internal sealed class SessionConsentCoordinator
             if (!_queuedKeys.Add(key)) continue;
 
             _pending.Enqueue((action, planSignature));
+            enqueuedAny = true;
         }
+        // Arm the drain notification only if real work was queued. An all-NoChange or
+        // all-dedup-skip enqueue must NOT cause a spurious OnQueueDrained.
+        if (enqueuedAny) _drainNotified = false;
         TryDriveNext();
     }
 
@@ -127,6 +149,18 @@ internal sealed class SessionConsentCoordinator
         Log?.Invoke("[ModFramework] Session consent recorded: " + action.Kind + " " + (action.ModId ?? "") + " -> " + decision);
         _inFlight = false;
         TryDriveNext();
+
+        // Fire OnQueueDrained once when the queue is genuinely empty and nothing is back
+        // in flight. The _drainNotified latch guarantees exactly one fire per drain even
+        // on the synchronous path, where TryDriveNext recurses through the whole batch and
+        // every unwinding frame would otherwise re-observe the empty queue. Reached only on
+        // the non-stale path (the token guard above already returned for stale callbacks),
+        // so a delayed pre-Reset signal can't spuriously trigger apply.
+        if (!_inFlight && _pending.Count == 0 && !_drainNotified)
+        {
+            _drainNotified = true;
+            OnQueueDrained?.Invoke();
+        }
     }
 
     // Headless / no-UI fallback. CannotContinue is informational, so we
@@ -160,6 +194,8 @@ internal sealed class SessionConsentCoordinator
         // Finalize and be dropped, even if a new prompt arrived for the same action
         // post-Reset (its token would be even newer than this one).
         _inFlightToken++;
+        // Disarm: a reset clears the queue, so there is no pending drain to announce.
+        _drainNotified = true;
         _leaveRequired = false;
     }
 }

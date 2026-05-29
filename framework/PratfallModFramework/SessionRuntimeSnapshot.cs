@@ -26,4 +26,17 @@ public sealed class SessionRuntimeSnapshot
             snap.ModEnabledSnapshot[pair.Key] = pair.Value;
         return snap;
     }
+
+    // P4.3: record that the session-apply path runtime-toggled this mod, so restore knows
+    // which mods to revert. Idempotent.
+    public void MarkApplied(string modId)
+    {
+        if (!string.IsNullOrWhiteSpace(modId))
+            SessionAppliedMods.Add(modId);
+    }
+
+    // P4.3: the captured pre-session runtime-enabled state for a mod. Returns false (with
+    // wasEnabled=false) if the mod wasn't present at capture time — treated as "was off".
+    public bool TryGetOriginal(string modId, out bool wasEnabled) =>
+        ModEnabledSnapshot.TryGetValue(modId, out wasEnabled);
 }

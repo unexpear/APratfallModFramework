@@ -46,6 +46,14 @@ public class ModManager : IDisposable
     // exposed as SessionConsentPromptOverride (Func<SessionApplyAction, SessionConsentDecision>?)
     // so tests can answer synchronously without spinning up the Godot UI.
     private readonly SessionConsentCoordinator _sessionConsent = new();
+    // P4.3: pre-session runtime snapshot, captured lazily right before the first session-
+    // scoped runtime change. null = no session changes applied yet, OR already restored
+    // (the double-restore sentinel: every restore entry point no-ops when this is null).
+    private SessionRuntimeSnapshot? _sessionSnapshot;
+    // P4.3: set when a consent-approved enable could NOT be satisfied at runtime (load
+    // failed). Informational — the session set isn't fully satisfied, so a rejoin is
+    // recommended. Never persisted; cleared on restore.
+    private bool _sessionApplyDegraded;
     private VoteUI? _voteUI;
     private List<ModManifest> _localMods = new();
     private readonly Dictionary<string, bool> _desiredEnabled = new(StringComparer.OrdinalIgnoreCase);
@@ -96,6 +104,10 @@ public class ModManager : IDisposable
         NativeModUiSuppressor.Apply();
         OfficialModBridge.Install();
         WorkshopSubscriber.Apply();
+        // P4.3: restore temporary session-scoped runtime changes when the game returns to
+        // the main menu (the universal session-end point). Idempotent + main-thread (the
+        // patched GameController.LoadMainMenuScene runs on the main thread).
+        SessionEndHooks.Install(OnSessionEnd);
         SessionStartHooks.Install(kind =>
         {
             ApplyDesiredModsForSession();
@@ -147,6 +159,10 @@ public class ModManager : IDisposable
             BuildSessionConsentPromptArgs(action, _localMods, out var title, out var body, out var choices);
             MainMenuIntegration.ShowSessionConsentPrompt(_tree, title, body, choices, resolve);
         };
+        // P4.3: when consent collection finishes, apply the approved runtime changes — or
+        // leave the lobby if any decision required it. Apply-vs-leave is decided here, AFTER
+        // all prompts resolve, so a single LeaveRequired anywhere in the batch wins.
+        _sessionConsent.OnQueueDrained = OnSessionConsentDrained;
 
         MainMenuIntegration.Install(tree,
             onModsPressed: () => GD.Print("[ModFramework] Mods dialog opened"),
@@ -1093,6 +1109,167 @@ public class ModManager : IDisposable
         }
     }
 
+    // P4.3: consent collection finished. If any decision required leaving, leave (after
+    // restoring any prior session-applied changes); otherwise apply the approved runtime
+    // changes. Apply-vs-leave is decided ONCE here, after the whole batch resolves, so a
+    // single LeaveRequired anywhere wins over partial approvals.
+    private void OnSessionConsentDrained()
+    {
+        if (_sessionConsent.LeaveRequired)
+        {
+            GD.Print("[ModFramework] Session consent requires leaving — not applying any session changes.");
+            // Restore anything a PRIOR drain in this session already applied, then leave.
+            RestoreSessionRuntimeState("consent declined / leave required");
+            if (!ModNetworkLayer.LeaveLobby())
+                GD.PrintErr("[ModFramework] LeaveLobby failed; user may need to leave manually.");
+            return;
+        }
+
+        ApplySessionConsentDecisions();
+    }
+
+    // P4.3: execute the runtime ops the user APPROVED. Reuses the runtime-only primitives
+    // EnableMod/DisableMod(broadcast:false) — they mutate _modEnabled + call the loader but
+    // never touch _desiredEnabled or persist. Snapshot is captured lazily right before the
+    // first change so restore reverts to the player's pre-session loadout. One BroadcastManifest
+    // after the batch (mirrors ApplyDesiredModsForSession), never per-op.
+    private void ApplySessionConsentDecisions()
+    {
+        var plan = _latestSessionPlan;
+        if (plan == null || !plan.Resolved) return;
+
+        var signature = ComputePlanSignature(plan);
+        List<SessionRuntimePlanner.RuntimeApplyAction> ops;
+        try
+        {
+            var actions = SessionApplyPlanner.Plan(plan, _localMods, _desiredEnabled, _modEnabled);
+            var installedById = BuildInstalledModMap();
+            ops = SessionRuntimePlanner.ComputeApplyActions(
+                actions,
+                action => _sessionConsent.GetDecision(action, signature),
+                installedById);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] ComputeApplyActions failed: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        if (ops.Count == 0) return;
+
+        // Lazy capture: the runtime state right now IS the pre-session-change baseline
+        // (already includes the session-start ApplyDesiredModsForSession result).
+        _sessionSnapshot ??= SessionRuntimeSnapshot.CaptureFrom(_modEnabled);
+
+        var changed = false;
+        foreach (var op in ops)
+        {
+            if (op.Op == SessionRuntimePlanner.RuntimeOp.Enable)
+            {
+                if (EnableMod(op.ModId, broadcast: false))
+                {
+                    _sessionSnapshot.MarkApplied(op.ModId);
+                    changed = true;
+                }
+                else
+                {
+                    // Fail-safe: the loader already rolled back + logged. Don't persist,
+                    // don't pretend the session set is satisfied — flag degraded + recommend rejoin.
+                    _sessionApplyDegraded = true;
+                    GD.PrintErr($"[ModFramework] Session enable failed for {op.ModId}; session set not fully satisfied — rejoin recommended.");
+                }
+            }
+            else // Disable
+            {
+                DisableMod(op.ModId, broadcast: false);
+                _sessionSnapshot.MarkApplied(op.ModId);
+                changed = true;
+            }
+        }
+
+        if (changed)
+            _networkLayer.BroadcastManifest();
+        GD.Print($"[ModFramework] Session apply complete: {_sessionSnapshot.SessionAppliedMods.Count} mod(s) toggled for this session" +
+                 (_sessionApplyDegraded ? " (degraded — rejoin recommended)" : ""));
+    }
+
+    // P4.3: main-thread marshal wrapper for restore. Both known callers (SessionEndHooks
+    // prefix on GameController.LoadMainMenuScene; OnTransportReset via Godot Timer) are
+    // proven main-thread, so this currently calls through directly. The marshal pattern
+    // (Callable.From(...).CallDeferred(), see WorkshopSubscriber) is the documented fallback
+    // if a future caller is ever off-thread.
+    private void RequestRestoreSessionRuntimeState(string reason)
+    {
+        RestoreSessionRuntimeState(reason);
+    }
+
+    // P4.3: revert the mods the session-apply path toggled back to their captured pre-session
+    // runtime state. Idempotent: no-op when _sessionSnapshot is null (the double-restore
+    // sentinel — leave→menu, transport-reset→menu, etc. all converge harmlessly). Reuses the
+    // runtime-only EnableMod/DisableMod(broadcast:false). Nulls the snapshot at the end even
+    // on partial failure so saved prefs (untouched here) cleanly re-derive next session.
+    private void RestoreSessionRuntimeState(string reason)
+    {
+        var snapshot = _sessionSnapshot;
+        if (snapshot == null) return;
+
+        List<SessionRuntimePlanner.RuntimeApplyAction> ops;
+        try
+        {
+            ops = SessionRuntimePlanner.ComputeRestoreActions(snapshot, _modEnabled);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[ModFramework] ComputeRestoreActions failed: {ex.GetType().Name}: {ex.Message}");
+            ops = new List<SessionRuntimePlanner.RuntimeApplyAction>();
+        }
+
+        if (ops.Count > 0)
+            GD.Print($"[ModFramework] Restoring pre-session mod state ({reason}): {ops.Count} mod(s)");
+
+        var changed = false;
+        foreach (var op in ops)
+        {
+            try
+            {
+                if (op.Op == SessionRuntimePlanner.RuntimeOp.Enable)
+                    changed |= EnableMod(op.ModId, broadcast: false);
+                else
+                {
+                    DisableMod(op.ModId, broadcast: false);
+                    changed = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[ModFramework] Restore op {op} failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // Null the snapshot regardless of partial failure — saved prefs are untouched, so
+        // the next session re-derives cleanly from _desiredEnabled.
+        _sessionSnapshot = null;
+        _sessionApplyDegraded = false;
+        if (changed)
+            _networkLayer.BroadcastManifest();
+    }
+
+    // P4.3: session-end (return to main menu) handler wired to SessionEndHooks.
+    private void OnSessionEnd()
+    {
+        RequestRestoreSessionRuntimeState("returned to main menu");
+    }
+
+    // P4.3: id -> manifest for the apply-time defense-in-depth eligibility re-check.
+    private Dictionary<string, ModManifest> BuildInstalledModMap()
+    {
+        var map = new Dictionary<string, ModManifest>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in _localMods)
+            if (m != null && !string.IsNullOrWhiteSpace(m.Id))
+                map.TryAdd(m.Id, m);
+        return map;
+    }
+
     // P4.1: stable signature of a plan's broadcast-relevant fields. Used by both the host's
     // broadcast dedup and the client's receive dedup. Built from the four sets (sorted
     // case-insensitively) + Resolved flag — identical signature means identical plan content.
@@ -1214,7 +1391,11 @@ public class ModManager : IDisposable
 
             case SessionApplyActionKind.UnsafeHotEnableRequiresRejoin:
                 title = "Rejoin required";
-                body = "This mod cannot be safely enabled live because it may affect multiplayer/networked runtime state:\n\n" +
+                // Two distinct causes route here (see SessionApplyPlanner): the mod is not
+                // local_only (network-prefab index safety), OR it mounts a resource pack
+                // Godot 4 cannot unmount (not cleanly reversible). Wording covers both
+                // without asserting which — the planner's Reason carries the specifics in logs.
+                body = "This mod can't be safely changed mid-session and needs a leave + rejoin (or restart) to apply:\n\n" +
                        nameAndVersion + "\n\n" +
                        "Leave and rejoin after enabling/installing the required mod set.";
                 choices = new (string, SessionConsentDecision)[]
@@ -2198,6 +2379,15 @@ public class ModManager : IDisposable
 
     private void OnTransportReset()
     {
+        // P4.3: restore temporary session-scoped runtime changes FIRST (while the snapshot
+        // still exists), THEN clear the resolver/consent/signature state. Order matters:
+        // ResetSessionResolverRuntimeState clears the consent coordinator, but restore reads
+        // the separate _sessionSnapshot, so the two don't collide — restore still runs first
+        // for clarity and to null the snapshot before the clears. Proven main-thread: this
+        // fires from PollNetworkState via a Godot Timer.Timeout (ModNetworkLayer), so calling
+        // the loader directly is safe; RequestRestoreSessionRuntimeState marshals defensively
+        // if that ever stops being true.
+        RequestRestoreSessionRuntimeState("network transport reset");
         ResetPendingVotes("network transport reset");
         ResetSessionResolverRuntimeState("network transport reset");
     }

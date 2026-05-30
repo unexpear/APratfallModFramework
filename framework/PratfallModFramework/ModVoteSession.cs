@@ -8,8 +8,17 @@ public class ModVoteSession
 
     public event Action<string, bool>? OnVoteResolved;
 
-    // rule defaults to Majority so existing compatibility-vote callers stay byte-equivalent.
-    public void StartVote(string voteId, ModManifest manifest, int totalPlayers, SessionVoteRule rule = SessionVoteRule.Majority)
+    // Binary-compat overload: ModVoteSession + StartVote are public, and mods compiled
+    // against the pre-P3 framework call this exact 3-arg method. P3 added the SessionVoteRule
+    // parameter; a defaulted param is source-compatible but NOT binary-compatible, so the
+    // 3-arg method must continue to exist as its own slot or those mods throw
+    // MissingMethodException at load. Forwards to the 4-arg form with the historical default
+    // (Majority). NOTE: the 4-arg overload deliberately has NO default — keeping one here
+    // would make StartVote(a,b,c) an ambiguous call (CS0121) against this overload.
+    public void StartVote(string voteId, ModManifest manifest, int totalPlayers)
+        => StartVote(voteId, manifest, totalPlayers, SessionVoteRule.Majority);
+
+    public void StartVote(string voteId, ModManifest manifest, int totalPlayers, SessionVoteRule rule)
     {
         if (_activeVotes.ContainsKey(voteId))
         {

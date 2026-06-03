@@ -130,15 +130,15 @@ The mod folder name must be **unique** across all installed mods — it's the na
 
 ### `enabled_mods.json`
 
-Inside the official `<GameDir>\mods\` directory, the loader keeps an `enabled_mods.json` file — a JSON array of **mod folder names**, NOT display names:
+Inside the official `<GameDir>\mods\` directory, the loader keeps an `enabled_mods.json` file — a JSON array of **full mod directory paths** (the absolute path the loader builds from `OS.GetExecutablePath()` + `/mods/<folder>`), NOT bare folder names and NOT display names:
 
 ```json
-["Author.SomeMod", "Author.AnotherMod"]
+["D:\\SteamLibrary\\steamapps\\common\\Pratfall/mods/Author.SomeMod"]
 ```
 
-Cecil-verified from `ModManager.IsModEnabled(manifest)` IL: each string is compared against `manifest.DirectoryName` (the folder name). So if your mod folder is `Author.MyMod`, the entry in `enabled_mods.json` must be exactly `Author.MyMod` — the `Name` field from your manifest is for display only and does NOT gate loading.
+Cecil-verified from `ModManager.IsModEnabled(manifest)` IL: each entry is compared (exact string match) against `manifest.Directory` — the mod's **full absolute path** — *not* `manifest.DirectoryName` (the bare folder) and *not* `Name` (display only). So a bare folder name like `Author.MyMod` will **not** match; the entry has to be the exact full path the loader computed (note the mixed separators it produces: `\` through the install root, then `/mods/<folder>`). The `Name` field never gates loading.
 
-For manual testing, you can edit `enabled_mods.json` directly with a text editor, or use Pratfall's in-game Mods button which writes it for you on each toggle. If the file is absent or empty (`[]`), no mods are enabled at launch (unless they have `AutoLoad: true` in their manifest).
+For manual testing, prefer Pratfall's in-game Mods button — it writes the correct full path on each toggle. Hand-editing works too, but you must use the exact absolute path or the mod won't be recognized. If the file is absent or empty (`[]`), no mods are enabled at launch (unless they have `AutoLoad: true` in their manifest).
 
 ## Lifecycle
 
@@ -184,7 +184,7 @@ Pratfall reads these from its command line at startup:
 | Flag | Effect |
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
-| `--qh-skip-mods` | **Currently a no-op** despite the flag-reading code being present. `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")` per Cecil (verified `1.1.0.R2973`), but no code path in Pratfall actually reads `ShouldLoadMods` — the getter is defined but unused. Probably intended for a future refactor; document here so debug users don't rely on it. |
+| `--qh-skip-mods` | `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")` (Cecil-verified). **Now wired up** as of Steam build `23505941`: `ModManager.Setup` passes a `LoadAllModManifests` completion callback that reads `ShouldLoadMods` (it had exactly 0 callers in older builds — `1.1.0.R2973` — which is where the "no-op" note came from; it has 1 caller now). The flag is therefore consumed; the exact post-load skip behavior isn't fully traced here, so test it if you depend on it. |
 | `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder. Cecil-confirmed in `ModManager.CreateModDirectory`. **Useful for profile-based mod managers** (Thunderstore / r2modman) — see the [profile / mod-manager-compat note below](#profile--mod-manager-compat). |
 | `--qh-skip-preload` | Skips resource preloading on launch. Auto-skipped already when the GPU vendor contains "Intel" (workaround for an Intel preload bug); this flag forces-skips on any GPU. Cecil-confirmed in `Preloader.SkipPreload`. |
 | `--qh-disable-login` | Disables EOS (Epic Online Services) login at launch. Useful for dev iteration when you don't want Steam→EOS authentication to fire. |
@@ -707,7 +707,7 @@ Key facts:
 - **Local member identity:** `Network.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
 - **All members:** `Network.LobbyManager.LobbyMembers` (List).
 - **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<INetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
-- **Custom network event ids:** pick anything outside `100–154` (gameplay events) and `230–231` (stats events) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
+- **Custom network event ids:** pick anything outside `100–154` (gameplay events) and `230–231` (`EventIdGameModeChanged` + `EventIdSubmitSpeedrunTime`) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
 - **README compatibility tag:** mod authors in comparable communities (Risk of Rain 2, Lethal Company, REPO) self-tag mods as one of:
   - **Client-side only** — visual / UI only; the host doesn't need your mod, lobby members with or without it are compatible
   - **Host-only** — only the host runs the logic; clients are unaffected
@@ -719,7 +719,7 @@ Key facts:
 
 `NetworkEventManager.SendEvent<T>` and `NetworkFrameEvent.GetEvent<T>` are constrained `where T : INetworkEvent`, so **your payload type must implement `INetworkEvent`** — a `Serialize(ByteBufferWriter)` and a `Deserialize(ByteBufferReader)` that write/read your fields in the *same order*. The receive handler signature is `void (ushort eventId, NetworkFrameEvent eventData)`; the `eventId` is not the payload — read it with `eventData.GetEvent<T>()`. Sender identity is **not** exposed to the handler, so embed it in the payload if you need it.
 
-**`SendEvent` does NOT loop back to the sender — this holds whether you call it on `Network.EventManager` or on a `NetworkComponent` (Cecil-verified: both paths only serialize the payload onto the outgoing frame; neither invokes the local handler).** If the host calls `SendEvent`, only the *other* players' `OnNetworkEventReceived` fires — the host's does not. Same for a client: it won't receive its own event. So don't put your state-change logic *only* inside `OnNetworkEventReceived` — factor it into a shared `Apply…` method that the **sender calls locally right after `SendEvent`** and that **receivers call from the handler**. (`GameEventBus` is a separate, local pub/sub system and does not have this caveat.) The whole block below is verified to compile against the current build.
+**`SendEvent` does NOT loop back to the sender — this holds whether you call it on `Network.EventManager` or on a `NetworkComponent` (Cecil-verified: both paths only serialize the payload onto the outgoing frame; neither invokes the local handler).** If the host calls `SendEvent`, only the *other* players' `OnNetworkEventReceived` fires — the host's does not. Same for a client: it won't receive its own event. So don't put your state-change logic *only* inside `OnNetworkEventReceived` — factor it into a shared `Apply…` method that the **sender calls locally right after `SendEvent`** and that **receivers call from the handler**. (`GameEventBus` is a separate, local pub/sub system and does not have this caveat.) The whole block below is verified to compile against the current shipped build (Steam build `23505941`).
 
 ```csharp
 using Godot;
@@ -979,7 +979,7 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Add an in-game language | Drop a JSON in `<userData>/localization/` ([recipe](#recipe-add-a-language)) |
 | Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
 | Add a custom `Node` / `Resource` type | Set `AddAssemblyToGodot: true` in manifest ([recipe](#recipe-custom-godot-types)) |
-| Change a game mode / level / color | **DON'T** — those arrays are save-coupled by index. See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
+| Add a game mode or level | Safe — neither is saved by index. (Player **colors** ARE save-coupled — don't insert/reorder those.) See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
 | Spawn an entity from code | `ScenePoolManager.Instance.Instantiate(packedScene, parent)` for local-only, `Network.ComponentManager.SpawnNetworkPrefab(prefab, parent)` for replicated ([recipe](#recipe-spawn-an-entity)) |
 | Hook game ticks | Override `_Process` / `_PhysicsProcess` on a `Node` you parent under `Game.RootNode`, or use `MainThreadDispatcher.Instance.Enqueue(Action)` for one-shot off-thread → main-thread dispatch |
 | Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
@@ -991,9 +991,9 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 
 **Game state & flow**
 - `GameController` — top-level game state, level loading orchestration
-- `GameModeManager` — game-mode list + active mode (`Modes` array is save-coupled, see [pitfalls](#save-coupled-arrays--dont-mutate))
+- `GameModeManager` — game-mode list + active mode (`Modes` is **safe to extend** — the selected mode isn't saved by index; see [pitfalls](#save-coupled-arrays--dont-mutate))
 - `CustomGameManager` — custom-game preset state
-- `LevelManager` — level prefab list (`LevelPrefabs` array is save-coupled)
+- `LevelManager` — level prefab list (`LevelPrefabs` is **safe to extend** — no level index is persisted)
 - `LifecycleManager` — drives `_Ready` / `_Process` / `_PhysicsProcess` ordering for `ILifecycleHandler`s
 - `SceneManager` — scene transition queue
 - `Loader` / `Preloader` / `LoadingScreenManager` — resource + scene loading pipeline
@@ -1080,7 +1080,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `WorldEntity` — root world entity
 - `WorldTextManager` — floating-text labels
 - `YarnBallEntity` — main-menu yarn ball (cosmetic)
-- `ProceduralCaveComponent` — procedural cave generation singleton (also referenced via save-coupled `BiomeGenerationConfigs`)
+- `ProceduralCaveComponent` — procedural cave generation singleton (holds `BiomeGenerationConfigs` — multiplayer-deterministic, keep identical across the lobby; not save-coupled)
 - `NodeInstanceRegistry` — scene-node lookup by ID
 - `NodeCounter<T>` — debug-only generic node counter
 - `ImGuiGodot.ImGuiController` — Dear ImGui integration (debug builds)
@@ -1100,7 +1100,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `InputSettingsHelper` — keybind/gamepad-mapping IO
 - `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
 - `LifecycleHelper` — lifecycle-handler registration helpers
-- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> of mod folder names), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mod folder — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (defined but currently unused per Cecil), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
+- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> — the enabled set read from `enabled_mods.json`; entries are **full mod directory paths**, not bare folder names, and `IsModEnabled` exact-matches them against `manifest.Directory`), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mods **folder path** — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (`!HasFlag("--qh-skip-mods")` — now read by `ModManager.Setup`'s `LoadAllModManifests` callback as of build `23505941`; was unused in `1.1.0.R2973`), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
 - `NetworkHelper` — common multiplayer helpers
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
@@ -1119,7 +1119,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 | `GameConfig` | `Game.Config` | Top-level — `AllowUserLocalization`, `BuildId`, … `init`-only setters, struct semantics |
 | `NetworkConfig` | game internals | network-tuning |
 | `NetworkPrefabsConfig` | `NetworkComponentManager` | networked-prefab registry |
-| `GameModeBaseConfig` + `GameModeCustomConfig` / `GameModeSpeedrunConfig` / `GameModeStoryConfig` | `GameModeManager.Modes[i]` | per-mode config — save-coupled |
+| `GameModeBaseConfig` + `GameModeCustomConfig` / `GameModeSpeedrunConfig` / `GameModeStoryConfig` | `GameModeManager.Modes[i]` | per-mode config — **safe to extend** (mode isn't saved by index) |
 | `AudioStreamsPreloadConfig` | `AudioManager` | audio preload list |
 | `BiomeConfig` + `BiomeGenerationConfig` | `ProceduralCaveComponent` | biome tuning — multiplayer-deterministic, don't mutate |
 | `MaterialConfig` | physics + audio | per-material physics/sound rules |
@@ -1233,7 +1233,7 @@ GameModeManager, etc.)            DynamicParticleManager,
 ```
 
 Concrete entities (24 total, Cecil-counted):
-- `NodeEntity`, `Node3DEntity`, `RigidBody3DEntity`, `StaticBody3DEntity` — base classes
+- `NodeEntity`, `Node3DEntity`, `RigidBody3DEntity`, `RigidBody3DCheapEntity`, `StaticBody3DEntity` — base classes (`RigidBody3DCheapEntity` added in the 2026-06-01 update — a lighter-weight `RigidBody3D` entity)
 - `Player` (extends `RigidBody3DEntity`) — **the main thing mods care about**
 - `WorldEntity`, `YarnBallEntity` — world-root entities
 - Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `HangDebuggerNode`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
@@ -1354,15 +1354,23 @@ Cecil-scanned distinct top-level folders that appear as `res://X/...` string lit
 
 ### Save-coupled arrays — don't mutate
 
-These arrays are referenced by save-game data via **index**. Adding entries shifts every existing player's saved choice and silently corrupts their data. Don't touch:
+*Some* config arrays are referenced from saved data by **index**, so adding or reordering entries repoints every existing player's saved choice and corrupts it. But this is **not** true of every index-array — verify against what the game actually persists before assuming. The authoritative source is the `Savegame` type's serialized fields (checked via Cecil against Steam build `23505941`); the only index-coupled save fields there are the cosmetic colors.
 
-- `PlayerColorsConfig.Colors: Color[]` — saved color index
-- `GameModeManager.Modes: GameModeBaseConfig[]` — saved game-mode index
-- `LevelManager.LevelPrefabs: PackedScene[]` — saved level-prefab index
-- `ProceduralCaveComponent.BiomeGenerationConfigs` — also affects procedural determinism → multiplayer would diverge
-- `OptionsUIViewController.TabBarItems: OptionsContentUIViewBase[]` — milder, but still shifts tab indices
+**Genuinely save-coupled — do NOT add/reorder:**
 
-If you need to add a game mode / level / color, your mod has to ship a fresh save profile (advanced — Pratfall doesn't have first-class support for this yet). Stick with extension points that are array-of-records-by-content (like `RandomWeightedDropPool.Pool` — see [drop pool recipe](#recipe-extend-a-drop-pool)) rather than array-of-references-by-index.
+- `PlayerColorsConfig.Colors: Color[]` — `Savegame` stores `PlayerColorIndex`, `NoseColorIndex`, and `ShirtColorIndex` as plain `int`s into this list. Inserting or reordering colors repoints every player's saved cosmetic choice.
+
+**NOT save-coupled — safe to extend** (verified: no such index exists in `Savegame`, and dev-confirmed):
+
+- `GameModeManager.Modes: GameModeBaseConfig[]` — **adding a game mode does not brick saves.** The selected mode is not written to the savegame; only the custom mode's last settings are saved (by content, not by a `Modes[]` index). The runtime `GameModeManager._currentModeIndex` is a replicated `NetworkVarByte` for multiplayer sync, not a persisted value. *(Dev-confirmed, Tim: "We do not save the game mode, we just save the last changes in the custom game mode. The index itself is not written to a savegame.")*
+- `LevelManager.LevelPrefabs: PackedScene[]` — no level-prefab index is persisted in `Savegame` either.
+
+**Separate concern — not about saves:**
+
+- `ProceduralCaveComponent.BiomeGenerationConfigs` — mutating these doesn't corrupt saves, but it changes procedural generation, so a modded host and a vanilla client would **diverge in multiplayer**. Keep these identical across the lobby.
+- `OptionsUIViewController.TabBarItems: OptionsContentUIViewBase[]` — reordering shifts the in-session options tab layout; it isn't persisted to saves.
+
+Bottom line: adding a game mode or level is fine. For the cosmetic **color** arrays, prefer additive-by-content patterns (like `RandomWeightedDropPool.Pool` — see [drop pool recipe](#recipe-extend-a-drop-pool)) or accept that inserting shifts saved color indices.
 
 ## Debugging & dev iteration
 
@@ -1617,7 +1625,7 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 
 - **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-17.)
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
-- **Don't mutate save-coupled arrays.** `PlayerColorsConfig.Colors`, `GameModeManager.Modes`, `LevelManager.LevelPrefabs` are all indexed by save-game data — mutating them invalidates existing player saves.
+- **Mind the one genuinely save-coupled array.** `PlayerColorsConfig.Colors` is indexed by save data (`Savegame.PlayerColorIndex` / `NoseColorIndex` / `ShirtColorIndex`) — inserting/reordering colors invalidates existing players' saved cosmetics. `GameModeManager.Modes` and `LevelManager.LevelPrefabs` are **not** saved by index — adding a game mode or level is safe. See [Save-coupled arrays](#save-coupled-arrays--dont-mutate).
 - **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
 - **`Game.Config` is a value-type struct with `init`-only setters.** Mods cannot mutate config flags at runtime — not even via reflection (the `modreq(IsExternalInit)` modifier enforces this at the C# language level, and even reflection-based hacks would write to a copy because `Game.Config` returns the struct by value). If `Game.Config.AllowUserLocalization == false` on the shipped build, your mod can't flip it; either ship a JSON-only locale that side-loads via `TranslationServer.AddTranslation` directly, or wait for the dev to enable the flag.
 - **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub — `GameEventBus` IS a singleton with `Instance`, but the event itself is static). `Constants.EventId*` are `const ushort` numeric IDs (values like `129`, `115`) for `Network.EventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel — `NetworkEventManager` is an *instance* accessed through the `Network` singleton, NOT a static class). Don't mix them — subscribing to a `GameEventBus` handler hoping a numeric event id will match would match nothing.

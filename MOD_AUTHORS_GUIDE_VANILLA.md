@@ -24,14 +24,14 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 16. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
 17. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
     - [17.1 "How do I ...?" quick-reference](#how-do-i-)
-    - [17.2 Singletons (73)](#singletons-73)
+    - [17.2 Singletons (78)](#singletons-78)
     - [17.3 Static helper classes (22)](#static-helper-classes-22)
-    - [17.4 Configs & Settings (26)](#configs--settings-26)
+    - [17.4 Configs & Settings (27)](#configs--settings-27)
     - [17.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
-    - [17.6 `GameplayTags.*` (40)](#gameplaytags-40)
-    - [17.7 `Constants.EventId*` (57)](#constantseventid-57)
-    - [17.8 Entity hierarchy & `IEntity` (24 entities, 184 component-accessors)](#entity-hierarchy--ientity)
-    - [17.9 `IComponent` implementors (184)](#icomponent-implementors-184)
+    - [17.6 `GameplayTags.*` (42)](#gameplaytags-42)
+    - [17.7 `Constants.EventId*` (72)](#constantseventid-72)
+    - [17.8 Entity hierarchy & `IEntity` (27 entities, 203 component-accessors)](#entity-hierarchy--ientity)
+    - [17.9 `IComponent` implementors (203)](#icomponent-implementors-203)
     - [17.10 Public interfaces (13)](#public-interfaces-13)
     - [17.11 `res://` path conventions](#res-path-conventions)
     - [17.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
@@ -115,8 +115,7 @@ MyMod/
   "Description": "Does something cool.",
   "Assembly": "MyMod.dll",
   "PackageName": "",
-  "AutoLoad": false,
-  "AddAssemblyToGodot": true
+  "AutoLoad": false
 }
 ```
 
@@ -124,7 +123,6 @@ Key fields:
 - `Assembly` — DLL filename in the mod folder. Pratfall's loader will resolve `<mod folder>/<Assembly>` and `LoadFromAssemblyPath` it.
 - `PackageName` — optional `.pck` filename. If set, the loader mounts the package and tries to instantiate `res://<DirectoryName>/root.tscn` under `Game.RootNode`.
 - `AutoLoad` (default `false`) — when `true`, the loader auto-enables the mod at launch even if previously disabled. Useful for mods that ship runtime infrastructure.
-- `AddAssemblyToGodot` (default `true`) — registers your mod's types with Godot's script bridge so custom `Node` / `Resource` subclasses work from `.tscn` and `PackedScene.Instantiate`. Don't set false unless you have a specific reason.
 
 The mod folder name must be **unique** across all installed mods — it's the namespace for any assets in your `.pck` (Pratfall mounts them at `res://<DirectoryName>/...`).
 
@@ -184,7 +182,7 @@ Pratfall reads these from its command line at startup:
 | Flag | Effect |
 |---|---|
 | `--qh-disable-mod-ui` | Hides the native Mod button on the main menu. (`ModManager.ShouldHideModLoaderUi` returns true.) |
-| `--qh-skip-mods` | **Skips loading all mods.** `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")`; `ModManager.Setup`'s `LoadAllModManifests` completion callback then does `if (ShouldLoadMods) { LoadEnabledMods(); LoadAutoLoadMods(); }`. So with the flag set, **neither enabled mods nor `AutoLoad: true` mods are loaded** — manifests are still scanned (the list is built), but nothing is loaded or enabled. Cecil-verified from `ModManager.Setup` + the `<Setup>b__22_1` callback IL (build `23505941`). *(Was genuinely a no-op in `1.1.0.R2973` — `ShouldLoadMods` had 0 callers then; the game wired it up since.)* |
+| `--qh-skip-mods` | **Skips loading all mods.** `ModManager.ShouldLoadMods` returns `!HasFlag("--qh-skip-mods")`; `ModManager.Setup`'s `LoadAllModManifests` completion callback then does `if (ShouldLoadMods) { LoadEnabledMods(); LoadAutoLoadMods(); }`. So with the flag set, **neither enabled mods nor `AutoLoad: true` mods are loaded** — manifests are still scanned (the list is built), but nothing is loaded or enabled. Cecil-verified from `ModManager.Setup` + the `<Setup>b__21_1` callback IL (build `23570525`). *(Was genuinely a no-op in `1.1.0.R2973` — `ShouldLoadMods` had 0 callers then; the game wired it up since.)* |
 | `--qh-mod-directory <path>` | Overrides the mods folder. Pratfall's loader normally computes the path from `OS.GetExecutablePath()`; this flag lets you point it at a different folder. Cecil-confirmed in `ModManager.CreateModDirectory`. **Useful for profile-based mod managers** (Thunderstore / r2modman) — see the [profile / mod-manager-compat note below](#profile--mod-manager-compat). |
 | `--qh-skip-preload` | Skips resource preloading on launch. Auto-skipped already when the GPU vendor contains "Intel" (workaround for an Intel preload bug); this flag forces-skips on any GPU. Cecil-confirmed in `Preloader.SkipPreload`. |
 | `--qh-disable-login` | Disables EOS (Epic Online Services) login at launch. Useful for dev iteration when you don't want Steam→EOS authentication to fire. |
@@ -401,7 +399,7 @@ Pratfall publishes events via `GameEventBus.SendEvent<T>(GameplayTag tag, T even
 
 **You don't need `GameEventBus` for your mod's own logic.** It exists mainly so the game's stats / achievements can react to gameplay without hard coupling (per Robert, #mod-dev). Use it to *react to events the game fires* — like the player-death example below — but for your mod's own internal control flow, just call your own method directly rather than routing through the bus.
 
-**Use the pre-defined `GameplayTags` static class for the tag reference** — Pratfall ships ~40 named `GameplayTag` constants (loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor). `GameplayTag.Equals` compares by `.Tag` string, so an Equals check against `GameplayTags.X` always works.
+**Use the pre-defined `GameplayTags` static class for the tag reference** — Pratfall ships ~42 named `GameplayTag` constants (loaded from `res://data/gameplay_tags/*.tres` in the `GameplayTags` static cctor). `GameplayTag.Equals` compares by `.Tag` string, so an Equals check against `GameplayTags.X` always works.
 
 ```csharp
 using Godot;
@@ -432,7 +430,7 @@ public static class ModEntry
 }
 ```
 
-All 40 available tags are listed in [GameplayTags.* (40)](#gameplaytags-40) below, grouped by category (stats, win conditions, status effects, materials, harvestables).
+All 42 available tags are listed in [GameplayTags.* (42)](#gameplaytags-42) below, grouped by category (stats, win conditions, status effects, materials, harvestables).
 
 ## Recipe: Show HUD button hints
 
@@ -639,7 +637,7 @@ public static class ModEntry
 ```
 
 Gotchas:
-- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-57) table.
+- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-72) table.
 - `Network.EventManager` is **the** subscription target — a **static property** that returns the live `NetworkEventManager` instance (use `Network.EventManager`, never `Network.Instance.EventManager`; every `Network.*` manager is a static accessor). The events fire whether you're host, client, or singleplayer.
 - The `NetworkFrameEvent` payload exposes `EventId`, `TargetId`, and `Data` (the raw bytes). For loaded-level you don't need the payload; for other events, call `ev.GetEvent<YourEventType>()` to deserialize.
 
@@ -678,7 +676,7 @@ public static class ModEntry
     {
         if (!IsHost()) return;  // only the host replays state to new joiners
         // Send mod state to the joiner via Network.EventManager.SendEvent
-        // with a custom eventId outside 100–154 and 230–231 to avoid collisions
+        // with a custom eventId outside 100–169 and 230–231 to avoid collisions
         // (see the Constants.EventId* table for the used range).
         // const ushort MyModStateSyncId = 50000;
         // Network.EventManager.SendEvent(MyModStateSyncId, mySnapshot,
@@ -707,7 +705,7 @@ Key facts:
 - **Local member identity:** `Network.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
 - **All members:** `Network.LobbyManager.LobbyMembers` (List).
 - **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<INetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
-- **Custom network event ids:** pick anything outside `100–154` (gameplay events) and `230–231` (`EventIdGameModeChanged` + `EventIdSubmitSpeedrunTime`) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
+- **Custom network event ids:** pick anything outside `100–169` (gameplay events) and `230–231` (`EventIdGameModeChanged` + `EventIdSubmitSpeedrunTime`) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
 - **README compatibility tag:** mod authors in comparable communities (Risk of Rain 2, Lethal Company, REPO) self-tag mods as one of:
   - **Client-side only** — visual / UI only; the host doesn't need your mod, lobby members with or without it are compatible
   - **Host-only** — only the host runs the logic; clients are unaffected
@@ -726,7 +724,7 @@ using Godot;
 
 public static class ModEntry
 {
-    private const ushort CrownEventId = 50000;   // outside the game's 100–154 / 230–231 range
+    private const ushort CrownEventId = 50000;   // outside the game's 100–169 / 230–231 range
 
     public static void ModInit()
     {
@@ -850,9 +848,11 @@ Gotchas:
 
 ## Recipe: Custom Godot types
 
-Mods that ship `.tscn` files or instantiate custom Godot-derived types (`class MyComponent : Node3D`, `class MyResource : Resource`, `[GlobalClass]` attributes) need their assembly registered with Godot's script bridge. Pratfall's loader does this automatically when your manifest has `AddAssemblyToGodot: true` (the default).
+Mods that ship `.tscn` files or instantiate custom Godot-derived types (`class MyComponent : Node3D`, `class MyResource : Resource`, `[GlobalClass]` attributes) need their assembly registered with Godot's script bridge. **Registration is now automatic — no manifest flag.** Pratfall's loader's `LoadAssembly` always calls `Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly` for every mod assembly (verified build `23570525`), so custom `Node` / `Resource` subclasses work from `.tscn` and `PackedScene.Instantiate` with no opt-in.
 
-So: **don't set `AddAssemblyToGodot: false`** unless you have a specific reason. No code recipe is needed — the registration is handled by the loader, not your mod.
+So: **no code recipe and no manifest field is needed** — the registration is handled by the loader, not your mod.
+
+> **The `AddAssemblyToGodot` opt-out was removed in the 2026-06 big update.** It used to be a manifest field defaulting to `true`; registration is now unconditional, so the flag no longer exists. If you carried it over from an old manifest, it's simply ignored.
 
 Under the hood, Pratfall calls `Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(yourAssembly)` after loading your DLL. If you ever need to call it manually (e.g. for a runtime-loaded sub-assembly), you can:
 
@@ -974,18 +974,18 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Find the local player's components | `Player.LocalPlayer.<ComponentName>Component` — every component on `IEntity` is a property (see [Entity hierarchy](#entity-hierarchy--ientity)) |
 | React to a save | `SavegameManager.OnGameWillSave` / `OnGameDidSave` ([recipe](#recipe-persist-mod-data)) |
 | React to a player dying | Subscribe `GameEventBus.OnGameEventReceived` and compare `tag.Equals(GameplayTags.Stats_Gameplay_Player_Death)` ([recipe](#recipe-listen-to-game-events)) |
-| Send a custom network message | `Network.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — `T` must implement `INetworkEvent`; pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-57). `Network.EventManager` is a static property returning the live instance |
+| Send a custom network message | `Network.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — `T` must implement `INetworkEvent`; pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-72). `Network.EventManager` is a static property returning the live instance |
 | Add a HUD prompt ("Press [A]") | `ButtonPrompBarController.Instance.AddButtonPrompt(...)` ([recipe](#recipe-show-hud-button-hints)) |
 | Add an in-game language | Drop a JSON in `<userData>/localization/` ([recipe](#recipe-add-a-language)) |
 | Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
-| Add a custom `Node` / `Resource` type | Set `AddAssemblyToGodot: true` in manifest ([recipe](#recipe-custom-godot-types)) |
+| Add a custom `Node` / `Resource` type | Automatic — the loader registers every mod assembly with Godot's script bridge; no manifest flag ([recipe](#recipe-custom-godot-types)) |
 | Add a game mode or level | Safe — neither is saved by index. (Player **colors** ARE save-coupled — don't insert/reorder those.) See [Save-coupled arrays](#save-coupled-arrays--dont-mutate) |
 | Spawn an entity from code | `ScenePoolManager.Instance.Instantiate(packedScene, parent)` for local-only, `Network.ComponentManager.SpawnNetworkPrefab(prefab, parent)` for replicated ([recipe](#recipe-spawn-an-entity)) |
 | Hook game ticks | Override `_Process` / `_PhysicsProcess` on a `Node` you parent under `Game.RootNode`, or use `MainThreadDispatcher.Instance.Enqueue(Action)` for one-shot off-thread → main-thread dispatch |
 | Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
 | Know which config is "the game settings" | `Game.Config` — but it's a struct with `init`-only setters, you can read but not mutate |
 
-### Singletons (73)
+### Singletons (78)
 
 A *singleton* here is a public class with a static `Instance` field or static-getter property. Access via `<Name>.Instance.<Member>`. Many are HUD/UI controllers that are **null on the main menu** — they only exist while a gameplay scene is loaded. (Generic/internal infrastructure singletons such as `NodeCounter<T>` are omitted — they're not author-facing.)
 
@@ -999,6 +999,8 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `Loader` / `Preloader` / `LoadingScreenManager` — resource + scene loading pipeline
 - `ScenePoolManager` — pooled scene instances (for `IPooledObject` reuse)
 - `DebugMappingManager` — game's drop-pool registry (`DropPools` array). Populated by the active scene, not by code
+- `GoldManager` — gold economy / currency state
+- `HubItemManager` — hub item state
 
 **Audio**
 - `AudioManager` — SFX
@@ -1053,6 +1055,9 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `MenuDogAnimationsComponent` — main-menu dog (cosmetic)
 - `PerformanceMonitorUIController` — fps overlay
 - `SpeedrunUIController`
+- `GameStartChallengeUIController` — challenge-mode start screen
+- `GameStartProgressionUIController` — progression-mode start screen
+- `RescueVictoryUIViewController` — rescue-victory screen
 
 **Localization & saves**
 - `LocalizationManager` — language + user-locale loader ([recipe](#recipe-add-a-language))
@@ -1100,7 +1105,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `InputSettingsHelper` — keybind/gamepad-mapping IO
 - `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
 - `LifecycleHelper` — lifecycle-handler registration helpers
-- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> — the enabled set read from `enabled_mods.json`; entries are **full mod directory paths**, not bare folder names, and `IsModEnabled` exact-matches them against `manifest.Directory`), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mods **folder path** — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (`!HasFlag("--qh-skip-mods")` — now read by `ModManager.Setup`'s `LoadAllModManifests` callback as of build `23505941`; was unused in `1.1.0.R2973`), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `LoadedMods` directly. ([lifecycle recipe](#lifecycle))
+- **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> — the enabled set read from `enabled_mods.json`; entries are **full mod directory paths**, not bare folder names, and `IsModEnabled` exact-matches them against `manifest.Directory`), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mods **folder path** — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (`!HasFlag("--qh-skip-mods")` — now read by `ModManager.Setup`'s `LoadAllModManifests` callback as of build `23505941`; was unused in `1.1.0.R2973`), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `Mods` (the `List<ModManifest>` property) or call `GetModManifestFromDirectory`. ([lifecycle recipe](#lifecycle))
 - `NetworkHelper` — common multiplayer helpers
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
@@ -1110,7 +1115,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `SteamLeaderboardHelper` — Steam leaderboard wrappers
 - `TimeFormatHelper` — duration formatting
 
-### Configs & Settings (26)
+### Configs & Settings (27)
 
 `*Config` and `*Settings` types — game-tuning data. Most are read via `Manager.Instance.Config` or `Game.Config`. **Don't mutate at runtime** — they're either struct-by-value (changes don't stick) or save-coupled (mutating breaks other players' saves).
 
@@ -1119,7 +1124,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 | `GameConfig` | `Game.Config` | Top-level — `AllowUserLocalization`, `BuildId`, … `init`-only setters, struct semantics |
 | `NetworkConfig` | game internals | network-tuning |
 | `NetworkPrefabsConfig` | `NetworkComponentManager` | networked-prefab registry |
-| `GameModeBaseConfig` + `GameModeCustomConfig` / `GameModeSpeedrunConfig` / `GameModeStoryConfig` | `GameModeManager.Modes[i]` | per-mode config — **safe to extend** (mode isn't saved by index) |
+| `GameModeBaseConfig` + `GameModeCustomConfig` / `GameModeSpeedrunConfig` / `GameModeStoryConfig` / `GameModeProgressionConfig` | `GameModeManager.Modes[i]` | per-mode config — **safe to extend** (mode isn't saved by index) |
 | `AudioStreamsPreloadConfig` | `AudioManager` | audio preload list |
 | `BiomeConfig` + `BiomeGenerationConfig` | `ProceduralCaveComponent` | biome tuning — multiplayer-deterministic, don't mutate |
 | `MaterialConfig` | physics + audio | per-material physics/sound rules |
@@ -1151,7 +1156,7 @@ Mod-relevant public events (filtered to public `add_*` methods on Pratfall's own
 
 There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLoad` callback that only the game itself subscribes to. For mods, load your state in `ModInit` by reading your file directly.
 
-### `GameplayTags.*` (40)
+### `GameplayTags.*` (42)
 
 `GameplayTag` resources pre-loaded from `res://data/gameplay_tags/*.tres` by the `GameplayTags` static class. Use these for `GameEventBus` filtering — compare with `incomingTag.Equals(GameplayTags.X)` (value equality on `.Tag` string, so the static-vs-runtime instance gotcha doesn't bite you).
 
@@ -1162,6 +1167,7 @@ There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLo
 - `Stats_Gameplay_Ate`, `Stats_Gameplay_Ate_Freeze_Pop`, `Stats_Gameplay_Ate_Grape_Juice`
 - `Stats_Gameplay_Stick_Chameleon_Grenade`, `Stats_Gameplay_Stuck_Sticky_Bomb`
 - `Stats_Gameplay_Depth_Reached`, `Stats_Gameplay_New_Depth`, `Stats_Gameplay_Finish_Game`, `Stats_Gameplay_Win`
+- `Stats_Gameplay_Collected_Gold`, `Stats_Gameplay_Win_Treasure`
 - `Stats_Gameplay_Revived_Player_Direct`, `Stats_Gameplay_Revived_Player_Statue`
 - `Stats_Gameplay_Died_By_Explosion`
 - `Stats_Unlocked`
@@ -1178,7 +1184,7 @@ There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLo
 **Harvestables** (ground-resource categories)
 - `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
 
-### `Constants.EventId*` (57)
+### `Constants.EventId*` (72)
 
 `ushort` (System.UInt16) constants holding numeric event IDs (`Constants.EventIdJump = 129`). Used by `Network.EventManager.SendEvent(UInt16 eventId, T evt, NetworkMessageSendOption opt, string eventIdName)` for **low-level network messages** — the `eventIdName` parameter is a separate human-readable debug-name string, NOT the event id itself. Different system from `GameEventBus` / `GameplayTags` — don't mix them.
 
@@ -1186,37 +1192,44 @@ Sorted by numeric ID:
 
 | ID | EventId | ID | EventId |
 |---|---|---|---|
-| 100 | `EventIdInteraction` | 128 | `EventIdContactDamage` |
-| 101 | `EventIdEmote` | 129 | `EventIdJump` |
-| 102 | `EventIdCameraShake` | 130 | `EventIdBootApply` |
-| 103 | `EventIdRequestLevelLoad` | 131 | `EventIdPlayHungrySound` |
-| 104 | `EventIdStartMission` | 132 | `EventIdDigPlayerFree` |
-| 105 | `EventIdEndMission` | 133 | `EventIdChangeMaterialAt` |
-| 106 | `EventIdDebugShowItemTray` | 134 | `EventIdChangeFloorAt` |
-| 107 | `EventIdTakeDamage` | 135 | `EventIdSetUnconscious` |
-| 108 | `EventIdApplyImpulse` | 136 | `EventIdDropInventory` |
-| 109 | `EventIdShootCannon` | 137 | `EventIdBootApplyStart` |
-| 110 | `EventIdShovelPosition` | 138 | `EventIdShowToast` |
-| 111 | `EventIdRequestRevive` | 139 | `EventIdPlayEmote` |
-| 112 | `EventIdTookDamage` | 140 | `EventIdBatEat` |
-| 113 | `EventIdExplode` | 141 | `EventIdTriggerContact` |
-| 114 | `EventIdNetworkGroupUnregistered` | 142 | `EventIdTeleport` |
-| 115 | `EventIdGameOver` | 143 | `EventIdKnockBat` |
-| 116 | `EventIdCloseGameOverUI` | 144 | `EventIdRequestStartTeleportEffect` |
-| 117 | `EventIdGameRestart` | 145 | `EventIdTriggerGameEnd` |
-| 118 | `EventIdCaughtPlayer` | 146 | `EventIdTriggerExtractor` |
-| 119 | `EventIdLoadedLevel` | 147 | `EventIdQuickRestart` |
-| 120 | `EventIdUnloadLevel` | 148 | `EventIdSetLevelActive` |
-| 121 | `EventIdUnloadLevelAck` | 149 | `EventIdNotifyFlareStick` |
-| 122 | `EventIdEquipCosmetic` | 150 | `EventIdBatHitWithObject` |
-| 123 | `EventIdHonk` | 151 | `EventIdUpdateCustomGameSettings` |
-| 124 | `EventIdLaserBeamSpawn` | 152 | `EventIdResetRagdoll` |
-| 125 | `EventIdPickaxeAction` | 153 | `EventIdRequestMarkLateJoin` |
-| 126 | `EventIdEnemySpit` | 230 | `EventIdGameModeChanged` |
-| 127 | `EventIdGenerateBranch` | 231 | `EventIdSubmitSpeedrunTime` |
-| 154 | `EventIdDropInteractable` |  |  |
+| 100 | `EventIdInteraction` | 136 | `EventIdDropInventory` |
+| 101 | `EventIdEmote` | 137 | `EventIdBootApplyStart` |
+| 102 | `EventIdCameraShake` | 138 | `EventIdShowToast` |
+| 103 | `EventIdRequestLevelLoad` | 139 | `EventIdPlayEmote` |
+| 104 | `EventIdStartMission` | 140 | `EventIdBatEat` |
+| 105 | `EventIdEndMission` | 141 | `EventIdTriggerContact` |
+| 106 | `EventIdDebugShowItemTray` | 142 | `EventIdTeleport` |
+| 107 | `EventIdTakeDamage` | 143 | `EventIdKnockBat` |
+| 108 | `EventIdApplyImpulse` | 144 | `EventIdRequestStartTeleportEffect` |
+| 109 | `EventIdShootCannon` | 145 | `EventIdTriggerGameEnd` |
+| 110 | `EventIdShovelPosition` | 146 | `EventIdTriggerExtractor` |
+| 111 | `EventIdRequestRevive` | 147 | `EventIdQuickRestart` |
+| 112 | `EventIdTookDamage` | 148 | `EventIdSetLevelActive` |
+| 113 | `EventIdExplode` | 149 | `EventIdNotifyFlareStick` |
+| 114 | `EventIdNetworkGroupUnregistered` | 150 | `EventIdBatHitWithObject` |
+| 115 | `EventIdGameOver` | 151 | `EventIdUpdateCustomGameSettings` |
+| 116 | `EventIdCloseGameOverUI` | 152 | `EventIdResetRagdoll` |
+| 117 | `EventIdGameRestart` | 153 | `EventIdUpdateProgressionGameSettings` |
+| 118 | `EventIdCaughtPlayer` | 154 | `EventIdRequestMarkLateJoin` |
+| 119 | `EventIdLoadedLevel` | 155 | `EventIdSpawnGoldCoin` |
+| 120 | `EventIdUnloadLevel` | 156 | `EventIdCollectGoldCoin` |
+| 121 | `EventIdUnloadLevelAck` | 157 | `EventIdLoadGameplayLevel` |
+| 122 | `EventIdEquipCosmetic` | 158 | `EventIdApplyGold` |
+| 123 | `EventIdHonk` | 159 | `EventIdKnockbackAndKillBat` |
+| 124 | `EventIdLaserBeamSpawn` | 160 | `EventIdDropInteractable` |
+| 125 | `EventIdPickaxeAction` | 161 | `EventIdVendingMachineAnimation` |
+| 126 | `EventIdEnemySpit` | 162 | `EventIdGenerateSmallBranchBlob` |
+| 127 | `EventIdGenerateBranch` | 163 | `EventIdKnockbackPlayer` |
+| 128 | `EventIdContactDamage` | 164 | `EventIdNotifyWormClumpDeath` |
+| 129 | `EventIdJump` | 165 | `EventIdExplodePoop` |
+| 130 | `EventIdBootApply` | 166 | `EventIdApplyDifficulty` |
+| 131 | `EventIdPlayHungrySound` | 167 | `EventIdUseAirHorn` |
+| 132 | `EventIdDigPlayerFree` | 168 | `EventIdRequestVendingMachine` |
+| 133 | `EventIdChangeMaterialAt` | 169 | `EventIdAnswerVendingMachine` |
+| 134 | `EventIdChangeFloorAt` | 230 | `EventIdGameModeChanged` |
+| 135 | `EventIdSetUnconscious` | 231 | `EventIdSubmitSpeedrunTime` |
 
-Used range: 100–154 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
+Used range: 100–169 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
 
 ### Entity hierarchy & `IEntity`
 
@@ -1232,14 +1245,14 @@ GameModeManager, etc.)            DynamicParticleManager,
                                   CharacterEditorCamera, etc.)
 ```
 
-Concrete entities (24 total, Cecil-counted):
+Concrete entities (27 total, Cecil-counted):
 - `NodeEntity`, `Node3DEntity`, `RigidBody3DEntity`, `RigidBody3DCheapEntity`, `StaticBody3DEntity` — base classes (`RigidBody3DCheapEntity` added in the 2026-06-01 update — a lighter-weight `RigidBody3D` entity)
 - `Player` (extends `RigidBody3DEntity`) — **the main thing mods care about**
 - `WorldEntity`, `YarnBallEntity` — world-root entities
-- Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `HangDebuggerNode`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
+- Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `GoldManager`, `HangDebuggerNode`, `HubItemManager`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
 - Cameras: `CharacterEditorCamera`, `SpectatorCamera`
 
-**`IEntity` exposes 185 properties** — 184 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
+**`IEntity` exposes 204 properties** — 203 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
 
 ```csharp
 // Instead of GetComponent<PlayerHealthComponent>() everywhere, you just write:
@@ -1278,17 +1291,17 @@ EcsHelper.GetComponentRef(ref hp, playerNode, ComponentType.PlayerHealthComponen
 // have to know the type ids by hand. Use `player.PlayerHealthComponent` instead.
 ```
 
-### `IComponent` implementors (184)
+### `IComponent` implementors (203)
 
 The components you might want to read/mutate on a `Player` or other entity. Categorized by name prefix:
 
-**Player components (33)** — extension points for player behavior. `Player.LocalPlayer.<Name>` accessor is available for each via `IEntity`.
+**Player components (36)** — extension points for player behavior. `Player.LocalPlayer.<Name>` accessor is available for each via `IEntity`.
 
-`PlayerAdvancedModeComponent`, `PlayerAmbientParticleComponent`, `PlayerAnimationComponent`, `PlayerCameraComponent`, `PlayerCatchComponent`, `PlayerCheckpointComponent`, `PlayerCollisionComponent`, `PlayerContactDamageComponent`, `PlayerCosmeticsComponent`, `PlayerCrownComponent`, `PlayerDamageAreaComponent`, `PlayerDropAdvantageComponent`, `PlayerEmoteComponent`, `PlayerFallDamageComponent`, `PlayerHandSlotComponent`, **`PlayerHealthComponent`**, `PlayerHealthDrainComponent`, `PlayerHonkComponent`, `PlayerJourneyRecordComponent`, `PlayerLateJoinComponent`, `PlayerMaterialBootComponent`, `PlayerMeshComponent`, `PlayerMonitorComponent`, `PlayerMovementSoundComponent`, `PlayerPickaxeComponent`, `PlayerPingingComponent`, `PlayerReviveComponent`, `PlayerSkeletonComponent`, `PlayerSlideEffectComponent`, `PlayerSpectateOnDeathComponent`, `PlayerTeleportEffectComponent`, `PlayerToastComponent`, `PlayerUnconsciousComponent`.
+`PlayerAdvancedModeComponent`, `PlayerAmbientParticleComponent`, `PlayerAnimationComponent`, `PlayerCameraComponent`, `PlayerCatchComponent`, `PlayerCheckpointComponent`, `PlayerCollisionComponent`, `PlayerContactDamageComponent`, `PlayerCosmeticsComponent`, `PlayerCrownComponent`, `PlayerDamageAreaComponent`, `PlayerDistanceLightComponent`, `PlayerDropAdvantageComponent`, `PlayerEmoteComponent`, `PlayerFallDamageComponent`, `PlayerGoldAttractorComponent`, `PlayerHandSlotComponent`, **`PlayerHealthComponent`**, `PlayerHealthDrainComponent`, `PlayerHonkComponent`, `PlayerJourneyRecordComponent`, `PlayerLateJoinComponent`, `PlayerMaterialBootComponent`, `PlayerMeshComponent`, `PlayerMonitorComponent`, `PlayerMovementSoundComponent`, `PlayerPickaxeComponent`, `PlayerPingingComponent`, `PlayerProgressionComponent`, `PlayerReviveComponent`, `PlayerSkeletonComponent`, `PlayerSlideEffectComponent`, `PlayerSpectateOnDeathComponent`, `PlayerTeleportEffectComponent`, `PlayerToastComponent`, `PlayerUnconsciousComponent`.
 
-**Interactable / item components (43)** — things the player can pick up or interact with. The `Interactable*` prefix is consistent.
+**Interactable / item components (50)** — things the player can pick up or interact with. The `Interactable*` prefix is consistent.
 
-`InteractableActivateFreezeBootComponent`, `InteractableAudioPlayerComponent`, `InteractableBatteryComponent`, `InteractableBounceComponent`, `InteractableCameraComponent`, `InteractableChameleonBranchComponent`, `InteractableColliderTrackingComponent`, **`InteractableComponent`** (base), `InteractableCrownComponent`, `InteractableDrillerComponent`, `InteractableDrillLauncherComponent`, `InteractableEmissionEnergyCurveComponent`, `InteractableExplosionComponent`, `InteractableExtractorComponent`, `InteractableFeedFoodToPlayer`, `InteractableFlareComponent`, `InteractableFoodVoiceModifierComponent`, `InteractableGravityComponent`, `InteractableGravityModifierComponent`, `InteractableGrenadeComponent`, `InteractableGunComponent`, `InteractableHealthPotionComponent`, `InteractableHolderComponent`, `InteractableLaserGunComponent`, `InteractableLoadLevelComponent`, `InteractableMegaphoneComponent`, `InteractableNodeVisibilityComponent`, `InteractableParticleComponent`, `InteractablePickupItemComponent`, `InteractablePlaySoundComponent`, `InteractableReviveAllComponent`, `InteractableScaleCurveComponent`, `InteractableSetUnconsciousComponent`, `InteractableShowCharacterEditorComponent`, `InteractableShowGameCustomizerComponent`, `InteractableShowInviteOverlayComponent`, `InteractableSpawnerComponent`, `InteractableSpinComponent`, `InteractableStartDrillerComponent`, `InteractableTeleporterComponent`, `InteractableTreasureChestComponent`, `InteractableUnlockDogBallAchievementComponent`, `InteractableWinComponent`, `InteractableZiplineLauncherComponent`.
+`InteractableActivateFreezeBootComponent`, `InteractableAudioPlayerComponent`, `InteractableBatHornComponent`, `InteractableBatteryComponent`, `InteractableBounceComponent`, `InteractableCameraComponent`, `InteractableChameleonBranchComponent`, `InteractableColliderTrackingComponent`, **`InteractableComponent`** (base), `InteractableCrownComponent`, `InteractableDogHoleComponent`, `InteractableDogPoopComponent`, `InteractableDrillerComponent`, `InteractableDrillLauncherComponent`, `InteractableEmissionEnergyCurveComponent`, `InteractableExplosionComponent`, `InteractableExtractorComponent`, `InteractableFeedFoodToPlayer`, `InteractableFireworksComponent`, `InteractableFlareComponent`, `InteractableFoodVoiceModifierComponent`, `InteractableGravityComponent`, `InteractableGravityModifierComponent`, `InteractableGrenadeComponent`, `InteractableGunComponent`, `InteractableHealthPotionComponent`, `InteractableHolderComponent`, `InteractableLaserGunComponent`, `InteractableLoadLevelComponent`, `InteractableMegaphoneComponent`, `InteractableNodeVisibilityComponent`, `InteractableParticleComponent`, `InteractablePickupItemComponent`, `InteractablePlaySoundComponent`, `InteractableReviveAllComponent`, `InteractableScaleCurveComponent`, `InteractableSetUnconsciousComponent`, `InteractableShowCharacterEditorComponent`, `InteractableShowGameCustomizerComponent`, `InteractableShowInviteOverlayComponent`, `InteractableSpawnerComponent`, `InteractableSpinComponent`, `InteractableStartDrillerComponent`, `InteractableTeleporterComponent`, `InteractableThumperComponent`, `InteractableTreasureChestComponent`, `InteractableUnlockDogBallAchievementComponent`, `InteractableVendingMachineComponent`, `InteractableWinComponent`, `InteractableZiplineLauncherComponent`.
 
 **Network components (7)** — replicated state for multiplayer.
 
@@ -1310,20 +1323,22 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 
 **Voxel / chunk (5)**: `ChunkEntityComponent`, `ChunkLoaderComponent`, `ChunkPhysicsObjectComponent`, `VoxelFieldComponent`, `VoxelFieldInstance`.
 
-**Procedural / world (10)**: `BiomeFlagPoleComponent`, `ChangeLightOverTimeComponent`, `ChangeMaterialContinuouslyComponent`, `CloudRotationComponent`, `EmissiveLightComponent`, `FlickerLightSizeComponent`, `LightBlinkComponent`, `ProceduralCaveComponent`, `WorldEnvironmentBlendComponent`, `WorldEnvironmentSettingsComponent`.
+**Procedural / world (11)**: `BiomeFlagPoleComponent`, `ChangeLightOverTimeComponent`, `ChangeMaterialContinuouslyComponent`, `CloudRotationComponent`, `DistanceLightComponent`, `EmissiveLightComponent`, `FlickerLightSizeComponent`, `LightBlinkComponent`, `ProceduralCaveComponent`, `WorldEnvironmentBlendComponent`, `WorldEnvironmentSettingsComponent`.
 
-**Animation / mesh (8)**: `AnimationTreePhysicsTickComponent`, `AlignWithVelocityComponent`, `HatFallPropellerComponent`, `MeshRandomizerComponent`, `NodeRandomizerComponent`, `RotateComponent`, `RotateHolderComponent`, `TalkAnimationBlendComponent`.
+**Animation / mesh (10)**: `AnimationTreePhysicsTickComponent`, `AlignWithVelocityComponent`, `BoneAttachmentSyncComponent`, `HatFallPropellerComponent`, `MeshRandomizerComponent`, `NodeRandomizerComponent`, `RotateComponent`, `RotateHolderComponent`, `ShowRandomMeshComponent`, `TalkAnimationBlendComponent`.
 
 **Audio (2)**: `AudioPlayerComponent`, `CollisionSoundComponent`.
 
-**Lifecycle / spawn (10)**: `BossHealthComponent`, `BuriedMineComponent`, `CheckpointStatueComponent`, `DespawnWhenTooFarAwayComponent`, `EnableInteractableOnDugOut`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `PickupItemOnDeathComponent`, `SpawnEntityOnDeathComponent`, `SpawnMeshOnBounceComponent`.
+**Compatibility renderer (4)** — drive visual tweaks off the compatibility-renderer fallback path: `DisableVisibilityOnCompatibilityRendererComponent`, `IncreaseLightIntensityOnCompatibilityRendererComponent`, `IncreaseParticlesOnCompatibilityRendererComponent`, `SetShaderParamOnCompatibilityRendererComponent`.
 
-**Misc / debug (41)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
+**Lifecycle / spawn (11)**: `BossHealthComponent`, `BuriedMineComponent`, `CheckpointStatueComponent`, `DespawnWhenTooFarAwayComponent`, `EnableInteractableOnDugOut`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `PickupItemOnDeathComponent`, `SpawnEntityOnDeathComponent`, `SpawnGoldOnDeathComponent`, `SpawnMeshOnBounceComponent`.
+
+**Misc / debug (43)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `GoldCoinComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `TreasureComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
 
 ### Public interfaces (13)
 
-- `IComponent` — every component implements this. 184 implementors (see above).
-- `IEntity` — every entity implements this. 24 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 184 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IComponent` — every component implements this. 203 implementors (see above).
+- `IEntity` — every entity implements this. 27 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 203 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
 - `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
 - `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.
@@ -1343,7 +1358,7 @@ Cecil-scanned distinct top-level folders that appear as `res://X/...` string lit
 |---|---|
 | `res://assets/...` | Art, audio, models, textures — most game content |
 | `res://data/...` | Data resources: `gameplay_tags/*.tres`, configs, level metadata |
-| `res://data/gameplay_tags/*.tres` | The 40 `GameplayTag` resources loaded by `GameplayTags` static cctor |
+| `res://data/gameplay_tags/*.tres` | The 42 `GameplayTag` resources loaded by `GameplayTags` static cctor |
 | `res://scenes/...` | `.tscn` scene files (rooms, prefabs) |
 | `res://materials/...` | Godot material resources |
 | `res://addons/...` | Godot editor addons (not loaded at runtime) |
@@ -1635,7 +1650,7 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 - **HUD-attached singletons are null on the main menu.** `ButtonPrompBarController.Instance` and similar HUD pieces are only present during gameplay. Null-check before use.
 - **Don't allocate in `_Process` / `_PhysicsProcess` hot paths.** These run every frame / every physics tick. Allocating boxes / temp lists / closures generates GC pressure that Pratfall already instruments (`GcTimingListener.OnGcTiming` event for measuring; `GcManager.Instance` for blocking GC during sensitive sections — note `GcManager` is a *blocker*, not an event source, despite its name). Pool what you can, cache lookup results, and prefer `for` over LINQ on per-frame code.
 - **Don't touch Godot objects from a background thread.** Godot 4's C# API is main-thread-only — calling `node.Position = ...` or `resource.Duplicate()` from a `Task.Run` / timer thread crashes silently or corrupts state. If you have off-thread work, marshal back via `MainThreadDispatcher.Instance.Enqueue(() => { /* main-thread code */ })`.
-- **Don't `[GlobalClass]`-collide with a game type name.** Godot 4 has a global class registry shared between the game and your mod's `AddAssemblyToGodot: true` types. If your `[GlobalClass] class Player : Node3D { }` collides with Pratfall's own `Player`, registration loses silently and your scenes won't instantiate it. Namespace your `[GlobalClass]` types or use unambiguous names.
+- **Don't `[GlobalClass]`-collide with a game type name.** Godot 4 has a global class registry shared between the game and your mod's auto-registered types (the loader runs `LookupScriptsInAssembly` on every mod assembly). If your `[GlobalClass] class Player : Node3D { }` collides with Pratfall's own `Player`, registration loses silently and your scenes won't instantiate it. Namespace your `[GlobalClass]` types or use unambiguous names.
 - **Don't open mod `.tscn` files outside Pratfall's decompiled Godot project.** Opening a `.tscn` that references `Pratfall.dll` types in a fresh Godot editor instance will offer to "fix missing dependencies" and silently strip references to game types. You'll save the file and your scene will be missing every Pratfall-specific node. Either work inside a Godot project that has Pratfall's types available, or edit `.tscn` files as text only.
 - **Don't ship other mods' DLLs inside your mod folder.** Two copies of the same assembly in two different `AssemblyLoadContext`s create type-identity confusion (`typeof(X)` from one ALC isn't equal to `typeof(X)` from the other). Declare your dependencies in your README; let users install them separately.
 

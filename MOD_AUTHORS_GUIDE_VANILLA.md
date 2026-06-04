@@ -21,28 +21,29 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 13. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
 14. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
 15. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
-16. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
-17. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
-    - [17.1 "How do I ...?" quick-reference](#how-do-i-)
-    - [17.2 Singletons (78)](#singletons-78)
-    - [17.3 Static helper classes (22)](#static-helper-classes-22)
-    - [17.4 Configs & Settings (27)](#configs--settings-27)
-    - [17.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
-    - [17.6 `GameplayTags.*` (42)](#gameplaytags-42)
-    - [17.7 `Constants.EventId*` (72)](#constantseventid-72)
-    - [17.8 Entity hierarchy & `IEntity` (27 entities, 203 component-accessors)](#entity-hierarchy--ientity)
-    - [17.9 `IComponent` implementors (203)](#icomponent-implementors-203)
-    - [17.10 Public interfaces (13)](#public-interfaces-13)
-    - [17.11 `res://` path conventions](#res-path-conventions)
-    - [17.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
-18. [Debugging & dev iteration](#debugging--dev-iteration)
-19. [Distribution conventions](#distribution-conventions)
+16. [Recipe: Gold, progression & compatibility-renderer (2026-06 update)](#recipe-gold-progression--compatibility-renderer-2026-06-update)
+17. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
+18. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
+    - [18.1 "How do I ...?" quick-reference](#how-do-i-)
+    - [18.2 Singletons (78)](#singletons-78)
+    - [18.3 Static helper classes (22)](#static-helper-classes-22)
+    - [18.4 Configs & Settings (27)](#configs--settings-27)
+    - [18.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
+    - [18.6 `GameplayTags.*` (42)](#gameplaytags-42)
+    - [18.7 `Constants.EventId*` (72)](#constantseventid-72)
+    - [18.8 Entity hierarchy & `IEntity` (27 entities, 203 component-accessors)](#entity-hierarchy--ientity)
+    - [18.9 `IComponent` implementors (203)](#icomponent-implementors-203)
+    - [18.10 Public interfaces (13)](#public-interfaces-13)
+    - [18.11 `res://` path conventions](#res-path-conventions)
+    - [18.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
+19. [Debugging & dev iteration](#debugging--dev-iteration)
+20. [Distribution conventions](#distribution-conventions)
     - [Where to publish](#where-to-publish-as-of-2026-05-18)
     - [Uploading to Steam Workshop (`SteamWorkshopUploader.exe`)](#uploading-to-steam-workshop)
     - [Steam Workshop preview image (`Preview.png` / `Preview.jpg`)](#steam-workshop-preview-image)
-20. [Godot 4 concepts mod authors should know](#godot-4-concepts)
-21. [Pitfalls + things to know](#pitfalls)
-22. [Resources](#resources)
+21. [Godot 4 concepts mod authors should know](#godot-4-concepts)
+22. [Pitfalls + things to know](#pitfalls)
+23. [Resources](#resources)
 
 ---
 
@@ -859,6 +860,60 @@ Under the hood, Pratfall calls `Godot.Bridge.ScriptManagerBridge.LookupScriptsIn
 ```csharp
 Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(myAssembly);
 ```
+
+## Recipe: Gold, progression & compatibility-renderer (2026-06 update)
+
+The 2026-06 big update (build `23570525`) added a gold economy, a progression/difficulty system, and a compatibility (low-spec GPU) renderer. Most of the new content — vending machines, treasure chests, the hub, the rescue-victory screen — is **scene-internal game plumbing, not a mod API**; interact with it through `InteractableComponent`'s delegate fields (see the [Harmony](#recipe-harmony-patches) / [multiplayer](#recipe-multiplayer-patterns) recipes) or the [drop-pool recipe](#recipe-extend-a-drop-pool), not by driving those components directly. The genuinely mod-facing entry points are below (all signatures Cecil-verified against build `23570525`).
+
+### Gold
+
+`GoldManager.Instance` is the gold API (a `public static` field; `null` until a gameplay scene is loaded). The spendable **wallet** lives on the savegame; `GoldManager.CurrentGoldCoins` is something else (the coins physically spawned in the world right now).
+
+```csharp
+var gold = GoldManager.Instance;
+if (gold == null) return;                          // null on the main menu
+
+// Read the player's spendable wallet (NOT CurrentGoldCoins, which is live world pickups):
+int wallet   = SavegameManager.CurrentSavegame.CurrentGold;        // spendable
+int lifetime = SavegameManager.CurrentSavegame.TotalCollectedGold; // lifetime counter
+
+gold.SaveGoldValue(50);                            // award 50 — replicates, saves, fires the stat
+
+if (gold.CanConsumePrice(100) && gold.TryConsumePrice(100))   // charge 100 if affordable
+    GD.Print("bought it");
+
+gold.SpawnGoldAt(new Vector3(0, 1, 0), Vector3.Up, 3f);       // drop physical coins at a point
+```
+
+Don't write `Savegame.CurrentGold` directly — go through `SaveGoldValue` / `TryConsumePrice` so the change replicates, persists, and counts toward stats. To **react** to gold being collected, reuse the [game-event recipe](#recipe-listen-to-game-events) and filter on `GameplayTags.Stats_Gameplay_Collected_Gold` (the event payload carries the `int` amount).
+
+### Detecting compatibility-renderer (low-spec) mode
+
+Visual mods that need to degrade on the GL-compatibility backend read the active renderer from a static helper — there is no manager or singleton:
+
+```csharp
+// GodotRenderer is a game enum: ForwardPlus = 0, Mobile = 1, Compatibility = 2.
+// GodotHelper.GetRenderer() is cached; it wraps RenderingServer.GetCurrentRenderingMethod().
+if (GodotHelper.GetRenderer() == GodotRenderer.Compatibility)
+{
+    // shrink particle counts, raise light energy, disable expensive nodes, …
+}
+```
+
+The four vanilla `*OnCompatibilityRendererComponent` nodes are exactly this pattern — each applies its tweak in `OnStart()` only when `GetRenderer() == Compatibility`, and no-ops otherwise. Attach one in a `.tscn` for declarative behavior, or just call `GetRenderer()` yourself.
+
+### Progression / difficulty (read-only)
+
+You can query unlock state on the local player. Note there is **no public accessor for the current run's difficulty or mode** — that selection is committed via internal host-authoritative network events:
+
+```csharp
+var prog = Player.LocalPlayer?.PlayerProgressionComponent;
+bool hardUnlocked      = prog?.IsDifficultyUnlocked(DifficultyLevel.Difficulty1) ?? false;
+bool challengeUnlocked = prog?.IsModeUnlocked(ProgressionMode.Challenge) ?? false;
+// DifficultyLevel.Easy/Peaceful/Normal and ProgressionMode.Standard are always unlocked.
+```
+
+Everything else in the new systems (the gold/vending/treasure components, `GameModeProgressionConfig`, the progression / challenge / rescue UI controllers) is internal — driven by scene data and host-authoritative network events, not a mod API.
 
 ## Recipe: Unpack + repack PCK files
 

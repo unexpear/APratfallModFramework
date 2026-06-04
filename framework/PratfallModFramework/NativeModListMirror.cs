@@ -119,7 +119,11 @@ internal static class NativeModListMirror
             Tags = Array.Empty<string>(),
             PackageName = ours.PckFile,
             Assembly = ours.AssemblyFile,
-            AddAssemblyToGodot = ours.AddAssemblyToGodot,
+            // NOTE: the game's ModManifest dropped its `AddAssemblyToGodot` field in the
+            // 2026-06 big update (Steam build 23570525) — script-bridge registration is now
+            // unconditional in ModManager.LoadAssembly, so there's no native field to mirror.
+            // Our own ModManifest.AddAssemblyToGodot still gates OUR loader (ModAssemblyLoader);
+            // it's just no longer copied onto the native mirror object.
             AutoLoad = false,
             Directory = ours.DirectoryPath,
             DirectoryName = ours.DirectoryName,

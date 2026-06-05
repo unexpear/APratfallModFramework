@@ -48,24 +48,27 @@
     </ProjectReference>
   </ItemGroup>
 
-  <!-- Copy the built DLLs to Resources before compiling -->
-  <Target Name="CopyDllsToResources" BeforeTargets="CoreCompile">
+  <!-- Build the framework (via the ProjectReferences above) THEN copy its DLLs into Resources
+       and embed them, all in one target. Doing the EmbeddedResource adds here (rather than a
+       static ItemGroup) means embedding does NOT depend on the DLLs being committed — they're
+       gitignored build artifacts, regenerated on every build. Hooked after ResolveReferences
+       (so the framework bin/ exists) and before resource-name prep + compile. -->
+  <Target Name="CopyAndEmbedFrameworkDlls" AfterTargets="ResolveReferences" BeforeTargets="PrepareResourceNames;CoreCompile">
     <Copy SourceFiles="..\PratfallModFramework\bin\$(Configuration)\PratfallModFramework.dll"
           DestinationFolder="Resources"
           Condition="Exists('..\PratfallModFramework\bin\$(Configuration)\PratfallModFramework.dll')" />
     <Copy SourceFiles="..\PratfallBootstrapLoader\bin\$(Configuration)\PratfallBootstrapLoader.dll"
           DestinationFolder="Resources"
           Condition="Exists('..\PratfallBootstrapLoader\bin\$(Configuration)\PratfallBootstrapLoader.dll')" />
-    <Message Text="Copied DLLs to Resources" Importance="high" />
+    <ItemGroup>
+      <EmbeddedResource Include="Resources\PratfallModFramework.dll" Condition="Exists('Resources\PratfallModFramework.dll')">
+        <LogicalName>PratfallModFramework.dll</LogicalName>
+      </EmbeddedResource>
+      <EmbeddedResource Include="Resources\PratfallBootstrapLoader.dll" Condition="Exists('Resources\PratfallBootstrapLoader.dll')">
+        <LogicalName>PratfallBootstrapLoader.dll</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+    <Message Text="Copied + embedded framework DLLs into installer" Importance="high" />
   </Target>
-
-  <ItemGroup>
-    <EmbeddedResource Include="Resources\PratfallModFramework.dll" Condition="Exists('Resources\PratfallModFramework.dll')">
-      <LogicalName>PratfallModFramework.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Resources\PratfallBootstrapLoader.dll" Condition="Exists('Resources\PratfallBootstrapLoader.dll')">
-      <LogicalName>PratfallBootstrapLoader.dll</LogicalName>
-    </EmbeddedResource>
-  </ItemGroup>
 
 </Project>

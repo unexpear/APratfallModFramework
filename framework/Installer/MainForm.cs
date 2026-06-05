@@ -414,9 +414,14 @@ public class MainForm : Form
         ExtractEmbeddedDll("PratfallBootstrapLoader.dll", bootstrapDest);
 
         Invoke(() => _progressBar.Value = 30);
+        // Recognize an existing (possibly older) framework before overwriting it, so we can
+        // report install-vs-update-vs-downgrade. The deployed DLL name is stable across
+        // versions, so overwriting it in place IS the update/redeploy — we just surface it.
+        var existingVersion = File.Exists(frameworkDest) ? TryReadFrameworkVersion(frameworkDest) : null;
         Log("Deploying framework DLL...");
 
         ExtractEmbeddedDll("PratfallModFramework.dll", frameworkDest);
+        LogVersionTransition(existingVersion, TryReadFrameworkVersion(frameworkDest));
 
         Invoke(() => _progressBar.Value = 50);
         Log("Patching Pratfall.dll (GcManager._Ready())...");
@@ -458,17 +463,37 @@ public class MainForm : Form
     // the assembly (Version is stamped from Directory.Build.props FrameworkVersion).
     private string ReadFrameworkVersion(string frameworkDllPath)
     {
+        var v = TryReadFrameworkVersion(frameworkDllPath);
+        if (v != null) return v;
+        Log("Could not read framework DLL version; falling back to 1.0.0");
+        return "1.0.0";
+    }
+
+    // Major.Minor.Build off the assembly, or null if missing/unreadable. Null is distinct
+    // from a genuine "1.0.0" so the install flow can tell "no prior install" from an old 1.0.0.
+    private string? TryReadFrameworkVersion(string frameworkDllPath)
+    {
         try
         {
             var v = System.Reflection.AssemblyName.GetAssemblyName(frameworkDllPath).Version;
-            if (v != null)
-                return $"{v.Major}.{v.Minor}.{v.Build}";
+            return v == null ? null : $"{v.Major}.{v.Minor}.{v.Build}";
         }
-        catch (Exception ex)
+        catch { return null; }
+    }
+
+    // Surface what the install did to any prior framework: fresh install, in-place reinstall,
+    // update, or (warned) downgrade. Log-only — the overwrite above already did the work.
+    private void LogVersionTransition(string? existing, string? deployed)
+    {
+        if (deployed == null) return;
+        if (existing == null) { Log($"No prior framework detected — installed {deployed}."); return; }
+        if (existing == deployed) { Log($"Framework {deployed} reinstalled (same version, refreshed in place)."); return; }
+        if (Version.TryParse(existing, out var ev) && Version.TryParse(deployed, out var dv))
         {
-            Log($"Could not read framework DLL version ({ex.Message}); falling back to 1.0.0");
+            if (dv > ev) Log($"Detected older framework {existing} — updated to {deployed}.");
+            else Log($"WARNING: replaced framework {existing} with OLDER {deployed} (downgrade) — proceeding.");
         }
-        return "1.0.0";
+        else Log($"Framework {existing} -> {deployed}.");
     }
 
     // Self-correct an existing install whose manifest predates this build: update only

@@ -49,7 +49,11 @@ public static class Program
         var frameworkSrc = Path.Combine(baseDir, "PratfallModFramework.dll");
         if (File.Exists(frameworkSrc))
         {
+            // Recognize an existing (possibly older) framework before overwriting, mirroring
+            // the GUI installer's version-aware messaging.
+            var existing = File.Exists(FrameworkDllDest) ? TryReadVersion(FrameworkDllDest) : null;
             File.Copy(frameworkSrc, FrameworkDllDest, overwrite: true);
+            LogVersionTransition(existing, TryReadVersion(FrameworkDllDest));
             Console.WriteLine($"Framework copied to {FrameworkDllDest}");
         }
 
@@ -171,5 +175,29 @@ public static class Program
     private static void DeleteIfExists(string path)
     {
         if (File.Exists(path)) File.Delete(path);
+    }
+
+    // Major.Minor.Build off the deployed framework assembly, or null if missing/unreadable.
+    private static string? TryReadVersion(string dllPath)
+    {
+        try
+        {
+            var v = System.Reflection.AssemblyName.GetAssemblyName(dllPath).Version;
+            return v == null ? null : $"{v.Major}.{v.Minor}.{v.Build}";
+        }
+        catch { return null; }
+    }
+
+    // Mirror the GUI installer's install/update/reinstall/downgrade reporting.
+    private static void LogVersionTransition(string? existing, string? deployed)
+    {
+        if (deployed == null) return;
+        if (existing == null) Console.WriteLine($"No prior framework detected — installed {deployed}.");
+        else if (existing == deployed) Console.WriteLine($"Framework {deployed} reinstalled (same version).");
+        else if (Version.TryParse(existing, out var ev) && Version.TryParse(deployed, out var dv))
+            Console.WriteLine(dv > ev
+                ? $"Detected older framework {existing} — updated to {deployed}."
+                : $"WARNING: replaced framework {existing} with OLDER {deployed} (downgrade).");
+        else Console.WriteLine($"Framework {existing} -> {deployed}.");
     }
 }

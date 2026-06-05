@@ -5,6 +5,11 @@
 *.user
 *.suo
 
+# Installer-embedded framework DLLs — build artifacts the installer's
+# CopyAndEmbedFrameworkDlls target regenerates from framework/*/bin/$(Config)
+# on every build. Never hand-commit (they used to drift + ship stale).
+framework/Installer/Resources/*.dll
+
 # Visual Studio Code
 .vscode/
 

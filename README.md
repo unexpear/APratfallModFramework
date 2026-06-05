@@ -99,7 +99,7 @@ As of 2026-05-18, the framework **turns off Pratfall's native ModManager** and r
 
 What the framework does to the native ModManager:
 
-- Harmony-prefixes `ModManager.LoadAllModManifests(Action onComplete)` to skip native discovery + auto-load. Still invokes `onComplete` so dependent game code doesn't hang.
+- Harmony-prefixes `ModManager.LoadAllModManifests(bool isInitialLoad, Action onComplete)` to skip native discovery + auto-load. (Harmony binds the prefix's `onComplete` by name, so the prefix doesn't declare `isInitialLoad`.) Still invokes `onComplete` so dependent game code doesn't hang.
 - Harmony-prefixes `ModManager.ReadLoadedModsFromFile` to return empty (defense-in-depth against anything else still calling it).
 - Harmony-prefixes `ModManager.WriteLoadedModsToFile` to no-op.
 - Lets `Steam.SetupWorkshopCallbacks` and `CreateModDirectory` run normally (those are infrastructure setup we want).

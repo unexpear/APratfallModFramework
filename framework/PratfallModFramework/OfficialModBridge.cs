@@ -109,9 +109,15 @@ internal static class OfficialModBridge
     public static bool IsEnabled(ModManifest manifest) => false; // we manage enabled state ourselves; don't conflate with native
     public static bool CanResolveManifest(ModManifest manifest) => true; // any mod our framework knows about is valid
 
-    // Prefix: skip native LoadAllModManifests entirely. Signature mirrors
-    // Pratfall's:  static void LoadAllModManifests(Action onComplete).
-    // We must still invoke onComplete so any waiting game code doesn't hang.
+    // Prefix: skip native LoadAllModManifests entirely. Pratfall's real signature is
+    //   static void LoadAllModManifests(bool isInitialLoad, Action onComplete)
+    // (verified build 23581753; the `bool isInitialLoad` arg has been present at least
+    // since 23570525 — it is NOT the 1-arg form older comments described). Harmony binds
+    // our prefix's `onComplete` parameter by NAME, so we deliberately don't declare
+    // `isInitialLoad` — we don't consume it. We must still invoke onComplete so any
+    // waiting game code (the continuation calls LoadAutoLoadMods/LoadEnabledMods, which
+    // are no-ops for us since discovery is skipped + ReadLoadedModsFromFile is neutered)
+    // doesn't hang.
     private static bool LoadAllModManifestsPrefix(Action onComplete)
     {
         try { onComplete?.Invoke(); }

@@ -999,6 +999,7 @@ This means:
 
 - If your mod ships `res://<YourModFolderName>/root.tscn`, it auto-runs on enable — useful for mods that want to inject a scene into the world without writing C# (the auto-instantiated node + its `_Ready` handle the wiring).
 - If your mod does NOT ship `root.tscn`, the PCK still mounts cleanly — the load step silently no-ops on the missing scene. Your assets are still reachable via `res://<DirName>/...` paths from your DLL.
+- **Same silent no-op if the folder name is wrong.** `DirectoryName` comes from the on-disk folder for local installs but from `workshop_manifest.json`'s `FolderName` for Workshop installs, so a mod copied into a folder that doesn't match the PCK's baked `res://<folder>/` root will look for a `root.tscn` that isn't there and quietly do nothing — see [PCK packaging gotchas](#pck-packaging-gotchas).
 
 ### Overriding Pratfall's own assets
 
@@ -1006,7 +1007,9 @@ This means:
 
 ### PCK packaging gotchas
 
-- **Folder name = mount path.** If your install folder is `Author.MyMod` but your PCK has assets under `res://MyMod/`, the resource loader won't find them. The folder name in your Godot project's filesystem MUST match the mod's install directory name.
+- **Folder name = mount path — and it's resolved differently for local vs Workshop installs.** Assets and the auto-`root.tscn` load from `res://<DirectoryName>/...`, where `DirectoryName` is set (Cecil-verified, build `23570525`) from **`Path.GetFileName(<mod dir>)`** for a local `mods/<folder>/` install but from **`workshop_manifest.json`'s `FolderName`** for a Workshop install (NOT the numeric `<workshopid>` folder it physically lives in). Either way it must exactly equal the `res://<folder>/` your Godot project baked into the PCK.
+  - *Authoring your own mod:* keep your Godot project's root folder name identical to the folder you ship under.
+  - *Installing someone else's PCK mod (silent trap):* pick the wrong install-folder name and `res://<DirectoryName>/...` resolves to paths that aren't in the PCK, so the lookups **silently no-op** — the mod loads, enables, and reports no error, but does nothing. Example: Infinite Flare's PCK bakes its scene at `res://infinite-flare-mod/root.tscn` (its `workshop_manifest.FolderName` is `infinite-flare-mod`), so copying the same DLL + PCK into `mods/InfiniteFlareMod/` makes the loader look for `res://InfiniteFlareMod/root.tscn` — which isn't in the PCK → the scene never instantiates, even once you've enabled the mod. Fix: name the local folder to match the baked root (`mods/infinite-flare-mod/`). Confirm a PCK's baked root with `strings yourmod.pck | grep -i res://`.
 - **PCK filename = `PackageName` field exactly.** Pratfall concats `manifest.Directory + "/" + manifest.PackageName` — so `PackageName` must include the `.pck` extension and match the filename on disk.
 - **Let Godot do the importing.** Raw `.png` / `.ogg` / `.wav` etc. must be imported by the Godot editor before you export the PCK; Godot converts them to engine-specific resources and tracks them via `.import` side files in your project. Don't manually zip raw asset files into a PCK and expect Godot to load them as resources — at runtime use `ResourceLoader.Load("res://...")` (which goes through the import pipeline), not raw `FileAccess`.
 - **PCKs cannot be unmounted in Godot 4.** `UnloadPackage` only `Free()`s the auto-instantiated root.tscn node — the PCK's files stay mounted in `res://` until the next game restart. The framework surfaces a "may not fully apply until next launch" notice for mods with a `pckFile`.
@@ -1431,6 +1434,8 @@ Cecil-scanned distinct top-level folders that appear as `res://X/...` string lit
 - `PlayerColorsConfig.Colors: Color[]` — `Savegame` stores **five** plain-`int` indices into this one list: `PlayerColorIndex`, `NoseColorIndex`, `ShirtColorIndex`, and (added in the 2026-06 big update, build 23570525) `PantsColorIndex` and `ShoeColorIndex`. Inserting or reordering colors repoints every player's saved cosmetic choice.
 
   *Also new in 23570525 (saved, but NOT index-coupled, so safe to ignore for mutation purposes): `CurrentGold` / `TotalCollectedGold` (scalar ints), `UnlockedVendingMachineCosmetics` and `SavedCharacterEditorPresets` (keyed by string/content), `HadFirstVendingMachineRoll`. These are the gold-economy / progression save fields — they don't couple to any config array.*
+
+  *Build `23581753` adds one more save-safe scalar: `TotalWormsChasedAway` (`System.Int32`, the "Worms Chased Away" stat counter from the EOS-cross-play update). Like the gold scalars it's a plain int, not a config-array index — safe to ignore for mutation. (Cecil-verified: it sits beside `CurrentGold`/`TotalCollectedGold` in `Savegame`, and the five color indices were unchanged by the update.)*
 
 **NOT save-coupled — safe to extend** (verified: no such index exists in `Savegame`, and dev-confirmed):
 

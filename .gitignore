@@ -42,8 +42,11 @@ NEEDS_VERIFICATION.md
 data_Pratfall_windows_x86_64/
 *.pck
 
-# Release zips — uploaded as GitHub Release assets, no need to keep in repo
+# Release binaries (zips + the self-contained installer exe) — uploaded as GitHub
+# Release assets, not kept in repo. The committed exe used to drift + ship stale;
+# rebuild via `dotnet publish -c Release -p:PublishProfile=SelfContained-Win-x64`.
 release/**/*.zip
+release/**/*.exe
 
 # Process I/O captures from local game-launch debugging
 pratfall_stdout.txt

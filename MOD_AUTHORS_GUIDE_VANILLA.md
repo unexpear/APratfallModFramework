@@ -9,43 +9,67 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 1. [Setup — csproj, manifest, folder layout](#setup)
 2. [Lifecycle — `ModEntry.ModInit` / `ModDestroy`](#lifecycle)
 3. [CLI flags Pratfall accepts](#cli-flags)
-4. [Recipe: Harmony patches](#recipe-harmony-patches)
-5. [Recipe: Add a language to the in-game selector](#recipe-add-a-language)
-6. [Recipe: Persist mod data alongside the save](#recipe-persist-mod-data)
-7. [Recipe: Listen to game events](#recipe-listen-to-game-events)
-8. [Recipe: Show HUD button hints](#recipe-show-hud-button-hints)
-9. [Recipe: Show a toast notification](#recipe-show-a-toast)
-10. [Recipe: Play a sound](#recipe-play-a-sound)
-11. [Recipe: Spawn an entity into the world](#recipe-spawn-an-entity)
-12. [Recipe: React to a level loading](#recipe-react-to-level-load)
-13. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
-14. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
-15. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
-16. [Recipe: Gold, progression & compatibility-renderer (2026-06 update)](#recipe-gold-progression--compatibility-renderer-2026-06-update)
-17. [Recipe: Unpack `Pratfall.pck` + repack your mod's PCK](#recipe-unpack--repack-pck-files)
-18. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
-    - [18.1 "How do I ...?" quick-reference](#how-do-i-)
-    - [18.2 Singletons (78)](#singletons-78)
-    - [18.3 Static helper classes (22)](#static-helper-classes-22)
-    - [18.4 Configs & Settings (27)](#configs--settings-27)
-    - [18.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
-    - [18.6 `GameplayTags.*` (42)](#gameplaytags-42)
-    - [18.7 `Constants.EventId*` (72)](#constantseventid-72)
-    - [18.8 Entity hierarchy & `IEntity` (27 entities, 203 component-accessors)](#entity-hierarchy--ientity)
-    - [18.9 `IComponent` implementors (203)](#icomponent-implementors-203)
-    - [18.10 Public interfaces (13)](#public-interfaces-13)
-    - [18.11 `res://` path conventions](#res-path-conventions)
-    - [18.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
-19. [Debugging & dev iteration](#debugging--dev-iteration)
-20. [Distribution conventions](#distribution-conventions)
-    - [Where to publish](#where-to-publish-as-of-2026-05-18)
-    - [Uploading to Steam Workshop (`SteamWorkshopUploader.exe`)](#uploading-to-steam-workshop)
-    - [Steam Workshop preview image (`Preview.png` / `Preview.jpg`)](#steam-workshop-preview-image)
-21. [Godot 4 concepts mod authors should know](#godot-4-concepts)
+4. [Godot 4 concepts mod authors should know](#godot-4-concepts)
+    - [4.1 Node lifecycle](#node-lifecycle)
+    - [4.2 Godot ref lifetime — don't trust C# null checks](#godot-ref-lifetime--dont-trust-c-null-checks)
+    - [4.3 `PackedScene.Instantiate()` returns a detached node](#packedsceneinstantiate-returns-a-detached-node)
+    - [4.4 `Resource` is shared by reference](#resource-is-shared-by-reference)
+    - [4.5 `user://` vs `res://`](#user-vs-res)
+    - [4.6 C# hot-reload doesn't work for mods](#c-hot-reload-doesnt-work-for-mods)
+    - [4.7 `GD.Print` vs `Console.WriteLine`](#gdprint-vs-consolewriteline)
+5. [Recipe: Harmony patches](#recipe-harmony-patches)
+6. [Recipe: Add a language to the in-game selector](#recipe-add-a-language)
+7. [Recipe: Persist mod data alongside the save](#recipe-persist-mod-data)
+8. [Recipe: Listen to game events](#recipe-listen-to-game-events)
+9. [Recipe: Show HUD button hints](#recipe-show-hud-button-hints)
+10. [Recipe: Show a toast notification](#recipe-show-a-toast)
+11. [Recipe: Play a sound](#recipe-play-a-sound)
+12. [Recipe: Spawn an entity into the world](#recipe-spawn-an-entity)
+13. [Recipe: React to a level loading](#recipe-react-to-level-load)
+14. [Recipe: Multiplayer-aware patterns (host check, late-join)](#recipe-multiplayer-patterns)
+15. [Recipe: Extend a random drop pool](#recipe-extend-a-drop-pool)
+16. [Recipe: Custom Godot Node / Resource types](#recipe-custom-godot-types)
+17. [Recipe: Gold, progression & compatibility-renderer (2026-06 update)](#recipe-gold-progression--compatibility-renderer-2026-06-update)
+    - [17.1 Gold](#gold)
+    - [17.2 Detecting compatibility-renderer (low-spec) mode](#detecting-compatibility-renderer-low-spec-mode)
+    - [17.3 Progression / difficulty (read-only)](#progression--difficulty-read-only)
+18. [Recipe: PCK assets — unpack, repack, and override game assets](#recipe-pck-assets--unpack-repack-and-override-game-assets)
+    - [18.1 Unpacking `Pratfall.pck` to see what's inside](#unpacking-pratfallpck-to-see-whats-inside)
+    - [18.2 Packing your mod's assets into a `.pck`](#packing-your-mods-assets-into-a-pck)
+    - [18.3 Auto-instantiated root scene (`root.tscn`)](#auto-instantiated-root-scene-roottscn)
+    - [18.4 Overriding Pratfall's own assets](#overriding-pratfalls-own-assets)
+    - [18.5 PCK packaging gotchas](#pck-packaging-gotchas)
+19. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
+    - [19.1 "How do I ...?"](#how-do-i-)
+    - [19.2 Singletons (78)](#singletons-78)
+    - [19.3 Static helper classes (22)](#static-helper-classes-22)
+    - [19.4 Configs & Settings (27)](#configs--settings-27)
+    - [19.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
+    - [19.6 `GameplayTags.*` (42)](#gameplaytags-42)
+    - [19.7 `Constants.EventId*` (72)](#constantseventid-72)
+    - [19.8 Entity hierarchy & `IEntity`](#entity-hierarchy--ientity)
+    - [19.9 `IComponent` implementors (203)](#icomponent-implementors-203)
+    - [19.10 Public interfaces (13)](#public-interfaces-13)
+    - [19.11 `res://` path conventions](#res-path-conventions)
+    - [19.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
+20. [Debugging & dev iteration](#debugging--dev-iteration)
+    - [20.1 Where logs go](#where-logs-go)
+    - [20.2 Useful Godot CLI flags](#useful-godot-cli-flags)
+    - [20.3 Iteration loop](#iteration-loop)
+    - [20.4 Attaching a debugger](#attaching-a-debugger)
+    - [20.5 Bisecting a multi-mod conflict](#bisecting-a-multi-mod-conflict)
+    - [20.6 Smoke test before sharing](#smoke-test-before-sharing)
+21. [Distribution conventions](#distribution-conventions)
+    - [21.1 Mod ID format](#mod-id-format)
+    - [21.2 Folder contents](#folder-contents)
+    - [21.3 Version format](#version-format)
+    - [21.4 Multiplayer-compatibility tag in README](#multiplayer-compatibility-tag-in-readme)
+    - [21.5 What NOT to include in your package](#what-not-to-include-in-your-package)
+    - [21.6 Where to publish (as of 2026-05-18)](#where-to-publish-as-of-2026-05-18)
+    - [21.7 Uploading to Steam Workshop](#uploading-to-steam-workshop)
+    - [21.8 Steam Workshop preview image](#steam-workshop-preview-image)
 22. [Pitfalls + things to know](#pitfalls)
 23. [Resources](#resources)
-
----
 
 ## Setup
 
@@ -238,6 +262,99 @@ To pass these via Steam: right-click Pratfall → Properties → Launch options 
 **Heads-up on the launch-args confirmation dialog.** Pre-2026-05-18 builds popped a "Launch Game with custom arguments — Continue / Cancel" dialog on every `--qh-*` launch, which would have made profile-switching painful. **Tim fixed this** in the 2026-05-18 Workshop update; profile-based managers launching via Steam now work without per-launch friction. A separate "launching from the executable" issue Tim flagged is being fixed in a later patch but doesn't affect Steam launches (which is r2modman's path anyway, per Ebkr).
 
 **If you're running Pratfall Mod Framework alongside r2modman**, the framework also honors `--qh-mod-directory`: scans that folder for mods AND writes its own state file (`modframework-state.json` — enabled mods + approved fingerprints) into that folder, so each r2modman profile has independent framework state. Mods dropped as `.zip` files into the profile folder are auto-extracted on framework startup (zip-slip-safe via .NET's `ZipFile.ExtractToDirectory`). One-time migration: on first launch under a new profile, the framework reads the default `user://modframework-state.json` once as a fallback so you don't lose your existing approvals.
+
+## Godot 4 concepts
+
+A few things mod authors hit if they're new to Godot. None of this is Pratfall-specific.
+
+### Node lifecycle
+
+Godot nodes go through:
+
+```
+constructor → _EnterTree → _Ready → _Process (every frame) / _PhysicsProcess (fixed tick) → _ExitTree → destructor
+```
+
+- `_EnterTree` fires when the node is added to the scene tree.
+- `_Ready` fires AFTER all children are ready — safe place to do "find children by name" / setup work.
+- `_Process(double delta)` runs every visual frame. **Don't allocate here** — it's a hot path.
+- `_PhysicsProcess(double delta)` runs at fixed physics rate (60 Hz default).
+- `_ExitTree` fires when removed from the tree.
+
+If you override these on a class shipped in your mod, mark them `public override void` — Godot calls through reflection.
+
+### Godot ref lifetime — don't trust C# null checks
+
+Godot's C# bindings expose `Node`, `Control`, `Button`, `CanvasLayer`, `Texture2D`, etc. as C# objects backed by underlying C++ objects. The two have **independent lifetimes**: the C++ object can be freed (via `QueueFree`, scene change, `Free`, parent's deletion) while the C# object lingers in memory until the next GC pass. A plain null check passes, but accessing any member throws `ObjectDisposedException` or "called method on already-freed object."
+
+```csharp
+// WRONG — passes the null check, crashes on the next line
+if (cachedButton != null)
+    cachedButton.Text = "Click me";
+
+// RIGHT — IsInstanceValid checks the underlying C++ object
+if (Godot.GodotObject.IsInstanceValid(cachedButton))
+    cachedButton.Text = "Click me";
+```
+
+> Per Tim (#mod-dev, 2026-05-20): "the biggest tip I can give you is to not do null checks on objects instead check if its null with `IsInstanceValid()`. the c# object might still exist because it hasn't been garbage collected yet but the c++ object is already gone."
+
+A tiny extension keeps the check from being verbose at every call site:
+
+```csharp
+public static class GodotRefExtensions
+{
+    public static bool IsAlive(this Godot.GodotObject? obj)
+        => obj != null && Godot.GodotObject.IsInstanceValid(obj);
+}
+
+// Usage:
+if (cachedButton.IsAlive())
+    cachedButton.Text = "Click me";
+```
+
+**When to be paranoid**:
+- Refs held in dictionaries, static fields, or any storage that outlives the current frame
+- Refs captured in lambdas wired to `Pressed`, `Timeout`, `Toggled`, etc. — the event may fire after the node has been freed
+- Refs passed to `CallDeferred` — the deferred call may run after the target is freed
+- Refs returned by `FindChild` / `GetNode` once and cached
+- Anything that crosses a `QueueFree`, scene-load, or dialog-close boundary
+
+**When you can skip it**:
+- Refs allocated and used within the same method with no async path between create and use
+- Refs on objects you fully control and just created (nothing else could have freed them yet)
+
+### `PackedScene.Instantiate()` returns a detached node
+
+```csharp
+var scene = GD.Load<PackedScene>("res://MyMod/MyProp.tscn");
+var node = scene.Instantiate();    // detached — NOT in the tree yet
+Game.RootNode.AddChild(node);      // now it's live
+```
+
+Forgetting the `AddChild` is the #1 newcomer bug — your code runs, no error, but nothing appears. The node exists in memory but isn't in the scene tree.
+
+### `Resource` is shared by reference
+
+Godot resources (`PackedScene`, `Texture2D`, `RandomWeightedDropPool`, etc.) are reference-counted shared objects. Two `GD.Load<T>` calls for the same path return the **same instance**. If you mutate one, every holder sees the change.
+
+This is *why* the drop-pool recipe works (mutation sticks) but also why you have to undo it carefully on `ModDestroy`. To make a private copy, call `resource.Duplicate(subresources: true)`.
+
+### `user://` vs `res://`
+
+Both are Godot URIs, not filesystem paths:
+- `res://...` — read-only path inside the game's mounted PCKs (and your mod's PCK if loaded). Use for assets your mod ships.
+- `user://...` — read-write path under the platform's user-data folder. Use for save data, logs, config.
+
+To get a real filesystem path that `System.IO` understands, pass either through `ProjectSettings.GlobalizePath(...)`. Godot's own `DirAccess` / `FileAccess` understand the URIs directly without globalization.
+
+### C# hot-reload doesn't work for mods
+
+GDScript supports hot-reload; C# does not, especially for code loaded via `AssemblyLoadContext`. Modifying your mod's source means: rebuild → game restart → re-test. Steps to make this fast are in [Debugging & dev iteration](#debugging--dev-iteration).
+
+### `GD.Print` vs `Console.WriteLine`
+
+Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherever Godot's stdout is wired (often nowhere visible on Windows builds). `GD.Print` always ends up in `user://logs/godot.log`. For errors use `GD.PrintErr(...)` so they're tagged red in the in-engine console.
 
 ## Recipe: Harmony patches
 
@@ -949,7 +1066,7 @@ bool challengeUnlocked = prog?.IsModeUnlocked(ProgressionMode.Challenge) ?? fals
 
 Everything else in the new systems (the gold/vending/treasure components, `GameModeProgressionConfig`, the progression / challenge / rescue UI controllers) is internal — driven by scene data and host-authoritative network events, not a mod API.
 
-## Recipe: Unpack + repack PCK files
+## Recipe: PCK assets — unpack, repack, and override game assets
 
 Pratfall ships its assets as a single Godot PCK (`Pratfall.pck` next to the executable). Mods that need to **inspect** the game's assets (to find `res://` paths, override existing scenes, or reference a built-in texture) or that need to **ship their own assets** (custom scenes, textures, audio) work with PCK files directly.
 
@@ -1639,100 +1756,9 @@ The uploader auto-picks up a preview image from your mod folder if you ship one.
 
 If you ship no preview image, your Workshop listing falls back to a default placeholder until you upload one — which means a worse first impression in the Workshop browser. Always include one.
 
-## Godot 4 concepts
-
-A few things mod authors hit if they're new to Godot. None of this is Pratfall-specific.
-
-### Node lifecycle
-
-Godot nodes go through:
-
-```
-constructor → _EnterTree → _Ready → _Process (every frame) / _PhysicsProcess (fixed tick) → _ExitTree → destructor
-```
-
-- `_EnterTree` fires when the node is added to the scene tree.
-- `_Ready` fires AFTER all children are ready — safe place to do "find children by name" / setup work.
-- `_Process(double delta)` runs every visual frame. **Don't allocate here** — it's a hot path.
-- `_PhysicsProcess(double delta)` runs at fixed physics rate (60 Hz default).
-- `_ExitTree` fires when removed from the tree.
-
-If you override these on a class shipped in your mod, mark them `public override void` — Godot calls through reflection.
-
-### Godot ref lifetime — don't trust C# null checks
-
-Godot's C# bindings expose `Node`, `Control`, `Button`, `CanvasLayer`, `Texture2D`, etc. as C# objects backed by underlying C++ objects. The two have **independent lifetimes**: the C++ object can be freed (via `QueueFree`, scene change, `Free`, parent's deletion) while the C# object lingers in memory until the next GC pass. A plain null check passes, but accessing any member throws `ObjectDisposedException` or "called method on already-freed object."
-
-```csharp
-// WRONG — passes the null check, crashes on the next line
-if (cachedButton != null)
-    cachedButton.Text = "Click me";
-
-// RIGHT — IsInstanceValid checks the underlying C++ object
-if (Godot.GodotObject.IsInstanceValid(cachedButton))
-    cachedButton.Text = "Click me";
-```
-
-> Per Tim (#mod-dev, 2026-05-20): "the biggest tip I can give you is to not do null checks on objects instead check if its null with `IsInstanceValid()`. the c# object might still exist because it hasn't been garbage collected yet but the c++ object is already gone."
-
-A tiny extension keeps the check from being verbose at every call site:
-
-```csharp
-public static class GodotRefExtensions
-{
-    public static bool IsAlive(this Godot.GodotObject? obj)
-        => obj != null && Godot.GodotObject.IsInstanceValid(obj);
-}
-
-// Usage:
-if (cachedButton.IsAlive())
-    cachedButton.Text = "Click me";
-```
-
-**When to be paranoid**:
-- Refs held in dictionaries, static fields, or any storage that outlives the current frame
-- Refs captured in lambdas wired to `Pressed`, `Timeout`, `Toggled`, etc. — the event may fire after the node has been freed
-- Refs passed to `CallDeferred` — the deferred call may run after the target is freed
-- Refs returned by `FindChild` / `GetNode` once and cached
-- Anything that crosses a `QueueFree`, scene-load, or dialog-close boundary
-
-**When you can skip it**:
-- Refs allocated and used within the same method with no async path between create and use
-- Refs on objects you fully control and just created (nothing else could have freed them yet)
-
-### `PackedScene.Instantiate()` returns a detached node
-
-```csharp
-var scene = GD.Load<PackedScene>("res://MyMod/MyProp.tscn");
-var node = scene.Instantiate();    // detached — NOT in the tree yet
-Game.RootNode.AddChild(node);      // now it's live
-```
-
-Forgetting the `AddChild` is the #1 newcomer bug — your code runs, no error, but nothing appears. The node exists in memory but isn't in the scene tree.
-
-### `Resource` is shared by reference
-
-Godot resources (`PackedScene`, `Texture2D`, `RandomWeightedDropPool`, etc.) are reference-counted shared objects. Two `GD.Load<T>` calls for the same path return the **same instance**. If you mutate one, every holder sees the change.
-
-This is *why* the drop-pool recipe works (mutation sticks) but also why you have to undo it carefully on `ModDestroy`. To make a private copy, call `resource.Duplicate(subresources: true)`.
-
-### `user://` vs `res://`
-
-Both are Godot URIs, not filesystem paths:
-- `res://...` — read-only path inside the game's mounted PCKs (and your mod's PCK if loaded). Use for assets your mod ships.
-- `user://...` — read-write path under the platform's user-data folder. Use for save data, logs, config.
-
-To get a real filesystem path that `System.IO` understands, pass either through `ProjectSettings.GlobalizePath(...)`. Godot's own `DirAccess` / `FileAccess` understand the URIs directly without globalization.
-
-### C# hot-reload doesn't work for mods
-
-GDScript supports hot-reload; C# does not, especially for code loaded via `AssemblyLoadContext`. Modifying your mod's source means: rebuild → game restart → re-test. Steps to make this fast are in [Debugging & dev iteration](#debugging--dev-iteration).
-
-### `GD.Print` vs `Console.WriteLine`
-
-Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherever Godot's stdout is wired (often nowhere visible on Windows builds). `GD.Print` always ends up in `user://logs/godot.log`. For errors use `GD.PrintErr(...)` so they're tagged red in the in-engine console.
-
 ## Pitfalls
+
+*Quick-reference recap. Most of these are covered in depth in [Lifecycle](#lifecycle), [Godot 4 concepts](#godot-4-concepts), and the [decoded surface inventory](#decoded-pratfall-surface-inventory) — this list is the at-a-glance version.*
 
 - **Folder names must be unique across mods.** Pratfall mounts each mod's PCK at `res://<DirectoryName>/...`. Two mods sharing a folder name silently overwrite each other's assets. (Confirmed by Tim in #mod-dev, 2026-05-17.)
 - **Filesystem URIs vs paths.** `Game.Platform.GetUserDataPath()` returns a Godot `user://` URI on Steam. Pass it through `ProjectSettings.GlobalizePath(...)` before any `System.IO` call. Godot's own `DirAccess` understands the URI, so game-side code paths work without it — but System.IO does not.
@@ -1740,7 +1766,7 @@ Use `GD.Print(...)` for log output. `Console.WriteLine` works but goes to wherev
 - **`ByteBufferWriter` has a 32 KB string cap.** Affects any custom network protocol built on top of `Network.EventManager.SendEvent`. Keep payloads under 32 KB after JSON serialization.
 - **`Game.Config` is a value-type struct with `init`-only setters.** Mods cannot mutate config flags at runtime — not even via reflection (the `modreq(IsExternalInit)` modifier enforces this at the C# language level, and even reflection-based hacks would write to a copy because `Game.Config` returns the struct by value). If `Game.Config.AllowUserLocalization == false` on the shipped build, your mod can't flip it; either ship a JSON-only locale that side-loads via `TranslationServer.AddTranslation` directly, or wait for the dev to enable the flag.
 - **`GameplayTag` vs `Constants.EventId*` are different systems.** `GameplayTags.X` references are for `GameEventBus.SendEvent` / `OnGameEventReceived` (the high-level pub/sub — `GameEventBus` IS a singleton with `Instance`, but the event itself is static). `Constants.EventId*` are `const ushort` numeric IDs (values like `129`, `115`) for `Network.EventManager.SendEvent(UInt16 eventId, ...)` (the low-level network event channel — `NetworkEventManager` is an *instance* accessed through the `Network` singleton, NOT a static class). Don't mix them — subscribing to a `GameEventBus` handler hoping a numeric event id will match would match nothing.
-- **`ModEntry` class name is exact.** Pratfall uses `assembly.GetType("ModEntry")` — case-sensitive, no namespace.
+- **`ModEntry` class name is exact.** Pratfall uses `assembly.GetType("ModEntry")` — case-sensitive, no namespace. See [Lifecycle](#lifecycle).
 - **`ModInit` / `ModDestroy` reentrance.** Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent: every subscription paired with an unsubscribe, every array growth paired with a shrink.
 - **`AssemblyLoadContext.Unload()` is called on disable.** Don't hold long-lived references to game types in static fields outside the mod's `ModEntry` — the GC needs to collect your assembly's load context.
 - **HUD-attached singletons are null on the main menu.** `ButtonPrompBarController.Instance` and similar HUD pieces are only present during gameplay. Null-check before use.

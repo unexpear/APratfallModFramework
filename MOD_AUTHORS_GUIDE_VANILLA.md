@@ -176,6 +176,40 @@ public static class ModEntry
 
 If you see your mod's log messages still firing after you toggled it off, one of the above is the culprit. The mod's assembly will stay in memory until the entire game process exits.
 
+### Two ways to run a node: scene (`root.tscn`) vs code (`new` + `AddChild`)
+
+Most per-frame/visual mods come down to "get a `Node` into the tree so its `_Ready`/`_Process` run." There are two ways, and the choice decides whether you ship a `.pck` at all:
+
+- **Scene** — put your node in `res://<DirectoryName>/root.tscn`; on enable the loader instantiates it under the game root for you (see [auto-instantiated root scene](#auto-instantiated-root-scene-roottscn)). No `ModEntry` needed — but you need a **Godot project + a `.pck`**, and the install-folder name must match the baked `res://` root (see [PCK packaging gotchas](#pck-packaging-gotchas)).
+- **Code** — no `.pck`, no `res://`, no scene. In `ModEntry.ModInit`, `new` the node and `AddChild` it yourself:
+
+```csharp
+using Godot;
+
+public partial class MyNode : Node            // partial + the Godot source generator,
+{                                              // or _Process never gets called (see below)
+    public override void _Process(double delta) { /* per-frame work */ }
+}
+
+public static class ModEntry                   // global namespace (see above)
+{
+    static MyNode _node;
+    public static void ModInit()
+    {
+        if (Engine.GetMainLoop() is SceneTree tree)
+            tree.Root.AddChild(_node = new MyNode());   // now _Ready/_Process run
+    }
+    public static void ModDestroy() => _node?.QueueFree();   // pair the AddChild
+}
+```
+
+The `new` + `AddChild` is exactly what the scene route does for you automatically — which is why code-only feels "heavier", but it's a one-time ~3-line hook, not per-feature boilerplate. (Pratfall also exposes `Game.RootNode` as a shortcut for `tree.Root`.) Two things bite people:
+
+- **Forget the `AddChild`** and your code runs with no error but nothing happens — the node exists in memory but isn't in the tree.
+- **"Code-only" means *no scene/PCK*, not *no Godot tooling*.** The node class still has to be a real Godot C# script — `partial`, built with the Godot .NET source generator (it emits the `InvokeGodotClassMethod` bridge the engine calls) — or `_Ready`/`_Process` never fire. If your mod only Harmony-patches or subscribes to events, skip the node entirely and do the work straight in `ModInit`.
+
+Both ship in the wild: Robert's Infinite Flare puts its `FlareModifier : Node` in `root.tscn` (scene); Rafi1017's Colored Flares `AddChild`s the same kind of node from `ModEntry.ModInit` (code). Both Cecil-verified.
+
 ## CLI flags
 
 Pratfall reads these from its command line at startup:

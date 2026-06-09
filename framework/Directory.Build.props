@@ -17,7 +17,7 @@
       the shipped DLL (a stale manifest version would give the session resolver a
       false version match). Bump here on each release.
     -->
-    <FrameworkVersion>1.6.0</FrameworkVersion>
+    <FrameworkVersion>1.7.0</FrameworkVersion>
     <Version>$(FrameworkVersion)</Version>
 
     <!--

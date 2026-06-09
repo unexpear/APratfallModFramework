@@ -2,7 +2,7 @@
 
 This guide is for writing mods that target **the Pratfall Mod Framework** — this repo, which sits on top of Pratfall's official loader and adds a user-check gate, IL safety scanner, multiplayer sync, conflict resolution, and per-helper APIs that wrap the common patterns.
 
-If you want a mod that works against just Pratfall + Tim's loader with no third-party dependency, see [MOD_AUTHORS_GUIDE_VANILLA.md](MOD_AUTHORS_GUIDE_VANILLA.md). The two paths are interoperable — a framework-targeted mod won't run on a vanilla install, but a vanilla-targeted mod runs fine on a framework install.
+If you want a mod that works against just Pratfall + Tim's loader with no third-party dependency, see [MOD_AUTHORS_GUIDE_VANILLA.md](MOD_AUTHORS_GUIDE_VANILLA.md). The two paths are interoperable — a framework-targeted mod won't run on a vanilla install, but a vanilla-targeted mod runs on a framework install whether it's a **code** mod (`ModEntry.ModInit` / `OnLoad`) or a **scene-only** mod (no code entry, all behavior in `root.tscn`): the framework calls the code entry point *and* mirrors Pratfall's native loader by mounting the mod's PCK and auto-instantiating `res://<DirectoryName>/root.tscn`.
 
 ## When to use the framework
 

@@ -61,6 +61,9 @@ public class ModManager : IDisposable
     private readonly Dictionary<string, string> _modDllPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _modSessionAvailable = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _modsWithMountedPck = new(StringComparer.OrdinalIgnoreCase);
+    // root.tscn nodes the framework auto-instantiated from mounted PCKs (mirrors Pratfall's
+    // native LoadPackage). Freed on disable; the PCK itself stays mounted (Godot can't unmount).
+    private readonly Dictionary<string, Godot.Node> _modRootNodes = new(StringComparer.OrdinalIgnoreCase);
     // SHA-256 fingerprints the user has explicitly approved (toggled on, inspected,
     // or accepted via Download prompt). The fingerprint covers DLL + PCK together,
     // so tampering with either voids the check. Framework-loaded mods whose current
@@ -478,6 +481,13 @@ public class ModManager : IDisposable
             }
         }
 
+        if (_modRootNodes.TryGetValue(id, out var rootNode))
+        {
+            if (GodotObject.IsInstanceValid(rootNode)) rootNode.QueueFree();
+            _modRootNodes.Remove(id);
+            GD.Print($"[ModFramework] Freed auto-instantiated root.tscn node for {id}");
+        }
+
         if (_modsWithMountedPck.Contains(id))
             GD.Print($"[ModFramework] NOTE: {id} mounted a .pck; resources remain on res:// until restart (Godot 4 cannot unmount PCKs)");
 
@@ -491,31 +501,66 @@ public class ModManager : IDisposable
 
     private void MountModPckIfAny(ModManifest manifest)
     {
-        if (string.IsNullOrWhiteSpace(manifest.PckFile)) return;
+        // Prefer the framework's PckFile, but fall back to the native PackageName key so that
+        // vanilla/native mods (which set PackageName) mount their PCK on a framework install too.
+        var pckName = !string.IsNullOrWhiteSpace(manifest.PckFile) ? manifest.PckFile : manifest.PackageName;
+        if (string.IsNullOrWhiteSpace(pckName)) return;
         if (string.IsNullOrWhiteSpace(manifest.DirectoryPath)) return;
-        if (_modsWithMountedPck.Contains(manifest.Id)) return; // already mounted this session
 
-        var pckPath = Path.Combine(manifest.DirectoryPath, manifest.PckFile);
-        if (!File.Exists(pckPath))
+        // Mount the PCK once per session (Godot 4 can't unmount, so a re-enable never re-mounts).
+        if (!_modsWithMountedPck.Contains(manifest.Id))
         {
-            GD.PrintErr($"[ModFramework] PCK file not found for {manifest.Id}: {pckPath}");
-            return;
-        }
-
-        try
-        {
-            var ok = ProjectSettings.LoadResourcePack(pckPath);
-            if (!ok)
+            var pckPath = Path.Combine(manifest.DirectoryPath, pckName);
+            if (!File.Exists(pckPath))
             {
-                GD.PrintErr($"[ModFramework] LoadResourcePack returned false for {manifest.Id}: {pckPath}");
+                GD.PrintErr($"[ModFramework] PCK file not found for {manifest.Id}: {pckPath}");
                 return;
             }
-            _modsWithMountedPck.Add(manifest.Id);
-            GD.Print($"[ModFramework] Mounted PCK for {manifest.Id}: {manifest.PckFile}");
+            try
+            {
+                var ok = ProjectSettings.LoadResourcePack(pckPath);
+                if (!ok)
+                {
+                    GD.PrintErr($"[ModFramework] LoadResourcePack returned false for {manifest.Id}: {pckPath}");
+                    return;
+                }
+                _modsWithMountedPck.Add(manifest.Id);
+                GD.Print($"[ModFramework] Mounted PCK for {manifest.Id}: {pckName}");
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[ModFramework] Failed to mount PCK for {manifest.Id}: {ex.Message}");
+                return;
+            }
+        }
+
+        // Mirror Pratfall's native LoadPackage: if the PCK ships res://<DirectoryName>/root.tscn,
+        // instantiate it under the game root so scene-only vanilla mods (no ModEntry/OnLoad, all
+        // behavior in root.tscn) actually run on a framework install. Re-done on every enable
+        // (the node is freed on disable). When the game adds a manifest flag to opt out of
+        // root.tscn auto-load, gate this call on it.
+        InstantiateModRootSceneIfAny(manifest);
+    }
+
+    private void InstantiateModRootSceneIfAny(ModManifest manifest)
+    {
+        if (_tree == null) return;
+        if (string.IsNullOrWhiteSpace(manifest.DirectoryName)) return;
+        if (_modRootNodes.ContainsKey(manifest.Id)) return; // already instantiated for this enable
+
+        var scenePath = $"res://{manifest.DirectoryName}/root.tscn";
+        if (!ResourceLoader.Exists(scenePath)) return; // PCK ships no root.tscn — fine, assets still mounted
+        try
+        {
+            if (ResourceLoader.Load(scenePath) is not PackedScene scene) return;
+            var node = scene.Instantiate();
+            _tree.Root.AddChild(node);
+            _modRootNodes[manifest.Id] = node;
+            GD.Print($"[ModFramework] Instantiated {scenePath} for {manifest.Id}");
         }
         catch (Exception ex)
         {
-            GD.PrintErr($"[ModFramework] Failed to mount PCK for {manifest.Id}: {ex.Message}");
+            GD.PrintErr($"[ModFramework] Failed to instantiate {scenePath} for {manifest.Id}: {ex.Message}");
         }
     }
 

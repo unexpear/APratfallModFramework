@@ -267,6 +267,7 @@ What the one-liner buys you (Cecil-verified from `LifecycleHelper.ProcessNotific
 - **`GetUpdateType()` gates the per-frame hooks.** `None` gives you the one-shot hooks (`OnEnterTree`/`OnReady`/`OnStart`/`OnDestroy`) with **zero** per-frame cost; opt into `Update` / `PhysicUpdate` / `All` only when you need ticks.
 - **It's direct dispatch, not reflection** (dev-confirmed) — `ProcessNotification` is a plain `switch` on the notification id, so it's cheap.
 - **`partial` + the Godot source generator are still required** (same as the code route above), and the `_Notification` override is mandatory — Godot won't deliver notifications to an interface-inherited handler otherwise.
+- **If you `AddChild` it from code, free it on teardown.** A code-instantiated `ILifecycleHandler` stays registered with `LifecycleManager` until the node is freed — so a leaked one keeps getting `OnUpdate` ticks *after* your mod is disabled, and pins your `AssemblyLoadContext` (blocking unload). `QueueFree` it in `OnUnload` / `ModDestroy`. Nodes shipped in `root.tscn` are freed for you on disable, so this only bites the code (`AddChild`) route.
 
 Use plain `_Ready`/`_Process` for most mods; reach for `ILifecycleHandler` when you specifically want `OnStart`'s ordering or `LifecycleManager`-ordered ticks.
 
@@ -1746,7 +1747,7 @@ There's no single official Pratfall mod host yet. Current state, per the dev tea
 
 | Platform | Status | Notes |
 |---|---|---|
-| **Steam Workshop** | **Shipped 2026-05-18.** First-party path. | Auto-update + re-install across devices. Pratfall's native loader handles subscribe / install via `Steamworks.SteamUGC`, and `ModManifest` gained `IsSteamWorkshopMod` + `SteamWorkshopManifest` + `SteamWorkshopItem` properties so mod code can detect Workshop sourcing. **Caveat: Chinese players may not have Workshop access** (Robert) — consider this if your mod targets that audience. |
+| **Steam Workshop** | **Shipped 2026-05-18.** First-party path. | Auto-update + re-install across devices — but updates apply at **next launch, not live**: the native loader scans Workshop mods once at startup (`Setup` → `LoadAllModManifests` → `LoadAllModManifestsFromSteamWorkshop`; Cecil-verified — `OnItemInstalled` has zero callers, so there's no runtime reload), so a downloaded update takes effect on restart. Pratfall's native loader handles subscribe / install via `Steamworks.SteamUGC`, and `ModManifest` gained `IsSteamWorkshopMod` + `SteamWorkshopManifest` + `SteamWorkshopItem` properties so mod code can detect Workshop sourcing. **Caveat: Chinese players may not have Workshop access** (Robert) — consider this if your mod targets that audience. |
 | **Nexus Mods** | De facto current host; works today | Manual install only — users download a zip and drop the mod folder into `<GameDir>\mods\`. No auto-update. |
 | **Thunderstore** | Community exists; rep (Ebkr) is engaged with the Pratfall team | Standard format for BepInEx-style games (Risk of Rain 2, Lethal Company, REPO, Content Warning). Pratfall is on Godot+C# which is uncommon for the platform, so existing tooling (r2modman) doesn't natively understand the loader yet. |
 | **GitHub release / direct download** | Universal fallback | Works for any platform Pratfall runs on. Reasonable for early development; not a great long-term distribution channel. |

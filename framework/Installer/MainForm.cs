@@ -632,6 +632,13 @@ public class MainForm : Form
         if (!File.Exists(path)) return;
         try
         {
+            // The runtime sentinel is written ReadOnly, and Bootstrap only clears that
+            // bit on a clean shutdown. If the game crashed or was force-killed, the
+            // sentinel survives read-only and File.Delete would throw
+            // UnauthorizedAccessException — clear the attribute first.
+            var attrs = File.GetAttributes(path);
+            if ((attrs & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(path, attrs & ~FileAttributes.ReadOnly);
             File.Delete(path);
             Log($"{description} removed");
         }

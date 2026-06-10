@@ -155,6 +155,8 @@ Differences from Pratfall's `ModEntry.ModInit`/`ModDestroy`:
 
 Mods can be enabled → disabled → enabled multiple times per session. Make both methods idempotent.
 
+**Safety net (free your nodes anyway).** If you ship an [`ILifecycleHandler`](MOD_AUTHORS_GUIDE_VANILLA.md#a-third-way-to-run-code-ilifecyclehandler-and-onstart) node and forget to `QueueFree` it, the framework force-unregisters and frees it on disable (scoped to your mod's load context) — so a leaked handler won't keep getting `OnUpdate` or pin your `AssemblyLoadContext`. **Still free it yourself in `OnUnload`**: the net only covers `ILifecycleHandler` nodes loaded from your assembly, not other persistence (your own `Harmony` instance, static `+=` subscriptions, timers/threads). It's a backstop for an honest mistake, not a sandbox.
+
 ## The user-check gate
 
 **The framework refuses to load a DLL whose current bytes haven't been user-approved.** This is the v1.1 security model — it prevents auto-installed mods (Workshop auto-update, fresh download) from silently executing code before the user has had a chance to inspect them.

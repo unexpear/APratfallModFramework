@@ -237,12 +237,61 @@ public class ModAssemblyLoader
             }
         }
 
+        // Force-clean any ILifecycleHandler this mod registered with the game's
+        // LifecycleManager but didn't free in OnUnload: a leaked handler keeps getting
+        // OnUpdate after disable AND pins this ALC (blocking unload). Targeted by load
+        // context so we never touch the game's own handlers or another mod's. Runs before
+        // Context.Unload() so freeing the nodes also drops the refs that would pin it.
+        FreeLeakedLifecycleHandlers(id, entry.Context);
+
         entry.Harmony.UnpatchAll(entry.Harmony.Id);
         entry.Context.Unload();
         _loaded.Remove(entry);
         Log($"[ModFramework] Unloaded mod {id}");
         GC.Collect();
         GC.WaitForPendingFinalizers();
+    }
+
+    // Unregister + free ILifecycleHandler instances whose type was loaded into this mod's
+    // ALC. Mirrors the Harmony UnpatchAll above: makes disable reliably stop a mod even when
+    // the author forgot to QueueFree its node. Best-effort and fully contained — never breaks
+    // the unload path. NOT a sandbox: a mod can still persist via other vectors (its own
+    // Harmony instance, static event subscriptions, threads); this just closes the easy,
+    // common ILifecycleHandler hole. Only framework-loaded mods reach here — native-loader
+    // mods are the native loader's responsibility (same as a no-framework install).
+    private void FreeLeakedLifecycleHandlers(string id, AssemblyLoadContext ctx)
+    {
+        if (!ModRuntime.IsGodotRuntimeReady) return;
+        try
+        {
+            var mgr = LifecycleManager.Instance;
+            if (mgr == null) return;
+            var live = mgr.GetHandlers();
+            if (live == null) return;
+
+            // Snapshot first — Unregister mutates the manager's live list.
+            var doomed = new List<ILifecycleHandler>();
+            foreach (var h in live)
+            {
+                if (h == null) continue;
+                if (AssemblyLoadContext.GetLoadContext(h.GetType().Assembly) == ctx)
+                    doomed.Add(h);
+            }
+
+            foreach (var h in doomed)
+            {
+                try { mgr.Unregister(h); } catch { /* best-effort */ }
+                if (h is Node node && GodotObject.IsInstanceValid(node))
+                    node.QueueFree();
+            }
+
+            if (doomed.Count > 0)
+                Log($"[ModFramework] Force-freed {doomed.Count} leaked lifecycle handler(s) from {id} on disable (mod skipped its own cleanup)");
+        }
+        catch (Exception ex)
+        {
+            LogError($"[ModFramework] Lifecycle-handler cleanup for {id} failed (non-fatal): {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public bool IsLoaded(string id) => _loaded.Any(e => e.Id == id);

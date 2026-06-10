@@ -329,6 +329,30 @@ public class MainForm : Form
             return;
         }
 
+        // Guard a redundant double-install: if Pratfall.dll is already patched the framework
+        // is installed, so confirm before re-doing it. After a normal Pratfall update the patch
+        // is reverted (DLL no longer patched), so this won't fire — the re-patch flow stays
+        // frictionless.
+        var patchedDllPath = Path.Combine(_gameDir, "data_Pratfall_windows_x86_64", "Pratfall.dll");
+        if (BackupSafety.InspectDll(patchedDllPath).Patched)
+        {
+            var deployedFramework = Path.Combine(_gameDir, "data_Pratfall_windows_x86_64", "PratfallModFramework.dll");
+            var existingVer = File.Exists(deployedFramework) ? TryReadFrameworkVersion(deployedFramework) : null;
+            var verText = existingVer != null ? $"v{existingVer}" : "an unknown version";
+            var confirm = MessageBox.Show(
+                $"The Mod Framework is already installed ({verText}) — Pratfall.dll is patched and ready.\n\n" +
+                "Reinstall / repair it anyway?\n\n" +
+                "You don't need to reinstall while it's working. (After a Pratfall update the patch is reverted — just run the installer again then.)",
+                "Already Installed",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+            {
+                Log("Install cancelled — framework already installed.");
+                return;
+            }
+        }
+
         SetButtonsEnabled(false);
         _statusLabel.Text = "Installing...";
         _progressBar.Value = 0;

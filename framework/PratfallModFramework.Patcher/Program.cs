@@ -43,7 +43,17 @@ public static class Program
             return;
         }
 
-        BackupSafety.EnsureVanillaBackup(DllPath, BackupPath, Console.WriteLine, s => Console.Error.WriteLine(s));
+        try
+        {
+            BackupSafety.EnsureVanillaBackup(DllPath, BackupPath, Console.WriteLine, s => Console.Error.WriteLine(s));
+        }
+        catch (InvalidOperationException ex)
+        {
+            // patched-with-no-backup: refuse rather than create an un-undoable install.
+            Console.Error.WriteLine(ex.Message);
+            Environment.ExitCode = 1;
+            return;
+        }
 
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
         var frameworkSrc = Path.Combine(baseDir, "PratfallModFramework.dll");

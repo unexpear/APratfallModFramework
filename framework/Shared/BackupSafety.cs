@@ -108,9 +108,14 @@ internal static class BackupSafety
         if (live.Patched)
         {
             if (!File.Exists(backupPath))
-                warn("WARN: Pratfall.dll is already patched but no vanilla backup exists. Use Steam -> Verify integrity, then reinstall.");
-            else
-                log("Pratfall.dll already patched; keeping existing vanilla backup.");
+                // Continuing would leave a patched DLL with no recoverable vanilla — an
+                // install that can never be cleanly undone. Refuse and send the user to
+                // Steam Verify (which restores vanilla, after which a normal install works).
+                throw new InvalidOperationException(
+                    "Pratfall.dll is already patched, but no vanilla backup (.original) exists — " +
+                    "a reinstall now could never be cleanly undone. Use Steam -> Verify integrity " +
+                    "of game files to restore vanilla Pratfall.dll, then run the installer again.");
+            log("Pratfall.dll already patched; keeping existing vanilla backup.");
             return;
         }
         if (!File.Exists(backupPath))

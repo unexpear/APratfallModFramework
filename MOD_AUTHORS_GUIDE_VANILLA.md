@@ -234,6 +234,42 @@ The `new` + `AddChild` is exactly what the scene route does for you automaticall
 
 Both ship in the wild: Robert's Infinite Flare puts its `FlareModifier : Node` in `root.tscn` (scene); Rafi1017's Colored Flares `AddChild`s the same kind of node from `ModEntry.ModInit` (code). Both Cecil-verified.
 
+### A third way to run code: `ILifecycleHandler` and `OnStart`
+
+Both routes above give you plain Godot `_Ready` / `_Process`. If you want to plug into **Pratfall's own** lifecycle instead — most importantly an **`OnStart`** that runs once *after* Ready but *before* the first update (like Unity's `Start`), plus `_Process` / `_PhysicsProcess` ticks ordered through the game's `LifecycleManager` — make your node an **`ILifecycleHandler`**. Every game component (and most managers) is one. This recipe is compile-verified against the real game assemblies:
+
+```csharp
+using Godot;
+
+// ILifecycleHandler / LifecycleHelper / LifecycleUpdateType are in the global namespace.
+public partial class MyComponent : Node, ILifecycleHandler   // partial: Godot's source generator requires it on Node subclasses
+{
+    // Gate the per-frame hooks: None / Update / PhysicUpdate / All  (note the spelling: "Physic", no 's').
+    public LifecycleUpdateType GetUpdateType() => LifecycleUpdateType.Update;
+
+    // Required: Godot doesn't deliver _Notification to the script through interface
+    // inheritance, so route it into the game's dispatcher yourself.
+    public override void _Notification(int what) => LifecycleHelper.ProcessNotification(this, this, what);
+
+    public void OnEnterTree() { }
+    public void OnReady() { }
+    public void OnStart() { }                   // once, after Ready, before the first OnUpdate
+    public void OnUpdate(double delta) { }       // only if GetUpdateType() includes Update
+    public void OnPhysicsUpdate(double delta) { }
+    public void OnExitTree() { }
+    public void OnDestroy() { }
+}
+```
+
+What the one-liner buys you (Cecil-verified from `LifecycleHelper.ProcessNotification`): on `NotificationEnterTree` it registers the node as a component if it's an `IComponent`, then calls `OnEnterTree`; on Ready it registers the handler with `LifecycleManager.Instance` and calls `OnReady`; process / physics ticks call `OnUpdate` / `OnPhysicsUpdate`; on predelete it unregisters and calls `OnDestroy`. The whole switch is wrapped in a swallowing `try/catch` and short-circuits on `LifecycleHelper.BlockAllNotifications`.
+
+- **`OnStart` is the reason to bother** — there's no plain-Godot equivalent. It fires between Ready and the first tick, so it's the place to read state another node set up in *its* Ready/EnterTree (e.g. spawn an object and set fields in `OnReady`, then have a dependent component read them already-initialized in `OnStart`). Dev-confirmed: Robert / Tim, #mod-dev 2026-06-10.
+- **`GetUpdateType()` gates the per-frame hooks.** `None` gives you the one-shot hooks (`OnEnterTree`/`OnReady`/`OnStart`/`OnDestroy`) with **zero** per-frame cost; opt into `Update` / `PhysicUpdate` / `All` only when you need ticks.
+- **It's direct dispatch, not reflection** (dev-confirmed) — `ProcessNotification` is a plain `switch` on the notification id, so it's cheap.
+- **`partial` + the Godot source generator are still required** (same as the code route above), and the `_Notification` override is mandatory — Godot won't deliver notifications to an interface-inherited handler otherwise.
+
+Use plain `_Ready`/`_Process` for most mods; reach for `ILifecycleHandler` when you specifically want `OnStart`'s ordering or `LifecycleManager`-ordered ticks.
+
 ## CLI flags
 
 Pratfall reads these from its command line at startup:
@@ -1502,7 +1538,7 @@ EcsHelper.GetComponentRef(ref hp, playerNode, ComponentType.PlayerHealthComponen
 // have to know the type ids by hand. Use `player.PlayerHealthComponent` instead.
 ```
 
-**Use existing components — don't register your own into the component system.** The accessors and `ComponentType` enum are *generated code*: every entity class gets all 203 cached accessors stamped in at build time (e.g. `get_NetworkComponent` reads a `__internalNetworkComponent` backing field and calls `GetComponentRef` with the literal id `22084`), and the ids are auto-generated and sparse/hash-like (`EmissiveLightComponent = 135`, `PuppyColorComponent = 1083`, `NetworkComponent = 22084`). Mods can't run that generator, and minting your own `ComponentType` value risks colliding with a current or *future* game id. Dev-confirmed (Robert, #mod-dev 2026-06-10): it's easier not to use their component system for **adding** components — "obviously you can use the `RigidBody3DEntity` for example and existing components". For custom behavior, attach plain Godot nodes (`AddChild` from `ModInit`, or ship them in your scene — see [Two ways to run a node](#two-ways-to-run-a-node-scene-roottscn-vs-code-new--addchild)) and read game state through the existing accessors.
+**Use existing components — don't register your own into the component system.** The accessors and `ComponentType` enum are *generated code*: every entity class gets all 203 cached accessors stamped in at build time (e.g. `get_NetworkComponent` reads a `__internalNetworkComponent` backing field and calls `GetComponentRef` with the literal id `22084`), and the ids are auto-generated and sparse/hash-like (`EmissiveLightComponent = 135`, `PuppyColorComponent = 1083`, `NetworkComponent = 22084`). Mods can't run that generator, and minting your own `ComponentType` value risks colliding with a current or *future* game id. Dev-confirmed (Robert, #mod-dev 2026-06-10): it's easier not to use their component system for **adding** components — "obviously you can use the `RigidBody3DEntity` for example and existing components". For custom behavior, attach plain Godot nodes (`AddChild` from `ModInit`, or ship them in your scene — see [Two ways to run a node](#two-ways-to-run-a-node-scene-roottscn-vs-code-new--addchild), or [hook the game's lifecycle](#a-third-way-to-run-code-ilifecyclehandler-and-onstart) for `OnStart`/ordered ticks) and read game state through the existing accessors.
 
 ### `IComponent` implementors (203)
 

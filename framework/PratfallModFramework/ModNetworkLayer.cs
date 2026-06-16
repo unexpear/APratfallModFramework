@@ -49,10 +49,10 @@ public sealed class ModNetworkLayer : IDisposable
     public bool IsLocalHost => _transportMode == TransportMode.Debug || TryGetLobbyManager()?.IsLobbyOwner == true;
     public string? LocalUserId => _transportMode == TransportMode.Debug
         ? _debugPeerConfig?.LocalUserId
-        : TryGetLobbyManager()?.LocalLobbyMember?.GetUserId();
+        : TryGetLobbyManager()?.LocalLobbyMember?.GetLobbyMemberId();
     public string? LobbyOwnerUserId => _transportMode == TransportMode.Debug
         ? _debugPeerConfig?.LocalUserId
-        : TryGetLobbyManager()?.LobbyOwner?.GetUserId();
+        : TryGetLobbyManager()?.LobbyOwner?.GetLobbyMemberId();
     public byte LocalMemberIndex => _transportMode == TransportMode.Debug
         ? (byte)0
         : TryGetLobbyManager()?.LocalLobbyMember?.Index ?? 0;
@@ -356,7 +356,7 @@ public sealed class ModNetworkLayer : IDisposable
             OnTransportReset?.Invoke();
     }
 
-    private void OnMemberJoined(INetworkLobbyMember member)
+    private void OnMemberJoined(NetworkLobbyMember member)
     {
         if (member == null)
             return;
@@ -364,13 +364,13 @@ public sealed class ModNetworkLayer : IDisposable
         BroadcastManifest();
     }
 
-    private void OnMemberLeft(INetworkLobbyMember member)
+    private void OnMemberLeft(NetworkLobbyMember member)
     {
         if (member == null)
             return;
 
-        GD.Print($"[ModFramework] Lobby member left: {member.GetUserId()}");
-        OnMemberLeftLobby?.Invoke(member.GetUserId());
+        GD.Print($"[ModFramework] Lobby member left: {member.GetLobbyMemberId()}");
+        OnMemberLeftLobby?.Invoke(member.GetLobbyMemberId());
     }
 
     // Asks Pratfall's lobby manager to leave the current lobby. Used when a peer
@@ -405,7 +405,7 @@ public sealed class ModNetworkLayer : IDisposable
         if (lobby?.LobbyMembers == null) return false;
         foreach (var member in lobby.LobbyMembers)
         {
-            if (member != null && string.Equals(member.GetUserId(), userId, StringComparison.OrdinalIgnoreCase))
+            if (member != null && string.Equals(member.GetLobbyMemberId(), userId, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;

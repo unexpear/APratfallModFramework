@@ -49,7 +49,7 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [19.7 `Constants.EventId*` (72)](#constantseventid-72)
     - [19.8 Entity hierarchy & `IEntity`](#entity-hierarchy--ientity)
     - [19.9 `IComponent` implementors (203)](#icomponent-implementors-203)
-    - [19.10 Public interfaces (13)](#public-interfaces-13)
+    - [19.10 Public interfaces (12)](#public-interfaces-12)
     - [19.11 `res://` path conventions](#res-path-conventions)
     - [19.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
 20. [Debugging & dev iteration](#debugging--dev-iteration)
@@ -861,7 +861,7 @@ public static class ModEntry
     private static bool IsSingleplayer()
         => Network.LobbyManager?.IsSingleplayerLobby ?? true;
 
-    private static void OnMemberJoined(INetworkLobbyMember member)
+    private static void OnMemberJoined(NetworkLobbyMember member)
     {
         if (!IsHost()) return;  // only the host replays state to new joiners
         // Send mod state to the joiner via Network.EventManager.SendEvent
@@ -873,7 +873,7 @@ public static class ModEntry
         GD.Print($"[MyMod] new member joined (index={member.Index}); replaying state");
     }
 
-    private static void OnMemberLeft(INetworkLobbyMember member)
+    private static void OnMemberLeft(NetworkLobbyMember member)
     {
         GD.Print($"[MyMod] member left (index={member.Index}); cleaning up per-member state");
     }
@@ -891,9 +891,10 @@ public static class ModEntry
 Key facts:
 - **Host check:** `Network.LobbyManager.IsLobbyOwner` (bool property on `NetworkLobbyManagerBase`). There is **no** `Network.IsHost` shortcut — that's invented and doesn't exist.
 - **Singleplayer check:** `Network.LobbyManager.IsSingleplayerLobby`. Always true for offline play even though `Network` itself is still up.
-- **Local member identity:** `Network.LobbyManager.LocalLobbyMember` (`INetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetUserId()`).
-- **All members:** `Network.LobbyManager.LobbyMembers` (List).
-- **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<INetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
+- **Local member identity:** `Network.LobbyManager.LocalLobbyMember` (`NetworkLobbyMember` — exposes `Index`, `IsLocal`, `IsServer`, `GetLobbyMemberId()`).
+- **All members:** `Network.LobbyManager.LobbyMembers` (`List<NetworkLobbyMember>`).
+- **Joiner notifications:** subscribe on `NetworkLobbyManagerBase.OnMemberJoined` / `OnMemberLeft` (instance `Action<NetworkLobbyMember>` fields). `LateJoinManager` is *not* the right hook — it has no public events; it's the manager that the *game* uses, not what mods subscribe to.
+- **Lobby-member API changed in build `23751132`:** the networking refactor consolidated the per-backend member types (`Steam`/`Eos`/`Offline NetworkLobbyMember`) **and** the `INetworkLobbyMember` interface into a single **`NetworkLobbyMember`** class, and renamed `GetUserId()` → **`GetLobbyMemberId()`** (still returns the Steam/EOS id as a string). If you targeted an earlier build, update both.
 - **Custom network event ids:** pick anything outside `100–169` (gameplay events) and `230–231` (`EventIdGameModeChanged` + `EventIdSubmitSpeedrunTime`) to avoid future-Pratfall collisions. Document your ids in your README so two mods don't pick the same one.
 - **README compatibility tag:** mod authors in comparable communities (Risk of Rain 2, Lethal Company, REPO) self-tag mods as one of:
   - **Client-side only** — visual / UI only; the host doesn't need your mod, lobby members with or without it are compatible
@@ -1585,14 +1586,14 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 
 **Misc / debug (43)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `GoldCoinComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `TreasureComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
 
-### Public interfaces (13)
+### Public interfaces (12)
 
 - `IComponent` — every component implements this. 203 implementors (see above).
 - `IEntity` — every entity implements this. 27 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 203 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
 - `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
 - `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.
-- `INetworkLobby` / `INetworkLobbyMember` — multiplayer-lobby abstractions (Steam vs EOS hide behind these).
+- `INetworkLobby` — multiplayer-lobby abstraction (Steam vs EOS hide behind it). *(The `INetworkLobbyMember` interface was removed in build `23751132`; members are now the `NetworkLobbyMember` class.)*
 - `INetworkVoicePlayer` — voice-chat abstraction.
 - `ILifecycleHandler` — opt into `LifecycleManager`-ordered `_Process` / `_PhysicsProcess` ticks. Most managers implement this.
 - `IPersistentId` — entities that persist across save/load.

@@ -10,7 +10,6 @@ public class VoteUI : Control
     private HBoxContainer _buttonRow = null!;
     private Button _yesBtn = null!;
     private Button _noBtn = null!;
-    private Godot.Timer _timeout = null!;
     private Godot.Timer _nativeDialogRetryTimer = null!;
     private string? _currentVoteModId;
     private System.Action<string, bool>? _onVoteComplete;
@@ -100,14 +99,6 @@ public class VoteUI : Control
         _noBtn.FocusPrevious = _noBtn.GetPathTo(_yesBtn);
         _noBtn.SetFocusNeighbor(Side.Left, _noBtn.GetPathTo(_yesBtn));
 
-        _timeout = new Godot.Timer
-        {
-            OneShot = true,
-            WaitTime = 15.0
-        };
-        _timeout.Timeout += OnTimeout;
-        AddChild(_timeout);
-
         _nativeDialogRetryTimer = new Godot.Timer
         {
             OneShot = true,
@@ -128,7 +119,6 @@ public class VoteUI : Control
         _usingNativeDialog = false;
         _pendingTitle = title;
         _pendingBody = bodyText;
-        _timeout.Start();
 
         if (TryShowNativeDialog())
             return;
@@ -161,23 +151,6 @@ public class VoteUI : Control
         Reset();
     }
 
-    private void OnTimeout()
-    {
-        if (_currentVoteModId == null) return;
-
-        if (_usingNativeDialog)
-        {
-            _usingNativeDialog = false;
-            NativeDialogBridge.DismissActive();
-        }
-
-        _nativeDialogRetryTimer.Stop();
-
-        var id = _currentVoteModId;
-        _onVoteComplete?.Invoke(id, false);
-        Reset();
-    }
-
     private void Reset()
     {
         _currentVoteModId = null;
@@ -186,7 +159,6 @@ public class VoteUI : Control
         _pendingTitle = "";
         _pendingBody = "";
         _nativeDialogRetriesRemaining = 0;
-        _timeout.Stop();
         _nativeDialogRetryTimer.Stop();
         _titleLabel.Text = "MOD VOTE";
         _modInfoLabel.Text = "";

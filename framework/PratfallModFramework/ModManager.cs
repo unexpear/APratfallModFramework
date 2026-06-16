@@ -537,8 +537,8 @@ public class ModManager : IDisposable
         // Mirror Pratfall's native LoadPackage: if the PCK ships res://<DirectoryName>/root.tscn,
         // instantiate it under the game root so scene-only vanilla mods (no ModEntry/OnLoad, all
         // behavior in root.tscn) actually run on a framework install. Re-done on every enable
-        // (the node is freed on disable). When the game adds a manifest flag to opt out of
-        // root.tscn auto-load, gate this call on it.
+        // (the node is freed on disable). Honors the manifest's SkipRootSceneLoad flag, matching
+        // Pratfall's native loader (build 23696867+).
         InstantiateModRootSceneIfAny(manifest);
     }
 
@@ -546,6 +546,7 @@ public class ModManager : IDisposable
     {
         if (_tree == null) return;
         if (string.IsNullOrWhiteSpace(manifest.DirectoryName)) return;
+        if (manifest.SkipRootSceneLoad) return; // mod opted out of root.tscn auto-load (PCK stays mounted)
         if (_modRootNodes.ContainsKey(manifest.Id)) return; // already instantiated for this enable
 
         var scenePath = $"res://{manifest.DirectoryName}/root.tscn";
@@ -1905,7 +1906,12 @@ public class ModManager : IDisposable
         RemoveActiveVoteKey(result.VoteId);
 
         if (string.Equals(_activeVoteId, result.VoteId, StringComparison.OrdinalIgnoreCase))
+        {
+            // The vote resolved (enough peers voted) while its prompt was still on screen
+            // — close it so a decided vote never lingers, then show the next queued one.
             _activeVoteId = null;
+            _voteUI?.DismissVote();
+        }
 
         if (!result.Passed)
         {
@@ -2070,7 +2076,19 @@ public class ModManager : IDisposable
             prompt.Title,
             prompt.Body,
             1,
-            (_, voteYes) => prompt.OnComplete(voteYes));
+            (_, voteYes) =>
+            {
+                prompt.OnComplete(voteYes);
+                // Advance as soon as THIS player has voted — don't wait for the full tally
+                // (the other players) to resolve. Keeps queued votes flowing one after another
+                // instead of stalling between each. The background tally still resolves via
+                // OnVoteResolved/ApplyVoteResult.
+                if (string.Equals(_activeVoteId, prompt.VoteId, StringComparison.OrdinalIgnoreCase))
+                {
+                    _activeVoteId = null;
+                    TryShowNextVote();
+                }
+            });
     }
 
     private IEnumerable<ModVoteRequest> BuildVoteRequestsForPeer(ModPeerSnapshot peerSnapshot)

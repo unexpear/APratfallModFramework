@@ -25,6 +25,11 @@ public class ModManifest
     // Resource types be instantiated from .tscn files or PackedScene.Instantiate.
     // Set to false only if you have a specific reason to skip script registration.
     public bool AddAssemblyToGodot { get; set; } = true;
+    // Mirrors Pratfall's native loader flag (added in build 23696867): when true the mod's
+    // PCK still mounts, but its res://<DirectoryName>/root.tscn is NOT auto-instantiated —
+    // for mods that ship assets only, or drive their own instantiation from code. Default
+    // false = auto-instantiate (the original behavior).
+    public bool SkipRootSceneLoad { get; set; }
     public string DirectoryPath { get; set; } = "";
     public string DirectoryName { get; set; } = "";
     public string LoadPolicy { get; set; } = ModLoadPolicies.Auto;
@@ -66,6 +71,7 @@ public class ModManifest
             AssemblySha256 = ModManifestJson.GetStringDual(dict, "assemblySha256", "AssemblySha256", ""),
             PckFile = ModManifestJson.GetStringDual(dict, "pckFile", "PckFile", ""),
             AddAssemblyToGodot = ModManifestJson.GetBoolDual(dict, "addAssemblyToGodot", "AddAssemblyToGodot", true),
+            SkipRootSceneLoad = ModManifestJson.GetBoolDual(dict, "skipRootSceneLoad", "SkipRootSceneLoad", false),
             DirectoryPath = directoryPath ?? "",
             DirectoryName = directoryName ?? "",
             LoadPolicy = ModManifestJson.GetStringDual(dict, "loadPolicy", "LoadPolicy", hasOfficialFields && !hasFrameworkFields ? ModLoadPolicies.Official : ModLoadPolicies.Auto),

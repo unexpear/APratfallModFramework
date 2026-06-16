@@ -41,14 +41,14 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [18.5 PCK packaging gotchas](#pck-packaging-gotchas)
 19. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
     - [19.1 "How do I ...?"](#how-do-i-)
-    - [19.2 Singletons (78)](#singletons-78)
-    - [19.3 Static helper classes (22)](#static-helper-classes-22)
+    - [19.2 Singletons (80)](#singletons-80)
+    - [19.3 Static helper classes (23)](#static-helper-classes-23)
     - [19.4 Configs & Settings (27)](#configs--settings-27)
     - [19.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
     - [19.6 `GameplayTags.*` (42)](#gameplaytags-42)
     - [19.7 `Constants.EventId*` (72)](#constantseventid-72)
     - [19.8 Entity hierarchy & `IEntity`](#entity-hierarchy--ientity)
-    - [19.9 `IComponent` implementors (203)](#icomponent-implementors-203)
+    - [19.9 `IComponent` implementors (204)](#icomponent-implementors-204)
     - [19.10 Public interfaces (12)](#public-interfaces-12)
     - [19.11 `res://` path conventions](#res-path-conventions)
     - [19.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
@@ -140,6 +140,7 @@ MyMod/
   "Description": "Does something cool.",
   "Assembly": "MyMod.dll",
   "PackageName": "",
+  "SkipRootSceneLoad": false,
   "AutoLoad": false
 }
 ```
@@ -147,6 +148,7 @@ MyMod/
 Key fields:
 - `Assembly` — DLL filename in the mod folder. Pratfall's loader will resolve `<mod folder>/<Assembly>` and `LoadFromAssemblyPath` it.
 - `PackageName` — optional `.pck` filename. If set, the loader mounts the package and tries to instantiate `res://<DirectoryName>/root.tscn` under `Game.RootNode`.
+- `SkipRootSceneLoad` (default `false`, native field since build `23696867`) — when `true`, the loader still mounts the `PackageName` PCK but **skips** the automatic `res://<DirectoryName>/root.tscn` instantiation. Use it when you ship a `.pck` purely for assets (textures, audio, scenes you instantiate yourself from code) and don't want an auto-loaded root scene. Cecil-verified in `ModManager::LoadPackage` (the mount runs unconditionally; this flag only gates the root-scene step).
 - `AutoLoad` (default `false`) — when `true`, the loader auto-enables the mod at launch even if previously disabled. Useful for mods that ship runtime infrastructure.
 
 The mod folder name must be **unique** across all installed mods — it's the namespace for any assets in your `.pck` (Pratfall mounts them at `res://<DirectoryName>/...`).
@@ -1182,7 +1184,7 @@ Your mod project is a Godot project. Asset layout matters because **Pratfall mou
 
 ### Auto-instantiated root scene (`root.tscn`)
 
-Cecil of `ModManager.LoadPackage` (R2973): after mounting the PCK, Pratfall tries to load `res://<DirectoryName>/root.tscn` and, if it exists and parses as a `PackedScene`, **instantiates it and adds the result as a child of the game root**. The instantiated node is stored on the manifest so `ModManager.UnloadPackage` can `Free()` it on disable.
+Cecil of `ModManager.LoadPackage` (re-verified in the `23751132` IL): after mounting the PCK, Pratfall tries to load `res://<DirectoryName>/root.tscn` and, if it exists and parses as a `PackedScene`, **instantiates it and adds the result as a child of the game root**. The instantiated node is stored on the manifest so `ModManager.UnloadPackage` can `Free()` it on disable. (Build `23696867`+ inserts a gate between the two steps: if the manifest sets `SkipRootSceneLoad: true` (see the `manifest.json` schema under [Setup](#setup)), the PCK still mounts but this root-scene instantiation is skipped.)
 
 This means:
 
@@ -1208,9 +1210,9 @@ This means:
 
 Audit of `Pratfall.dll` (2026-05-17 — Pratfall `1.1.0.R2943`) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
 
-**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-22) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) was not re-audited in full and may have small drift — re-Cecil before relying on a specific signature.
+**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-23) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) wasn't re-audited in full at R2973 — but it has been since (see the full re-verification stamp below, current as of `23751132`).
 
-**Full re-verification against build `23598402` (2026-06-09, R3809):** every catalog below was re-derived from the live DLL and matched name-for-name — 78 singletons / 22 static helpers / 27 configs / 11 events / 42 `GameplayTags` / all 72 `Constants.EventId*` name→value pairs / 203 `IComponent` implementors / 27 entities / 13 interfaces — the behavioral IL claims throughout this guide were re-checked against the live method bodies, and every recipe re-compiled clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; all still hold as of `23598402`.
+**Full catalog re-verification against build `23751132` (2026-06-16):** every catalog below was re-derived from the live DLL and matched name-for-name — 80 singletons / 23 static helpers / 27 configs / 11 events / 42 `GameplayTags` / all 72 `Constants.EventId*` name→value pairs / 204 `IComponent` implementors / 27 entities / 12 interfaces. The `23751132` networking refactor folded the `INetworkLobbyMember` interface **and** the per-backend lobby-member classes (`Steam`/`Eos`/`Offline NetworkLobbyMember`) into one `NetworkLobbyMember` class (`GetUserId()` → `GetLobbyMemberId()`); the multiplayer recipe + interface catalog are updated, and the recipe surface (`NetworkLobbyManagerBase`, `NetworkLobbyMember`, `Network.LobbyManager`) was re-verified member-by-member. The native-loader IL (`ModManager::LoadPackage`, including the `SkipRootSceneLoad` gate added in `23696867`) and the mod-integrity gates (`SpeedrunManager` → `EnabledModCount`, `LocalizationManager` → `AllowUserLocalization`) were re-checked against the live method bodies, and every recipe code block re-compiles clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; the catalogs above hold as of `23751132`. (Prior full pass: `23598402`, 2026-06-09 — counts then were 78 / 22 / 203 / 13.)
 
 This section is a **reference map**, not a tutorial. The goal: when you're mid-mod and you need to know "is there a manager for X?" or "what events fire when a player dies?", you should be able to find the answer here instead of disassembling `Pratfall.dll` yourself.
 
@@ -1234,7 +1236,7 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Get the user save folder | `Game.Platform.GetUserDataPath()` then `ProjectSettings.GlobalizePath(...)` for a real filesystem path |
 | Know which config is "the game settings" | `Game.Config` — but it's a struct with `init`-only setters, you can read but not mutate |
 
-### Singletons (78)
+### Singletons (80)
 
 A *singleton* here is a public class with a static `Instance` field or static-getter property. Access via `<Name>.Instance.<Member>`. Many are HUD/UI controllers that are **null on the main menu** — they only exist while a gameplay scene is loaded. (Generic/internal infrastructure singletons such as `NodeCounter<T>` are omitted — they're not author-facing.)
 
@@ -1274,6 +1276,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `Network` — multiplayer root
 - `NetworkGroupManager` — replicated-group registry
 - `LateJoinManager` — mid-game-join state sync
+- `NetworkNAudioVoiceRecorder` — NAudio-based voice-chat capture (added in `23751132`)
 
 **Players**
 - `PlayerManager` — connected-player registry
@@ -1285,6 +1288,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `CrowdControlManager` — Crowd Control integration
 
 **UI controllers** (most are null until the relevant screen is open)
+- `MainMenuUIViewController` — main-menu screen root (the inverse of its siblings: present on the menu, null once a gameplay scene loads; exposes the Host / Local-mode button handlers)
 - `ButtonPrompBarController` — HUD prompt bar (null on main menu)
 - `PauseMenuUIViewController`
 - `InventoryUIController`
@@ -1339,7 +1343,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `NodeCounter<T>` — debug-only generic node counter
 - `ImGuiGodot.ImGuiController` — Dear ImGui integration (debug builds)
 
-### Static helper classes (22)
+### Static helper classes (23)
 
 C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`). The line between "helper" and "manager" is fuzzy in Pratfall; what these all share is no instance state.
 
@@ -1355,6 +1359,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `LeafGrowerHelper` — tree-leaf placement helpers (procedural)
 - `LifecycleHelper` — lifecycle-handler registration helpers
 - **`ModManager`** — Pratfall's native mod loader (substantially expanded in the 2026-05-18 `1.1.0.R2973` Workshop update). Public surface in R2973: `Setup()`, `LoadAllModManifests(bool isInitialLoad, Action onComplete)`, `LoadedMods` (List<string> — the enabled set read from `enabled_mods.json`; entries are **full mod directory paths**, not bare folder names, and `IsModEnabled` exact-matches them against `manifest.Directory`), `OnModsLoaded` (Action callback fired after `LoadAllModManifests` completes — useful if you want to react to "mods are ready"), `ModsDirectory` (string, active mods **folder path** — changes with `--qh-mod-directory`), `IsInitialized`, `EnabledModCount`, `EnableMod(ModManifest)`, `DisableMod(ModManifest)`, `IsModEnabled(ModManifest)`, `ShouldLoadMods` getter (`!HasFlag("--qh-skip-mods")` — now read by `ModManager.Setup`'s `LoadAllModManifests` callback as of build `23505941`; was unused in `1.1.0.R2973`), `ShouldHideModLoaderUi` getter. **Note**: `GetModManifest(string)` was renamed `GetModManifestFromDirectory(string)` AND made private — if you used the old name in pre-R2973 builds, you'll need to switch to iterating `Mods` (the `List<ModManifest>` property) or call `GetModManifestFromDirectory`. ([lifecycle recipe](#lifecycle))
+- `NAudioDeviceHelper` — audio input/output device enumeration for voice chat (added in `23751132`)
 - `NetworkHelper` — common multiplayer helpers
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
@@ -1501,7 +1506,7 @@ Concrete entities (27 total, Cecil-counted):
 - Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `GoldManager`, `HangDebuggerNode`, `HubItemManager`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
 - Cameras: `CharacterEditorCamera`, `SpectatorCamera`
 
-**`IEntity` exposes 204 properties** — 203 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
+**`IEntity` exposes 205 properties** — 204 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
 
 ```csharp
 // Instead of GetComponent<PlayerHealthComponent>() everywhere, you just write:
@@ -1542,7 +1547,7 @@ EcsHelper.GetComponentRef(ref hp, playerNode, ComponentType.PlayerHealthComponen
 
 **Use existing components — don't register your own into the component system.** The accessors and `ComponentType` enum are *generated code*: every entity class gets all 203 cached accessors stamped in at build time (e.g. `get_NetworkComponent` reads a `__internalNetworkComponent` backing field and calls `GetComponentRef` with the literal id `22084`), and the ids are auto-generated and sparse/hash-like (`EmissiveLightComponent = 135`, `PuppyColorComponent = 1083`, `NetworkComponent = 22084`). Mods can't run that generator, and minting your own `ComponentType` value risks colliding with a current or *future* game id. Dev-confirmed (Robert, #mod-dev 2026-06-10): it's easier not to use their component system for **adding** components — "obviously you can use the `RigidBody3DEntity` for example and existing components". For custom behavior, attach plain Godot nodes (`AddChild` from `ModInit`, or ship them in your scene — see [Two ways to run a node](#two-ways-to-run-a-node-scene-roottscn-vs-code-new--addchild), or [hook the game's lifecycle](#a-third-way-to-run-code-ilifecyclehandler-and-onstart) for `OnStart`/ordered ticks) and read game state through the existing accessors.
 
-### `IComponent` implementors (203)
+### `IComponent` implementors (204)
 
 The components you might want to read/mutate on a `Player` or other entity. Categorized by name prefix:
 
@@ -1584,12 +1589,12 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 
 **Lifecycle / spawn (11)**: `BossHealthComponent`, `BuriedMineComponent`, `CheckpointStatueComponent`, `DespawnWhenTooFarAwayComponent`, `EnableInteractableOnDugOut`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `PickupItemOnDeathComponent`, `SpawnEntityOnDeathComponent`, `SpawnGoldOnDeathComponent`, `SpawnMeshOnBounceComponent`.
 
-**Misc / debug (43)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `GoldCoinComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `TreasureComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
+**Misc / debug (44)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `GoldCoinComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `LootEffectComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `TreasureComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
 
 ### Public interfaces (12)
 
-- `IComponent` — every component implements this. 203 implementors (see above).
-- `IEntity` — every entity implements this. 27 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 203 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IComponent` — every component implements this. 204 implementors (see above).
+- `IEntity` — every entity implements this. 27 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 204 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
 - `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
 - `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.

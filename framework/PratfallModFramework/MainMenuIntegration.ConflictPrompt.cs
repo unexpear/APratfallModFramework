@@ -74,7 +74,7 @@ public static partial class MainMenuIntegration
         // snapshot avoids any chance of two sibling sizes computing against
         // different values if a layout pass intervened.
         var referenceButtonHeight = GetReferenceButtonHeight();
-        var buttonHeight = Math.Max(referenceButtonHeight, 56f);
+        var buttonHeight = Math.Max(referenceButtonHeight, 52f);
         var buttonWidth = Mathf.Clamp(dialogSize.X * 0.35f, 200f, 320f);
 
         var keepA = new Button { Text = $"Keep {modAName}", FocusMode = Control.FocusModeEnum.All };

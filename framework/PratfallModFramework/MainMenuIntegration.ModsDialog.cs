@@ -98,7 +98,7 @@ public static partial class MainMenuIntegration
                 SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd,
             };
             ApplyButtonTheme(applyButton);
-            applyButton.CustomMinimumSize = new Vector2(220f, Math.Max(referenceButtonHeight, 48f));
+            applyButton.CustomMinimumSize = new Vector2(220f, Math.Max(referenceButtonHeight, 52f));
             applyButton.Pressed += _onApplySelectedMods;
             header.AddChild(applyButton);
             focusables.Add(applyButton);

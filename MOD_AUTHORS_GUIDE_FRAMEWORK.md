@@ -101,6 +101,7 @@ MyMod/
   "AddAssemblyToGodot": true,
   "assemblySha256": "",
   "pckFile": "",
+  "skipRootSceneLoad": false,
   "effects": {
     "settings": [],
     "patches": [],
@@ -119,6 +120,7 @@ MyMod/
 Framework-specific manifest fields:
 - `assemblySha256` (optional) — SHA-256 of your DLL bytes in lowercase hex. When set, the framework refuses to load a DLL whose actual hash differs. Pin this to defend against tampered or stale files. Leave empty to opt out (back-compat).
 - `pckFile` (optional) — name of a `.pck` side-file. The framework transfers both DLL and PCK during P2P sync and mounts the PCK on enable.
+- `skipRootSceneLoad` (optional, default `false`) — when `true`, the framework still mounts your `pckFile` but **skips** auto-instantiating `res://<DirectoryName>/root.tscn`. Use it for asset-only PCKs (textures / audio / scenes you instantiate yourself from `OnLoad`). Mirrors Pratfall's native-loader flag (build `23696867`+); accepts `skipRootSceneLoad` or `SkipRootSceneLoad`.
 - `multiplayer.mode` — `local_only`, `stretch`, `transfer`, `restart_required`, or `auto` (default — framework infers from `type` + effects).
 - `multiplayer.requires` — list of other mod IDs that must be installed on peers.
 - `multiplayer.conflictsWith` — list of mod IDs your mod is incompatible with. Surfaces in the conflict-resolution prompt.

@@ -42,7 +42,7 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
 19. [Decoded Pratfall surface inventory](#decoded-pratfall-surface-inventory)
     - [19.1 "How do I ...?"](#how-do-i-)
     - [19.2 Singletons (80)](#singletons-80)
-    - [19.3 Static helper classes (23)](#static-helper-classes-23)
+    - [19.3 Static helper classes (22)](#static-helper-classes-22)
     - [19.4 Configs & Settings (27)](#configs--settings-27)
     - [19.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
     - [19.6 `GameplayTags.*` (42)](#gameplaytags-42)
@@ -1210,9 +1210,9 @@ This means:
 
 Audit of `Pratfall.dll` (2026-05-17 — Pratfall `1.1.0.R2943`) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
 
-**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-23) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) wasn't re-audited in full at R2973 — but it has been since (see the full re-verification stamp below, current as of `23751132`).
+**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-22) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) wasn't re-audited in full at R2973 — but it has been since (see the full re-verification stamp below, current as of `23825910`).
 
-**Full catalog re-verification against build `23751132` (2026-06-16):** every catalog below was re-derived from the live DLL and matched name-for-name — 80 singletons / 23 static helpers / 27 configs / 11 events / 42 `GameplayTags` / all 72 `Constants.EventId*` name→value pairs / 204 `IComponent` implementors / 27 entities / 12 interfaces. The `23751132` networking refactor folded the `INetworkLobbyMember` interface **and** the per-backend lobby-member classes (`Steam`/`Eos`/`Offline NetworkLobbyMember`) into one `NetworkLobbyMember` class (`GetUserId()` → `GetLobbyMemberId()`); the multiplayer recipe + interface catalog are updated, and the recipe surface (`NetworkLobbyManagerBase`, `NetworkLobbyMember`, `Network.LobbyManager`) was re-verified member-by-member. The native-loader IL (`ModManager::LoadPackage`, including the `SkipRootSceneLoad` gate added in `23696867`) and the mod-integrity gates (`SpeedrunManager` → `EnabledModCount`, `LocalizationManager` → `AllowUserLocalization`) were re-checked against the live method bodies, and every recipe code block re-compiles clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; the catalogs above hold as of `23751132`. (Prior full pass: `23598402`, 2026-06-09 — counts then were 78 / 22 / 203 / 13.)
+**Full catalog re-verification against build `23825910` (2026-06-20):** every catalog below was re-derived from the live DLL and matched name-for-name — 80 singletons / 22 static helpers / 27 configs / 11 events / 42 `GameplayTags` / all 72 `Constants.EventId*` name→value pairs / 204 `IComponent` implementors / 27 entities / 12 interfaces. The only mod-facing catalog change from `23751132` is the crash-reporting rewrite — `SentryHelper` was removed (replaced by the non-mod-facing `CrashReporter` / `SentryAutoInit`), dropping static helpers 23 → 22. (The build's other changes are internal method-body edits — crash-reporting, voice, and Steam network-backend iteration — none of which alter the documented surface; the framework binds 122/122 and rebuilds clean against `23825910`.) Earlier, the `23751132` networking refactor folded the `INetworkLobbyMember` interface **and** the per-backend lobby-member classes (`Steam`/`Eos`/`Offline NetworkLobbyMember`) into one `NetworkLobbyMember` class (`GetUserId()` → `GetLobbyMemberId()`); the multiplayer recipe + interface catalog reflect that, and the recipe surface (`NetworkLobbyManagerBase`, `NetworkLobbyMember`, `Network.LobbyManager`) was re-verified member-by-member. The native-loader IL (`ModManager::LoadPackage`, including the `SkipRootSceneLoad` gate added in `23696867`) and the mod-integrity gates (`SpeedrunManager` → `EnabledModCount`, `LocalizationManager` → `AllowUserLocalization`) were re-checked against the live method bodies, and every recipe code block re-compiles clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; the catalogs above hold as of `23825910`. (Prior full passes: `23751132` 2026-06-16, `23598402` 2026-06-09 — counts then 78 / 22 / 203 / 13.)
 
 This section is a **reference map**, not a tutorial. The goal: when you're mid-mod and you need to know "is there a manager for X?" or "what events fire when a player dies?", you should be able to find the answer here instead of disassembling `Pratfall.dll` yourself.
 
@@ -1343,7 +1343,7 @@ A *singleton* here is a public class with a static `Instance` field or static-ge
 - `NodeCounter<T>` — debug-only generic node counter
 - `ImGuiGodot.ImGuiController` — Dear ImGui integration (debug builds)
 
-### Static helper classes (23)
+### Static helper classes (22)
 
 C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`). The line between "helper" and "manager" is fuzzy in Pratfall; what these all share is no instance state.
 
@@ -1364,7 +1364,6 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `PerformanceHelper` — perf-counter conveniences
 - `SaveDataManager` — low-level read/write of save blobs (the file-IO half)
 - `SavegameManager` — save lifecycle + events (the orchestration half — see [recipe](#recipe-persist-mod-data))
-- `SentryHelper` — Sentry crash-reporter integration
 - `SettingsManager` — settings load/save (read `GeneralSettings`, `AudioSettings`, `VideoSettings`, `InputSettings`)
 - `SteamLeaderboardHelper` — Steam leaderboard wrappers
 - `TimeFormatHelper` — duration formatting

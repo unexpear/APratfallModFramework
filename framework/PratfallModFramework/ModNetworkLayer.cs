@@ -18,6 +18,7 @@ public sealed class ModNetworkLayer : IDisposable
     // final resolved plan to clients (see BroadcastSessionPlanResolved + the
     // OnNetworkEventReceived dispatcher case below).
     private const ushort SessionPlanResolvedEventId = 62007;
+    private const ushort ChatEventId = 62008;
 
     private Func<ModLocalState>? _snapshotProvider;
     private Godot.Timer? _pollTimer;
@@ -46,6 +47,8 @@ public sealed class ModNetworkLayer : IDisposable
     // Fires whenever lobby membership changes (join or leave) so the hub can refresh its
     // player list. Coarse (no member arg) — consumers re-read GetLobbyMembers().
     public event Action? OnLobbyMembershipChanged;
+    // Fires when a chat line arrives from a lobby peer: (senderDisplayName, text).
+    public event Action<string, string>? OnChatReceived;
     public event Action? OnTransportReset;
 
     public bool IsNetworkReady => _transportMode == TransportMode.Debug || IsRealNetworkReady();
@@ -423,6 +426,28 @@ public sealed class ModNetworkLayer : IDisposable
         return $"Player {m.Index}";
     }
 
+    // Local player's Steam persona name for chat attribution (fallback "Player").
+    public string LocalPlayerName
+    {
+        get
+        {
+            try { var n = Steamworks.SteamClient.Name; if (!string.IsNullOrWhiteSpace(n)) return n; } catch { /* not ready */ }
+            return "Player";
+        }
+    }
+
+    // Broadcast a chat line to the lobby. No-op outside a lobby. SendEvent has no loopback, so
+    // the sender echoes locally (ModManager) rather than receiving its own event back.
+    public void SendChat(string text)
+    {
+        text = (text ?? "").Trim();
+        if (text.Length == 0) return;
+        var localUserId = LocalUserId;
+        if (string.IsNullOrWhiteSpace(localUserId)) return;
+        var payload = ModChatNetworkEvent.Create(localUserId, LocalMemberIndex, LocalPlayerName, text);
+        SendReliableGlobalEvent(ChatEventId, payload, "ModFramework.Chat");
+    }
+
     // Asks Pratfall's lobby manager to leave the current lobby. Used when a peer
     // declines an acquisition prompt for a vote-passed mod they don't have — the
     // session can't continue with state divergence, so the framework opts the player
@@ -501,6 +526,12 @@ public sealed class ModNetworkLayer : IDisposable
                 var resultEvent = eventData.GetEvent<ModVoteResultNetworkEvent>();
                 if (!SenderIsLobbyMember(resultEvent.SenderUserId)) return;
                 OnVoteResultReceived?.Invoke(resultEvent.SenderUserId, resultEvent.ToResult());
+                return;
+
+            case ChatEventId:
+                var chatEvent = eventData.GetEvent<ModChatNetworkEvent>();
+                if (!SenderIsLobbyMember(chatEvent.SenderUserId)) return;
+                OnChatReceived?.Invoke(chatEvent.SenderName, chatEvent.Text);
                 return;
 
             case TransferRequestEventId:

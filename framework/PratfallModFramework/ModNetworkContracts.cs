@@ -156,6 +156,41 @@ public sealed class ModTransferChunk
     }
 }
 
+public sealed class ModChatNetworkEvent : INetworkEvent
+{
+    public string SenderUserId { get; set; } = "";
+    public byte SenderIndex { get; set; }
+    public string SenderName { get; set; } = "";
+    public string Text { get; set; } = "";
+
+    public static ModChatNetworkEvent Create(string senderUserId, byte senderIndex, string senderName, string text)
+    {
+        return new ModChatNetworkEvent
+        {
+            SenderUserId = (senderUserId ?? "").Trim(),
+            SenderIndex = senderIndex,
+            SenderName = string.IsNullOrWhiteSpace(senderName) ? "Player" : senderName.Trim(),
+            Text = (text ?? "").Trim(),
+        };
+    }
+
+    public void Serialize(ByteBufferWriter writer)
+    {
+        writer.Write(SenderUserId);
+        writer.Write(SenderIndex);
+        writer.Write(SenderName);
+        writer.Write(Text);
+    }
+
+    public void Deserialize(ByteBufferReader reader)
+    {
+        SenderUserId = reader.ReadString("");
+        SenderIndex = reader.ReadByte();
+        SenderName = reader.ReadString("Player");
+        Text = reader.ReadString("");
+    }
+}
+
 public sealed class ModManifestSnapshotNetworkEvent : INetworkEvent
 {
     public string SenderUserId { get; set; } = "";

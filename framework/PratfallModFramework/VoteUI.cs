@@ -4,33 +4,35 @@ using Godot;
 namespace PratfallModFramework;
 
 // The framework's multiplayer hub panel (grew out of the old vote UI). One draggable, docked
-// card with three sections: a live lobby Players list, a vote + notice Feed, and a synced text
-// Chat. Non-modal — the host Control is click-through and only the card captures the mouse, so
-// nothing blocks gameplay. UX inspired by community chat/panel mods, rebuilt + integrated so a
-// single panel replaces the awkward vote modal *and* the separate chat/player-panel mods.
+// card with a live lobby Players list and a single unified message Log + chat input. The log
+// mixes three kinds of entries in chronological order:
+//   * regular chat messages   — synced across the lobby (AddChatMessage)
+//   * system notices          — local only (AddNotice): vote results, joins, transfer status
+//   * vote cards              — local only (ShowVote): an inline system message with Yes/No
+//                               buttons; each player sees THEIR own card and answers it.
+// Non-modal — the host Control is click-through and only the card captures the mouse, so
+// gameplay is never blocked. UX inspired by community chat/panel mods, rebuilt + integrated.
 //
-// Pure view. Data comes in via UpdatePlayers / AddChatMessage / ShowVote / AddNotice; outbound
-// chat is raised on OnChatSubmit. ModManager owns all the wiring (lobby, network, votes).
+// Pure view. Data in via UpdatePlayers / AddChatMessage / AddNotice / ShowVote; outbound chat
+// on OnChatSubmit. ModManager owns the wiring (lobby, network, votes).
 public class VoteUI : Control
 {
     private const float PanelWidth = 380f;
-    private const int MaxNotices = 5;
-    private const int MaxChatLines = 60;
+    private const int MaxLogEntries = 80;
 
     private PanelContainer _panel = null!;
     private Label _playersHeader = null!;
     private VBoxContainer _playersList = null!;
-    private VBoxContainer _feed = null!;
-    private ScrollContainer _chatScroll = null!;
-    private VBoxContainer _chatLog = null!;
+    private ScrollContainer _logScroll = null!;
+    private VBoxContainer _log = null!;
     private LineEdit _chatInput = null!;
 
     private Control? _voteEntry;
     private string? _currentVoteModId;
     private System.Action<string, bool>? _onVoteComplete;
 
-    // Raised when the local player submits a chat line. ModManager broadcasts it + echoes it
-    // back via AddChatMessage(localName, text) so naming stays consistent with received lines.
+    // Raised when the local player submits a chat line. ModManager broadcasts it + echoes back
+    // via AddChatMessage(localName, text) so naming stays consistent with received lines.
     public event System.Action<string>? OnChatSubmit;
 
     private bool _dragging;
@@ -75,25 +77,19 @@ public class VoteUI : Control
 
         outer.AddChild(new HSeparator());
 
-        // Feed section (votes + notices + transfer progress).
-        _feed = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _feed.AddThemeConstantOverride("separation", 6);
-        outer.AddChild(_feed);
-
-        outer.AddChild(new HSeparator());
-
-        // Chat section.
-        _chatScroll = new ScrollContainer
+        // Unified message log (chat + notices + vote cards).
+        _logScroll = new ScrollContainer
         {
-            CustomMinimumSize = new Vector2(0, 120),
+            CustomMinimumSize = new Vector2(0, 150),
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
         };
-        outer.AddChild(_chatScroll);
-        _chatLog = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _chatLog.AddThemeConstantOverride("separation", 2);
-        _chatScroll.AddChild(_chatLog);
+        outer.AddChild(_logScroll);
+        _log = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _log.AddThemeConstantOverride("separation", 3);
+        _logScroll.AddChild(_log);
 
+        // Chat input.
         var inputRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         inputRow.AddThemeConstantOverride("separation", 6);
         _chatInput = new LineEdit
@@ -123,7 +119,7 @@ public class VoteUI : Control
         _positioned = true;
     }
 
-    // --- Preserved vote API (drop-in for the old modal) ---
+    // --- Vote (local system message with Yes/No, in the chat flow) ---
 
     public void ShowVote(string modId, string title, string bodyText, int totalPlayers, System.Action<string, bool> onComplete)
     {
@@ -131,9 +127,9 @@ public class VoteUI : Control
         _currentVoteModId = modId;
         _onVoteComplete = onComplete;
         _voteEntry = BuildVoteEntry(title, bodyText);
-        _feed.AddChild(_voteEntry);
-        _feed.MoveChild(_voteEntry, 0); // actionable vote sits at the top of the feed
+        _log.AddChild(_voteEntry);
         ShowPanel();
+        ScrollToBottomDeferred();
     }
 
     public void DismissVote()
@@ -144,16 +140,24 @@ public class VoteUI : Control
         UpdateVisibility();
     }
 
-    // --- Feed notices (vote results, joins, transfer status) ---
+    // --- System notice (local): vote result, join, transfer status ---
 
     public void AddNotice(string text)
     {
-        var lbl = MakeLabel(text, 13, new Color(0.78f, 0.82f, 0.88f));
+        var lbl = MakeLabel("» " + text, 12, new Color(0.62f, 0.72f, 0.60f));
         lbl.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         lbl.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        _feed.AddChild(lbl);
-        TrimNotices();
-        ShowPanel();
+        AppendLogEntry(lbl);
+    }
+
+    // --- Regular chat (synced) ---
+
+    public void AddChatMessage(string sender, string text)
+    {
+        var lbl = MakeLabel($"{sender}: {text}", 13, new Color(0.85f, 0.88f, 0.93f));
+        lbl.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        lbl.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        AppendLogEntry(lbl);
     }
 
     // --- Live player list ---
@@ -172,45 +176,30 @@ public class VoteUI : Control
             row.SizeFlagsHorizontal = SizeFlags.ExpandFill;
             _playersList.AddChild(row);
         }
-        // In a lobby (members present) the hub is a useful persistent surface — show it.
-        // When the roster empties, re-evaluate (hide if nothing else is showing).
         if (players.Count > 0) ShowPanel();
         else UpdateVisibility();
     }
 
-    // --- Chat ---
-
-    public void AddChatMessage(string sender, string text)
-    {
-        var lbl = MakeLabel($"{sender}: {text}", 13, new Color(0.85f, 0.88f, 0.93f));
-        lbl.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        lbl.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        _chatLog.AddChild(lbl);
-        while (_chatLog.GetChildCount() > MaxChatLines) _chatLog.GetChild(0).QueueFree();
-        ShowPanel();
-        Callable.From(ScrollChatToBottom).CallDeferred();
-    }
-
-    private void OnChatEntered(string text)
-    {
-        text = (text ?? "").Trim();
-        _chatInput.Clear();
-        if (text.Length == 0) return;
-        OnChatSubmit?.Invoke(text);
-    }
-
-    private void ScrollChatToBottom()
-    {
-        if (IsInstanceValid(_chatScroll))
-            _chatScroll.ScrollVertical = (int)_chatScroll.GetVScrollBar().MaxValue;
-    }
-
     // --- internals ---
+
+    private void AppendLogEntry(Control entry)
+    {
+        _log.AddChild(entry);
+        // Bound the log, but never trim the active vote card.
+        while (_log.GetChildCount() > MaxLogEntries)
+        {
+            var first = _log.GetChild(0);
+            if (first == _voteEntry) break;
+            first.QueueFree();
+        }
+        ShowPanel();
+        ScrollToBottomDeferred();
+    }
 
     private Control BuildVoteEntry(string title, string body)
     {
         var box = new PanelContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        box.AddThemeStyleboxOverride("panel", CardStyle(new Color(0.10f, 0.13f, 0.18f, 0.96f), 6, border: false, margin: 8));
+        box.AddThemeStyleboxOverride("panel", CardStyle(new Color(0.12f, 0.11f, 0.05f, 0.96f), 6, border: true, margin: 8, borderColor: new Color(0.99f, 0.86f, 0.42f, 0.5f)));
 
         var v = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         v.AddThemeConstantOverride("separation", 6);
@@ -249,8 +238,12 @@ public class VoteUI : Control
         ClearVoteEntry();
         _currentVoteModId = null;
         _onVoteComplete = null;
+        if (id != null)
+        {
+            AddNotice(yes ? "You voted Yes" : "You voted No");
+            cb?.Invoke(id, yes);
+        }
         UpdateVisibility();
-        if (id != null) cb?.Invoke(id, yes);
     }
 
     private void ClearVoteEntry()
@@ -260,13 +253,20 @@ public class VoteUI : Control
         _voteEntry = null;
     }
 
-    private void TrimNotices()
+    private void OnChatEntered(string text)
     {
-        var notices = new List<Node>();
-        foreach (var c in _feed.GetChildren())
-            if (c != _voteEntry && c is Label) notices.Add(c);
-        for (var i = 0; i < notices.Count - MaxNotices; i++)
-            notices[i].QueueFree();
+        text = (text ?? "").Trim();
+        _chatInput.Clear();
+        if (text.Length == 0) return;
+        OnChatSubmit?.Invoke(text);
+    }
+
+    private void ScrollToBottomDeferred() => Callable.From(ScrollToBottom).CallDeferred();
+
+    private void ScrollToBottom()
+    {
+        if (IsInstanceValid(_logScroll))
+            _logScroll.ScrollVertical = (int)_logScroll.GetVScrollBar().MaxValue;
     }
 
     private void ShowPanel()
@@ -275,12 +275,8 @@ public class VoteUI : Control
         _panel.Visible = true;
     }
 
-    // The hub is a persistent surface once it has any content (players/feed/chat), so it stays
-    // visible; only fully-empty resets hide it.
-    private void UpdateVisibility()
-    {
-        _panel.Visible = _feed.GetChildCount() > 0 || _chatLog.GetChildCount() > 0 || _playersList.GetChildCount() > 0;
-    }
+    private void UpdateVisibility() =>
+        _panel.Visible = _log.GetChildCount() > 0 || _playersList.GetChildCount() > 0;
 
     private void OnHeaderInput(InputEvent e)
     {
@@ -307,7 +303,7 @@ public class VoteUI : Control
         return l;
     }
 
-    private static StyleBoxFlat CardStyle(Color bg, int radius, bool border, int margin = 10)
+    private static StyleBoxFlat CardStyle(Color bg, int radius, bool border, int margin = 10, Color? borderColor = null)
     {
         var sb = new StyleBoxFlat
         {
@@ -319,7 +315,7 @@ public class VoteUI : Control
         };
         if (border)
         {
-            sb.BorderColor = new Color(1f, 1f, 1f, 0.10f);
+            sb.BorderColor = borderColor ?? new Color(1f, 1f, 1f, 0.10f);
             sb.BorderWidthLeft = sb.BorderWidthRight = sb.BorderWidthTop = sb.BorderWidthBottom = 1;
         }
         return sb;

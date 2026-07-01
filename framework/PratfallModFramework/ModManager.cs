@@ -151,6 +151,7 @@ public class ModManager : IDisposable
 
         _voteUI = new VoteUI();
         tree.Root.AddChild(_voteUI);
+        _voteUI.OnChatSubmit += OnLocalChatSubmit;
 
         // P4.2: route the consent coordinator's UI requests to the dedicated Godot prompt.
         // PromptOverride is left null in production — tests set it directly via
@@ -194,6 +195,7 @@ public class ModManager : IDisposable
         WorkshopHook.OnWorkshopItemInstalled += OnWorkshopItemInstalled;
         _networkLayer.OnMemberLeftLobby += OnLobbyMemberLeft;
         _networkLayer.OnLobbyMembershipChanged += RefreshHubPlayers;
+        _networkLayer.OnChatReceived += OnHubChatReceived;
         _networkLayer.OnTransportReset += OnTransportReset;
         _voteSession.OnVoteResolved += OnVoteResolved;
 
@@ -1878,6 +1880,19 @@ public class ModManager : IDisposable
         var list = new List<(string, bool, bool)>(members.Count);
         foreach (var m in members) list.Add((m.Name, m.IsHost, m.IsLocal));
         _voteUI.UpdatePlayers(list);
+    }
+
+    // Local player typed a chat line: broadcast to peers and echo it locally (SendEvent has no
+    // loopback, so we won't receive our own copy).
+    private void OnLocalChatSubmit(string text)
+    {
+        _networkLayer.SendChat(text);
+        _voteUI?.AddChatMessage(_networkLayer.LocalPlayerName, text);
+    }
+
+    private void OnHubChatReceived(string senderName, string text)
+    {
+        _voteUI?.AddChatMessage(senderName, text);
     }
 
     private void OnVoteResolved(string voteId, bool passed)

@@ -2,232 +2,224 @@ using Godot;
 
 namespace PratfallModFramework;
 
+// Non-modal activity panel — the replacement for the old fullscreen modal vote dialog.
+//
+// A small draggable card docks in the top-right corner. A vote shows as an inline entry with
+// Yes/No buttons; framework notices (vote results, joins, transfer status) post as passive
+// lines beneath it. Gameplay is never blocked: the host Control is click-through, and only the
+// card itself captures the mouse. UX inspired by community chat/panel mods (draggable, docked,
+// feed-style, queued) but rebuilt from scratch.
+//
+// The public surface (ShowVote / DismissVote) is unchanged so ModManager's vote queue keeps
+// driving it exactly as before — only the presentation swaps modal -> feed.
 public class VoteUI : Control
 {
-    private VBoxContainer _container = null!;
-    private Label _titleLabel = null!;
-    private Label _modInfoLabel = null!;
-    private HBoxContainer _buttonRow = null!;
-    private Button _yesBtn = null!;
-    private Button _noBtn = null!;
-    private Godot.Timer _nativeDialogRetryTimer = null!;
+    private const float PanelWidth = 360f;
+    private const int MaxNotices = 6;
+
+    private PanelContainer _panel = null!;
+    private VBoxContainer _feed = null!;
+
+    private Control? _voteEntry;
     private string? _currentVoteModId;
     private System.Action<string, bool>? _onVoteComplete;
-    private bool _usingNativeDialog;
-    private string _pendingTitle = "";
-    private string _pendingBody = "";
-    private int _nativeDialogRetriesRemaining;
+
+    private bool _dragging;
+    private Vector2 _dragStartMouse;
+    private Vector2 _dragStartPos;
+    private bool _positioned;
 
     public VoteUI()
     {
+        Name = "ModFrameworkActivityPanel";
         AnchorRight = 1;
         AnchorBottom = 1;
-        MouseFilter = MouseFilterEnum.Pass;
-        GuiInput += OnGuiInput;
+        MouseFilter = MouseFilterEnum.Ignore; // pass-through: the host never blocks gameplay
 
-        _container = new VBoxContainer
+        _panel = new PanelContainer
         {
-            AnchorLeft = 0.3f,
-            AnchorRight = 0.7f,
-            AnchorTop = 0.35f,
-            AnchorBottom = 0.65f,
-            OffsetLeft = 0,
-            OffsetRight = 0,
-            OffsetTop = 0,
-            OffsetBottom = 0,
-            MouseFilter = MouseFilterEnum.Ignore
+            CustomMinimumSize = new Vector2(PanelWidth, 0),
+            MouseFilter = MouseFilterEnum.Stop, // only the card captures the mouse
         };
-        AddChild(_container);
-
-        var bg = new ColorRect
+        var sb = new StyleBoxFlat
         {
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
-            Color = new Color(0, 0, 0, 0.85f),
-            MouseFilter = MouseFilterEnum.Ignore
+            BgColor = new Color(0.05f, 0.06f, 0.08f, 0.93f),
+            BorderColor = new Color(1f, 1f, 1f, 0.10f),
+            CornerRadiusTopLeft = 10, CornerRadiusTopRight = 10,
+            CornerRadiusBottomLeft = 10, CornerRadiusBottomRight = 10,
+            BorderWidthLeft = 1, BorderWidthRight = 1, BorderWidthTop = 1, BorderWidthBottom = 1,
+            ContentMarginLeft = 10, ContentMarginRight = 10, ContentMarginTop = 10, ContentMarginBottom = 10,
         };
-        _container.AddChild(bg);
+        _panel.AddThemeStyleboxOverride("panel", sb);
+        AddChild(_panel);
 
-        _titleLabel = new Label
+        var outer = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        outer.AddThemeConstantOverride("separation", 8);
+        _panel.AddChild(outer);
+
+        // Draggable header.
+        var header = new HBoxContainer { CustomMinimumSize = new Vector2(0, 22), MouseFilter = MouseFilterEnum.Stop };
+        header.GuiInput += OnHeaderInput;
+        var title = new Label
         {
-            Text = "MOD VOTE",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            ThemeTypeVariation = "Title",
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
-            MouseFilter = MouseFilterEnum.Ignore
+            Text = "Mods",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            VerticalAlignment = VerticalAlignment.Center,
         };
-        _container.AddChild(_titleLabel);
+        title.AddThemeColorOverride("font_color", new Color(0.85f, 0.88f, 0.95f));
+        title.AddThemeFontSizeOverride("font_size", 15);
+        header.AddChild(title);
+        outer.AddChild(header);
 
-        _modInfoLabel = new Label
-        {
-            Text = "",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
-            MouseFilter = MouseFilterEnum.Ignore
-        };
-        _container.AddChild(_modInfoLabel);
+        _feed = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _feed.AddThemeConstantOverride("separation", 6);
+        outer.AddChild(_feed);
 
-        _buttonRow = new HBoxContainer
-        {
-            Alignment = BoxContainer.AlignmentMode.Center,
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
-            MouseFilter = MouseFilterEnum.Ignore
-        };
-        _container.AddChild(_buttonRow);
-
-        _yesBtn = new Button
-        {
-            Text = "  YES  ",
-            FocusMode = FocusModeEnum.All
-        };
-        _yesBtn.Pressed += () => SubmitVote(true);
-        _buttonRow.AddChild(_yesBtn);
-
-        _noBtn = new Button
-        {
-            Text = "  NO  ",
-            FocusMode = FocusModeEnum.All
-        };
-        _noBtn.Pressed += () => SubmitVote(false);
-        _buttonRow.AddChild(_noBtn);
-        _yesBtn.FocusNext = _yesBtn.GetPathTo(_noBtn);
-        _yesBtn.SetFocusNeighbor(Side.Right, _yesBtn.GetPathTo(_noBtn));
-        _noBtn.FocusPrevious = _noBtn.GetPathTo(_yesBtn);
-        _noBtn.SetFocusNeighbor(Side.Left, _noBtn.GetPathTo(_yesBtn));
-
-        _nativeDialogRetryTimer = new Godot.Timer
-        {
-            OneShot = true,
-            WaitTime = 0.25,
-            ProcessMode = Node.ProcessModeEnum.Always
-        };
-        _nativeDialogRetryTimer.Timeout += OnNativeDialogRetryTimeout;
-        AddChild(_nativeDialogRetryTimer);
-
-        Hide();
+        _panel.Visible = false;
     }
 
-    public void ShowVote(string modId, string title, string bodyText, int totalPlayers,
-        System.Action<string, bool> onComplete)
+    public override void _Ready() => DockTopRight();
+
+    private void DockTopRight()
     {
+        if (_positioned) return;
+        var vp = GetViewportRect().Size;
+        _panel.Position = new Vector2(Mathf.Max(vp.X - PanelWidth - 18f, 0f), 18f);
+        _positioned = true;
+    }
+
+    // --- Preserved API (drop-in for the old modal) ---
+
+    public void ShowVote(string modId, string title, string bodyText, int totalPlayers, System.Action<string, bool> onComplete)
+    {
+        ClearVoteEntry();
         _currentVoteModId = modId;
         _onVoteComplete = onComplete;
-        _usingNativeDialog = false;
-        _pendingTitle = title;
-        _pendingBody = bodyText;
-
-        if (TryShowNativeDialog())
-            return;
-
-        _nativeDialogRetriesRemaining = 40;
-        _nativeDialogRetryTimer.Start();
+        _voteEntry = BuildVoteEntry(title, bodyText);
+        _feed.AddChild(_voteEntry);
+        _feed.MoveChild(_voteEntry, 0); // keep the actionable vote at the top of the feed
+        ShowPanel();
     }
 
     public void DismissVote()
     {
-        if (_currentVoteModId == null && !Visible)
-            return;
-
-        if (_usingNativeDialog)
-        {
-            _usingNativeDialog = false;
-            NativeDialogBridge.DismissActive();
-        }
-
-        _nativeDialogRetryTimer.Stop();
-
-        Reset();
-    }
-
-    private void SubmitVote(bool voteYes)
-    {
-        if (_currentVoteModId == null) return;
-        var id = _currentVoteModId;
-        _onVoteComplete?.Invoke(id, voteYes);
-        Reset();
-    }
-
-    private void Reset()
-    {
+        ClearVoteEntry();
         _currentVoteModId = null;
         _onVoteComplete = null;
-        _usingNativeDialog = false;
-        _pendingTitle = "";
-        _pendingBody = "";
-        _nativeDialogRetriesRemaining = 0;
-        _nativeDialogRetryTimer.Stop();
-        _titleLabel.Text = "MOD VOTE";
-        _modInfoLabel.Text = "";
-        Hide();
-        MouseFilter = MouseFilterEnum.Pass;
+        UpdateVisibility();
     }
 
-    private void OnGuiInput(InputEvent @event)
-    {
-        if (!Visible || _currentVoteModId == null)
-            return;
+    // --- New: passive feed line (vote results / joins / transfer status) ---
 
-        if (@event is InputEventAction actionEvent && actionEvent.Pressed && actionEvent.Action == "ui_cancel")
+    public void AddNotice(string text)
+    {
+        var lbl = new Label
         {
-            SubmitVote(false);
-            AcceptEvent();
-        }
+            Text = text,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+        lbl.AddThemeColorOverride("font_color", new Color(0.78f, 0.82f, 0.88f));
+        lbl.AddThemeFontSizeOverride("font_size", 13);
+        _feed.AddChild(lbl);
+        TrimNotices();
+        ShowPanel();
     }
 
-    private void OnNativeDialogCompleted(bool voteYes)
-    {
-        if (_currentVoteModId == null)
-            return;
+    // --- internals ---
 
-        _usingNativeDialog = false;
+    private Control BuildVoteEntry(string title, string body)
+    {
+        var box = new PanelContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var sb = new StyleBoxFlat
+        {
+            BgColor = new Color(0.10f, 0.13f, 0.18f, 0.96f),
+            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6, CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6,
+            ContentMarginLeft = 9, ContentMarginRight = 9, ContentMarginTop = 8, ContentMarginBottom = 8,
+        };
+        box.AddThemeStyleboxOverride("panel", sb);
+
+        var v = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        v.AddThemeConstantOverride("separation", 6);
+        box.AddChild(v);
+
+        var t = new Label { Text = title, AutowrapMode = TextServer.AutowrapMode.WordSmart, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        t.AddThemeColorOverride("font_color", new Color(0.99f, 0.86f, 0.42f));
+        t.AddThemeFontSizeOverride("font_size", 14);
+        v.AddChild(t);
+
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            var b = new Label { Text = body, AutowrapMode = TextServer.AutowrapMode.WordSmart, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            b.AddThemeColorOverride("font_color", new Color(0.80f, 0.84f, 0.90f));
+            b.AddThemeFontSizeOverride("font_size", 12);
+            v.AddChild(b);
+        }
+
+        var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.End, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        row.AddThemeConstantOverride("separation", 8);
+        var yes = new Button { Text = "Yes", CustomMinimumSize = new Vector2(74, 30), FocusMode = FocusModeEnum.All };
+        yes.Pressed += () => SubmitVote(true);
+        var no = new Button { Text = "No", CustomMinimumSize = new Vector2(74, 30), FocusMode = FocusModeEnum.All };
+        no.Pressed += () => SubmitVote(false);
+        row.AddChild(yes);
+        row.AddChild(no);
+        v.AddChild(row);
+        yes.CallDeferred("grab_focus");
+        return box;
+    }
+
+    private void SubmitVote(bool yes)
+    {
         var id = _currentVoteModId;
-        _onVoteComplete?.Invoke(id, voteYes);
-        Reset();
+        var cb = _onVoteComplete;
+        ClearVoteEntry();
+        _currentVoteModId = null;
+        _onVoteComplete = null;
+        UpdateVisibility();
+        if (id != null) cb?.Invoke(id, yes);
     }
 
-    private bool TryShowNativeDialog()
+    private void ClearVoteEntry()
     {
-        if (!NativeDialogBridge.TryShow(
-                GetTree(),
-                _pendingTitle,
-                _pendingBody,
-                "YES",
-                "NO",
-                hideCancelButton: false,
-                onComplete: OnNativeDialogCompleted))
-        {
-            return false;
-        }
-
-        _usingNativeDialog = true;
-        MouseFilter = MouseFilterEnum.Pass;
-        _nativeDialogRetryTimer.Stop();
-        return true;
+        if (_voteEntry != null && IsInstanceValid(_voteEntry))
+            _voteEntry.QueueFree();
+        _voteEntry = null;
     }
 
-    private void OnNativeDialogRetryTimeout()
+    // Keep the passive feed short so it never grows unbounded. The active vote entry (a
+    // PanelContainer) is excluded — only plain Label notices are trimmed.
+    private void TrimNotices()
     {
-        if (_currentVoteModId == null)
-            return;
+        var notices = new System.Collections.Generic.List<Node>();
+        foreach (var c in _feed.GetChildren())
+            if (c != _voteEntry && c is Label) notices.Add(c);
+        for (var i = 0; i < notices.Count - MaxNotices; i++)
+            notices[i].QueueFree();
+    }
 
-        if (TryShowNativeDialog())
-            return;
+    private void ShowPanel()
+    {
+        DockTopRight();
+        _panel.Visible = true;
+    }
 
-        _nativeDialogRetriesRemaining--;
-        if (_nativeDialogRetriesRemaining > 0)
+    private void UpdateVisibility() => _panel.Visible = _feed.GetChildCount() > 0;
+
+    private void OnHeaderInput(InputEvent e)
+    {
+        if (e is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
         {
-            _nativeDialogRetryTimer.Start();
-            return;
+            if (mb.Pressed) { _dragging = true; _dragStartMouse = GetGlobalMousePosition(); _dragStartPos = _panel.Position; }
+            else _dragging = false;
         }
-
-        _titleLabel.Text = _pendingTitle;
-        _modInfoLabel.Text = _pendingBody;
-        Show();
-        MouseFilter = MouseFilterEnum.Stop;
-        _yesBtn.CallDeferred("grab_focus");
+        else if (e is InputEventMouseMotion && _dragging)
+        {
+            var vp = GetViewportRect().Size;
+            var np = _dragStartPos + (GetGlobalMousePosition() - _dragStartMouse);
+            np.X = Mathf.Clamp(np.X, 0f, Mathf.Max(vp.X - PanelWidth, 0f));
+            np.Y = Mathf.Clamp(np.Y, 0f, Mathf.Max(vp.Y - 60f, 0f));
+            _panel.Position = np;
+        }
     }
 }

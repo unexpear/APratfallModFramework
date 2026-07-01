@@ -43,6 +43,9 @@ public sealed class ModNetworkLayer : IDisposable
     // _latestSessionPlan and run SessionApplyPlanner locally.
     public event Action<string /*senderUserId*/, SessionResolutionPlan>? OnSessionPlanResolvedReceived;
     public event Action<string>? OnMemberLeftLobby;
+    // Fires whenever lobby membership changes (join or leave) so the hub can refresh its
+    // player list. Coarse (no member arg) — consumers re-read GetLobbyMembers().
+    public event Action? OnLobbyMembershipChanged;
     public event Action? OnTransportReset;
 
     public bool IsNetworkReady => _transportMode == TransportMode.Debug || IsRealNetworkReady();
@@ -362,6 +365,7 @@ public sealed class ModNetworkLayer : IDisposable
             return;
 
         BroadcastManifest();
+        OnLobbyMembershipChanged?.Invoke();
     }
 
     private void OnMemberLeft(NetworkLobbyMember member)
@@ -371,6 +375,52 @@ public sealed class ModNetworkLayer : IDisposable
 
         GD.Print($"[ModFramework] Lobby member left: {member.GetLobbyMemberId()}");
         OnMemberLeftLobby?.Invoke(member.GetLobbyMemberId());
+        OnLobbyMembershipChanged?.Invoke();
+    }
+
+    public readonly struct LobbyMemberInfo
+    {
+        public LobbyMemberInfo(string name, bool isHost, bool isLocal) { Name = name; IsHost = isHost; IsLocal = isLocal; }
+        public string Name { get; }
+        public bool IsHost { get; }
+        public bool IsLocal { get; }
+    }
+
+    // Snapshot of current lobby members with display names resolved (Steam persona, else
+    // "Player N"). Empty when not in a lobby / in debug transport — feeds the hub player list.
+    public IReadOnlyList<LobbyMemberInfo> GetLobbyMembers()
+    {
+        var lobby = TryGetLobbyManager();
+        var members = lobby?.LobbyMembers;
+        if (members == null || members.Count == 0)
+            return Array.Empty<LobbyMemberInfo>();
+        var ownerId = lobby?.LobbyOwner?.GetLobbyMemberId();
+        var result = new List<LobbyMemberInfo>(members.Count);
+        foreach (var m in members)
+        {
+            if (m == null) continue;
+            var isHost = ownerId != null && string.Equals(m.GetLobbyMemberId(), ownerId, StringComparison.Ordinal);
+            result.Add(new LobbyMemberInfo(ResolveMemberName(m), isHost, m.IsLocal));
+        }
+        return result;
+    }
+
+    // NetworkLobbyMember carries only ids, not a display name — resolve the Steam persona from
+    // the member's SteamUserId (framework already references Facepunch.Steamworks). EOS/offline
+    // members (no Steam id) fall back to a stable "Player N" label.
+    private static string ResolveMemberName(NetworkLobbyMember m)
+    {
+        try
+        {
+            var sid = m.SteamUserId;
+            if (sid.Value != 0)
+            {
+                var name = new Steamworks.Friend(sid).Name;
+                if (!string.IsNullOrWhiteSpace(name)) return name;
+            }
+        }
+        catch { /* Steam not ready, or not a Steam-backed member — fall through */ }
+        return $"Player {m.Index}";
     }
 
     // Asks Pratfall's lobby manager to leave the current lobby. Used when a peer

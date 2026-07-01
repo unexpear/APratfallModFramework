@@ -193,6 +193,7 @@ public class ModManager : IDisposable
         _networkLayer.OnSessionPlanResolvedReceived += OnSessionPlanResolvedReceived;
         WorkshopHook.OnWorkshopItemInstalled += OnWorkshopItemInstalled;
         _networkLayer.OnMemberLeftLobby += OnLobbyMemberLeft;
+        _networkLayer.OnLobbyMembershipChanged += RefreshHubPlayers;
         _networkLayer.OnTransportReset += OnTransportReset;
         _voteSession.OnVoteResolved += OnVoteResolved;
 
@@ -1866,6 +1867,17 @@ public class ModManager : IDisposable
             if (pending == null) return;
             _networkLayer.SendTransferChunk(pending.Value.TargetUserId, pending.Value.Chunk);
         }
+    }
+
+    // Push the current lobby roster into the hub's player list. Cheap; fired on membership
+    // change (join/leave) via OnLobbyMembershipChanged.
+    private void RefreshHubPlayers()
+    {
+        if (_voteUI == null) return;
+        var members = _networkLayer.GetLobbyMembers();
+        var list = new List<(string, bool, bool)>(members.Count);
+        foreach (var m in members) list.Add((m.Name, m.IsHost, m.IsLocal));
+        _voteUI.UpdatePlayers(list);
     }
 
     private void OnVoteResolved(string voteId, bool passed)

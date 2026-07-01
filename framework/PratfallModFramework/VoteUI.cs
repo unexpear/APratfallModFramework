@@ -172,6 +172,10 @@ public class VoteUI : Control
             row.SizeFlagsHorizontal = SizeFlags.ExpandFill;
             _playersList.AddChild(row);
         }
+        // In a lobby (members present) the hub is a useful persistent surface — show it.
+        // When the roster empties, re-evaluate (hide if nothing else is showing).
+        if (players.Count > 0) ShowPanel();
+        else UpdateVisibility();
     }
 
     // --- Chat ---

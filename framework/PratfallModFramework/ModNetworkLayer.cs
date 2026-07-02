@@ -383,10 +383,11 @@ public sealed class ModNetworkLayer : IDisposable
 
     public readonly struct LobbyMemberInfo
     {
-        public LobbyMemberInfo(string name, bool isHost, bool isLocal) { Name = name; IsHost = isHost; IsLocal = isLocal; }
+        public LobbyMemberInfo(string name, bool isHost, bool isLocal, int ping) { Name = name; IsHost = isHost; IsLocal = isLocal; Ping = ping; }
         public string Name { get; }
         public bool IsHost { get; }
         public bool IsLocal { get; }
+        public int Ping { get; }  // round-trip ms, or -1 if unknown
     }
 
     // Snapshot of current lobby members with display names resolved (Steam persona, else
@@ -403,7 +404,9 @@ public sealed class ModNetworkLayer : IDisposable
         {
             if (m == null) continue;
             var isHost = ownerId != null && string.Equals(m.GetLobbyMemberId(), ownerId, StringComparison.Ordinal);
-            result.Add(new LobbyMemberInfo(ResolveMemberName(m), isHost, m.IsLocal));
+            int ping = -1;
+            try { ping = (int)m.Ping; } catch { /* ping unavailable for this backend/member */ }
+            result.Add(new LobbyMemberInfo(ResolveMemberName(m), isHost, m.IsLocal, ping));
         }
         return result;
     }

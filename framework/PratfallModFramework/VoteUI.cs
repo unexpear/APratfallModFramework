@@ -17,15 +17,18 @@ namespace PratfallModFramework;
 // on OnChatSubmit. ModManager owns the wiring (lobby, network, votes).
 public class VoteUI : Control
 {
-    private const float PanelWidth = 380f;
+    private const float PanelWidth = 520f;
     private const int MaxLogEntries = 80;
+    private const float FontScale = 1.5f; // hub text read too small on the large panel
 
+    private CanvasLayer _layer = null!;
     private PanelContainer _panel = null!;
     private Label _playersHeader = null!;
     private VBoxContainer _playersList = null!;
     private ScrollContainer _logScroll = null!;
     private VBoxContainer _log = null!;
     private LineEdit _chatInput = null!;
+    private VBoxContainer _toasts = null!; // transient on-screen popups for incoming chat
 
     private Control? _voteEntry;
     private string? _currentVoteModId;
@@ -38,7 +41,16 @@ public class VoteUI : Control
     private bool _dragging;
     private Vector2 _dragStartMouse;
     private Vector2 _dragStartPos;
-    private bool _positioned;
+    private bool _userMoved; // once the player drags the panel, stop auto-docking it top-right
+
+    private Label _resizeGrip = null!;
+    private bool _userSized; // once the player resizes, use their size instead of the viewport default
+    private float _userWidth;
+    private float _userLogHeight;
+    private bool _resizing;
+    private Vector2 _resizeStartMouse;
+    private float _resizeStartWidth;
+    private float _resizeStartLogH;
 
     public VoteUI()
     {
@@ -52,8 +64,17 @@ public class VoteUI : Control
             CustomMinimumSize = new Vector2(PanelWidth, 0),
             MouseFilter = MouseFilterEnum.Stop,
         };
-        _panel.AddThemeStyleboxOverride("panel", CardStyle(new Color(0.05f, 0.06f, 0.08f, 0.94f), 10, border: true));
-        AddChild(_panel);
+        _panel.AddThemeStyleboxOverride("panel", CardStyle(new Color(0.05f, 0.06f, 0.08f, 0.60f), 10, border: true));
+        // _panel is parented later (EnsureLayer) onto a CanvasLayer added DIRECTLY under the
+        // window root — matching the framework's proven dialog hosting (MainMenuIntegration
+        // dialogs live on CanvasLayer 128/130 under _tree.Root). Parenting it under this Control
+        // rendered it too early (during GcManager._Ready, before the menu scene loads), so
+        // nothing showed.
+
+        // Transient chat toasts live on the same CanvasLayer but independent of _panel, so new
+        // messages flash on-screen even when the hub is closed. Click-through.
+        _toasts = new VBoxContainer { MouseFilter = MouseFilterEnum.Ignore };
+        _toasts.AddThemeConstantOverride("separation", 6);
 
         var outer = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         outer.AddThemeConstantOverride("separation", 8);
@@ -66,6 +87,10 @@ public class VoteUI : Control
         title.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         title.VerticalAlignment = VerticalAlignment.Center;
         header.AddChild(title);
+        var closeBtn = new Button { Text = "✕", Flat = true, CustomMinimumSize = new Vector2(30, 22), FocusMode = FocusModeEnum.None };
+        closeBtn.AddThemeColorOverride("font_color", new Color(0.82f, 0.84f, 0.90f));
+        closeBtn.Pressed += CloseChat;
+        header.AddChild(closeBtn);
         outer.AddChild(header);
 
         // Players section.
@@ -80,7 +105,7 @@ public class VoteUI : Control
         // Unified message log (chat + notices + vote cards).
         _logScroll = new ScrollContainer
         {
-            CustomMinimumSize = new Vector2(0, 150),
+            CustomMinimumSize = new Vector2(0, 300),
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
         };
@@ -105,18 +130,124 @@ public class VoteUI : Control
         inputRow.AddChild(send);
         outer.AddChild(inputRow);
 
+        // Resize grip (bottom-left corner): drag to scale the panel. Bottom-left because the panel
+        // is docked to the right edge, so it grows leftward/downward with room to spare.
+        var gripRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _resizeGrip = new Label
+        {
+            Text = "⤡",
+            MouseFilter = MouseFilterEnum.Stop,
+            MouseDefaultCursorShape = CursorShape.Bdiagsize,
+        };
+        _resizeGrip.AddThemeColorOverride("font_color", new Color(0.55f, 0.60f, 0.68f));
+        _resizeGrip.AddThemeFontSizeOverride("font_size", 22);
+        _resizeGrip.GuiInput += OnGripInput;
+        gripRow.AddChild(_resizeGrip);
+        outer.AddChild(gripRow);
+
         UpdatePlayers(System.Array.Empty<(string, bool, bool)>());
         _panel.Visible = false;
     }
 
-    public override void _Ready() => DockTopRight();
+    public override void _Ready()
+    {
+        EnsureLayer();
+        DockTopRight();
+    }
+
+    public override void _ExitTree()
+    {
+        if (_layer != null && IsInstanceValid(_layer)) _layer.QueueFree();
+    }
+
+    // Parent _panel onto a CanvasLayer added DIRECTLY under the window root, matching the
+    // framework's proven dialog hosting so it renders above the game's own CanvasLayer UI.
+    // Lazy + idempotent: safe to call from _Ready and from every show path regardless of timing.
+    private void EnsureLayer()
+    {
+        if (_layer == null || !IsInstanceValid(_layer))
+        {
+            _layer = new CanvasLayer { Name = "ModFrameworkHubLayer", Layer = 128 };
+            (GetTree()?.Root ?? (Node)GetViewport()).AddChild(_layer);
+        }
+        if (_panel.GetParent() != _layer)
+        {
+            _panel.GetParent()?.RemoveChild(_panel);
+            _layer.AddChild(_panel);
+        }
+        if (_toasts.GetParent() != _layer)
+        {
+            _toasts.GetParent()?.RemoveChild(_toasts);
+            _layer.AddChild(_toasts);
+        }
+    }
+
+    // Opens the hub and focuses chat. Public so the menu's "Click Me" button (and the "\" hotkey
+    // poll in ModManager) can open it directly. Keyboard is driven by polling Input.IsKeyPressed
+    // rather than _Input, which wasn't firing reliably on this node.
+    public void OpenChat()
+    {
+        EnsureLayer();
+        DockTopRight();
+        _panel.Visible = true;
+        ScrollToBottomDeferred(); // note: no auto-focus — focusing the LineEdit pops the OS touch keyboard
+    }
+
+    private void CloseChat()
+    {
+        _chatInput.ReleaseFocus();
+        _panel.Visible = false;
+    }
+
+    // Entry points for the ModManager hotkey poll.
+    public bool ChatInputHasFocus() => IsInstanceValid(_chatInput) && _chatInput.HasFocus();
+    public void Toggle()
+    {
+        if (IsInstanceValid(_panel) && _panel.Visible) CloseChat();
+        else OpenChat();
+    }
+
+    // Flash an incoming chat line on-screen for a few seconds (independent of the panel), so
+    // messages are visible even when the hub is closed. Fades out and self-removes.
+    public void ShowToast(string sender, string text)
+    {
+        EnsureLayer();
+        var vp = GetViewportRect().Size;
+        _toasts.Position = new Vector2(24f, vp.Y * 0.55f);
+
+        var box = new PanelContainer { MouseFilter = MouseFilterEnum.Ignore };
+        box.AddThemeStyleboxOverride("panel", CardStyle(new Color(0.05f, 0.06f, 0.08f, 0.82f), 8, border: true, margin: 8));
+        var lbl = MakeLabel($"{sender}: {text}", 16, new Color(0.90f, 0.93f, 0.98f));
+        lbl.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        lbl.CustomMinimumSize = new Vector2(460f, 0);
+        box.AddChild(lbl);
+        _toasts.AddChild(box);
+
+        while (_toasts.GetChildCount() > 5)
+            _toasts.GetChild(0).QueueFree();
+
+        var tween = CreateTween();
+        tween.TweenInterval(4.0);
+        tween.TweenProperty(box, "modulate:a", 0.0f, 1.0);
+        tween.TweenCallback(Callable.From(() => { if (IsInstanceValid(box)) box.QueueFree(); }));
+    }
 
     private void DockTopRight()
     {
-        if (_positioned) return;
-        var vp = GetViewportRect().Size;
-        _panel.Position = new Vector2(Mathf.Max(vp.X - PanelWidth - 18f, 0f), 18f);
-        _positioned = true;
+        // Deferred so layout settles. Also (re)size the panel relative to the viewport so it's
+        // comfortably large on any resolution, then pin it to the top-right by its own width.
+        Callable.From(() =>
+        {
+            if (!IsInstanceValid(_panel)) return;
+            var vp = GetViewportRect().Size;
+            float w = _userSized ? _userWidth : Mathf.Clamp(vp.X * 0.34f, 520f, 900f);
+            float logH = _userSized ? _userLogHeight : Mathf.Clamp(vp.Y * 0.45f, 300f, 680f);
+            _panel.CustomMinimumSize = new Vector2(w, 0);
+            _logScroll.CustomMinimumSize = new Vector2(0, logH);
+            if (_userMoved) return;
+            // y=60 clears the menu's "Click Me" button (top-right) so the header + ✕ stay clickable.
+            _panel.Position = new Vector2(Mathf.Max(vp.X - w - 22f, 0f), 60f);
+        }).CallDeferred();
     }
 
     // --- Vote (local system message with Yes/No, in the chat flow) ---
@@ -257,6 +388,7 @@ public class VoteUI : Control
     {
         text = (text ?? "").Trim();
         _chatInput.Clear();
+        _chatInput.ReleaseFocus(); // hand keyboard back to the game after sending
         if (text.Length == 0) return;
         OnChatSubmit?.Invoke(text);
     }
@@ -271,6 +403,7 @@ public class VoteUI : Control
 
     private void ShowPanel()
     {
+        EnsureLayer();
         DockTopRight();
         _panel.Visible = true;
     }
@@ -287,19 +420,53 @@ public class VoteUI : Control
         }
         else if (e is InputEventMouseMotion && _dragging)
         {
+            _userMoved = true;
             var vp = GetViewportRect().Size;
             var np = _dragStartPos + (GetGlobalMousePosition() - _dragStartMouse);
-            np.X = Mathf.Clamp(np.X, 0f, Mathf.Max(vp.X - PanelWidth, 0f));
+            np.X = Mathf.Clamp(np.X, 0f, Mathf.Max(vp.X - _panel.Size.X, 0f));
             np.Y = Mathf.Clamp(np.Y, 0f, Mathf.Max(vp.Y - 60f, 0f));
             _panel.Position = np;
         }
+    }
+
+    private void OnGripInput(InputEvent e)
+    {
+        if (e is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
+        {
+            if (mb.Pressed)
+            {
+                _resizing = true;
+                _resizeStartMouse = GetGlobalMousePosition();
+                _resizeStartWidth = _panel.Size.X;
+                _resizeStartLogH = _logScroll.Size.Y;
+                _userSized = true;
+            }
+            else _resizing = false;
+        }
+        else if (e is InputEventMouseMotion && _resizing)
+        {
+            var vp = GetViewportRect().Size;
+            var d = GetGlobalMousePosition() - _resizeStartMouse;
+            // Grip is bottom-left: drag left => wider, drag down => taller.
+            _userWidth = Mathf.Clamp(_resizeStartWidth - d.X, 320f, vp.X - 40f);
+            _userLogHeight = Mathf.Clamp(_resizeStartLogH + d.Y, 120f, vp.Y - 180f);
+            ApplySize(vp);
+        }
+    }
+
+    private void ApplySize(Vector2 vp)
+    {
+        _panel.CustomMinimumSize = new Vector2(_userWidth, 0);
+        _logScroll.CustomMinimumSize = new Vector2(0, _userLogHeight);
+        if (!_userMoved)
+            _panel.Position = new Vector2(Mathf.Max(vp.X - _userWidth - 22f, 0f), 60f);
     }
 
     private static Label MakeLabel(string text, int fontSize, Color color)
     {
         var l = new Label { Text = text, MouseFilter = MouseFilterEnum.Ignore };
         l.AddThemeColorOverride("font_color", color);
-        l.AddThemeFontSizeOverride("font_size", fontSize);
+        l.AddThemeFontSizeOverride("font_size", Mathf.RoundToInt(fontSize * FontScale));
         return l;
     }
 

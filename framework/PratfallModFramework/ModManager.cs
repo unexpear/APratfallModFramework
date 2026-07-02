@@ -218,7 +218,7 @@ public class ModManager : IDisposable
         // (e.g. when the player returns from a game). TryInject is a no-op once the button
         // exists, so the steady-state cost is one cheap tree walk every 0.5s.
         var pollTimer = new Godot.Timer { WaitTime = 0.5, OneShot = false };
-        pollTimer.Timeout += () => MainMenuIntegration.TryInject();
+        pollTimer.Timeout += () => { MainMenuIntegration.TryInject(); HookPauseMenuButton(); };
         tree.Root.AddChild(pollTimer);
         pollTimer.Start();
 
@@ -1858,8 +1858,17 @@ public class ModManager : IDisposable
         }
     }
 
+    private bool _hubHotkeyDown;
     private void PumpOutgoingTransfers()
     {
+        // Hub open/close hotkey ("\" or F8), polled here at 30Hz. We poll Input.IsKeyPressed
+        // rather than handling _Input on the panel node, which wasn't firing reliably. Edge-
+        // detected; skipped while the chat box has focus so "\" types normally when typing.
+        var hk = Godot.Input.IsKeyPressed(Key.Backslash) || Godot.Input.IsKeyPressed(Key.F8);
+        if (hk && !_hubHotkeyDown && _voteUI != null && !_voteUI.ChatInputHasFocus())
+            _voteUI.Toggle();
+        _hubHotkeyDown = hk;
+
         // Process up to a handful of chunks per tick to keep big mods moving without
         // blowing the per-frame send budget. 4 chunks * 32 KB raw = 128 KB/tick max at 30Hz
         // = ~3.7 MB/s ceiling, comfortable for a typical Pratfall mod DLL.
@@ -1882,6 +1891,7 @@ public class ModManager : IDisposable
         _voteUI.UpdatePlayers(list);
     }
 
+
     // Local player typed a chat line: broadcast to peers and echo it locally (SendEvent has no
     // loopback, so we won't receive our own copy).
     private void OnLocalChatSubmit(string text)
@@ -1893,6 +1903,139 @@ public class ModManager : IDisposable
     private void OnHubChatReceived(string senderName, string text)
     {
         _voteUI?.AddChatMessage(senderName, text);
+        _voteUI?.ShowToast(senderName, text);
+    }
+
+    // Repurpose the main menu's novelty "Click Me" button to open the hub. We DISCONNECT its
+    // vanilla pressed handler (the click counter) first, so it only opens the hub instead of
+    // counting. Re-hooks when the menu rebuilds (new button instance after returning from a game).
+    private BaseButton? _hookedClickMe;
+    private bool _dumpedButtons;
+    private void HookClickMeToHub()
+    {
+        if (_tree == null || _voteUI == null) return;
+        var btn = FindClickMeButton(_tree.Root);
+        if (btn == null)
+        {
+            // One-time diagnostic so we can see the real button structure if the match misses.
+            if (!_dumpedButtons) { _dumpedButtons = true; DumpButtons(_tree.Root); }
+            return;
+        }
+        if (btn == _hookedClickMe) return;
+        // Drop the vanilla counter handler(s) so the button no longer just counts.
+        foreach (var conn in btn.GetSignalConnectionList(BaseButton.SignalName.Pressed))
+        {
+            try { btn.Disconnect(BaseButton.SignalName.Pressed, conn["callable"].AsCallable()); }
+            catch { /* leave anything we can't cleanly drop */ }
+        }
+        btn.Pressed += () => _voteUI?.Toggle();
+        _hookedClickMe = btn;
+        GD.Print($"[ModFramework] 'Click Me' repurposed to toggle the hub (button '{btn.Name}', counter disconnected)");
+    }
+
+    // The menu's "Click Me" button shows its label AND a separate click-count, so the visible
+    // "Click Me" text may sit on BaseButton.Text, a child Label, or just the node name — check all.
+    private static BaseButton? FindClickMeButton(Node node)
+    {
+        if (node is BaseButton bb && MentionsClickMe(bb)) return bb;
+        foreach (var c in node.GetChildren())
+        {
+            var r = FindClickMeButton(c);
+            if (r != null) return r;
+        }
+        return null;
+    }
+
+    private static bool MentionsClickMe(BaseButton bb)
+    {
+        if (bb is Button b && (b.Text ?? "").ToLowerInvariant().Contains("click me")) return true;
+        if (bb.Name.ToString().ToLowerInvariant().Replace("_", "").Replace(" ", "").Contains("clickme")) return true;
+        foreach (var c in bb.GetChildren())
+            if (c is Label l && (l.Text ?? "").ToLowerInvariant().Contains("click me")) return true;
+        return false;
+    }
+
+    private static void DumpButtons(Node node)
+    {
+        if (node is BaseButton bb)
+        {
+            var txt = bb is Button b ? b.Text : "";
+            var childLabels = "";
+            foreach (var c in bb.GetChildren())
+                if (c is Label l) childLabels += $" [lbl:'{l.Text}']";
+            GD.Print($"[ModFramework] button dump: name='{bb.Name}' type={bb.GetType().Name} text='{txt}'{childLabels}");
+        }
+        foreach (var c in node.GetChildren()) DumpButtons(c);
+    }
+
+    // Adds a "Chat" button to the in-game PAUSE menu, between Options and Main Menu, that toggles
+    // the hub. The pause menu is the only screen with a "Main Menu" button, so we locate that and
+    // insert right before it. Re-injects when the pause menu is rebuilt.
+    private BaseButton? _pauseHubButton;
+    private void HookPauseMenuButton()
+    {
+        if (_tree == null || _voteUI == null) return;
+        var mainMenuBtn = FindButtonByVisibleText(_tree.Root, "main menu");
+        if (mainMenuBtn == null) return;
+        var container = mainMenuBtn.GetParent();
+        if (container == null) return;
+        if (_pauseHubButton != null && Godot.GodotObject.IsInstanceValid(_pauseHubButton) && _pauseHubButton.GetParent() == container)
+            return; // already injected into the current pause menu
+
+        var donor = mainMenuBtn as Button;
+        // Insert a single "Chat" button immediately before "Main Menu": Options, Chat, Main Menu.
+        var chatBtn = MakePauseButton(donor, "ModFrameworkChatButton", "  Chat  ", () => _voteUI?.Toggle());
+        container.AddChild(chatBtn);
+        var idx = container.GetChildren().IndexOf(mainMenuBtn);
+        if (idx >= 0) container.MoveChild(chatBtn, idx);
+        _pauseHubButton = chatBtn;
+        GD.Print("[ModFramework] Hub 'Chat' button added to pause menu (before Main Menu)");
+    }
+
+    private static Button MakePauseButton(Button? donor, string name, string text, System.Action onPressed)
+    {
+        var btn = new Button { Name = name, Text = text };
+        if (donor != null)
+        {
+            btn.Theme = donor.Theme;
+            foreach (var s in new[] { "normal", "hover", "pressed" })
+                if (donor.HasThemeStylebox(s)) btn.AddThemeStyleboxOverride(s, donor.GetThemeStylebox(s));
+            var font = donor.GetThemeFont("font"); if (font != null) btn.AddThemeFontOverride("font", font);
+            var fsz = donor.GetThemeFontSize("font_size"); if (fsz > 0) btn.AddThemeFontSizeOverride("font_size", fsz);
+            btn.SizeFlagsHorizontal = donor.SizeFlagsHorizontal;
+            btn.SizeFlagsVertical = donor.SizeFlagsVertical;
+        }
+        btn.Pressed += () => onPressed();
+        return btn;
+    }
+
+    private static BaseButton? FindButtonByVisibleText(Node node, string needleLower)
+    {
+        if (node is BaseButton bb && ButtonShowsText(bb, needleLower)) return bb;
+        foreach (var c in node.GetChildren())
+        {
+            var r = FindButtonByVisibleText(c, needleLower);
+            if (r != null) return r;
+        }
+        return null;
+    }
+
+    private static bool ButtonShowsText(BaseButton bb, string needleLower)
+    {
+        if (bb is Button b && (b.Text ?? "").ToLowerInvariant().Contains(needleLower)) return true;
+        if (bb.Name.ToString().ToLowerInvariant().Replace("_", "").Replace(" ", "").Contains(needleLower.Replace(" ", "")))
+            return true;
+        return DescendantLabelContains(bb, needleLower);
+    }
+
+    private static bool DescendantLabelContains(Node n, string needleLower)
+    {
+        foreach (var c in n.GetChildren())
+        {
+            if (c is Label l && (l.Text ?? "").ToLowerInvariant().Contains(needleLower)) return true;
+            if (DescendantLabelContains(c, needleLower)) return true;
+        }
+        return false;
     }
 
     private void OnVoteResolved(string voteId, bool passed)

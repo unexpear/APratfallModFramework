@@ -43,13 +43,13 @@ If you want the safety gate / IL scanner / multiplayer-vote / per-mod helpers ad
     - [19.1 "How do I ...?"](#how-do-i-)
     - [19.2 Singletons (80)](#singletons-80)
     - [19.3 Static helper classes (22)](#static-helper-classes-22)
-    - [19.4 Configs & Settings (27)](#configs--settings-27)
+    - [19.4 Configs & Settings (28)](#configs--settings-28)
     - [19.5 Events you can subscribe to (11)](#events-you-can-subscribe-to-11)
     - [19.6 `GameplayTags.*` (42)](#gameplaytags-42)
-    - [19.7 `Constants.EventId*` (72)](#constantseventid-72)
+    - [19.7 `Constants.EventId*` (78)](#constantseventid-78)
     - [19.8 Entity hierarchy & `IEntity`](#entity-hierarchy--ientity)
-    - [19.9 `IComponent` implementors (204)](#icomponent-implementors-204)
-    - [19.10 Public interfaces (12)](#public-interfaces-12)
+    - [19.9 `IComponent` implementors (214)](#icomponent-implementors-214)
+    - [19.10 Public interfaces (13)](#public-interfaces-13)
     - [19.11 `res://` path conventions](#res-path-conventions)
     - [19.12 Save-coupled arrays — don't mutate](#save-coupled-arrays--dont-mutate)
 20. [Debugging & dev iteration](#debugging--dev-iteration)
@@ -243,12 +243,9 @@ Both routes above give you plain Godot `_Ready` / `_Process`. If you want to plu
 ```csharp
 using Godot;
 
-// ILifecycleHandler / LifecycleHelper / LifecycleUpdateType are in the global namespace.
+// ILifecycleHandler and LifecycleHelper are in the global namespace.
 public partial class MyComponent : Node, ILifecycleHandler   // partial: Godot's source generator requires it on Node subclasses
 {
-    // Gate the per-frame hooks: None / Update / PhysicUpdate / All  (note the spelling: "Physic", no 's').
-    public LifecycleUpdateType GetUpdateType() => LifecycleUpdateType.Update;
-
     // Required: Godot doesn't deliver _Notification to the script through interface
     // inheritance, so route it into the game's dispatcher yourself.
     public override void _Notification(int what) => LifecycleHelper.ProcessNotification(this, this, what);
@@ -256,17 +253,19 @@ public partial class MyComponent : Node, ILifecycleHandler   // partial: Godot's
     public void OnEnterTree() { }
     public void OnReady() { }
     public void OnStart() { }                   // once, after Ready, before the first OnUpdate
-    public void OnUpdate(double delta) { }       // only if GetUpdateType() includes Update
+    public void OnUpdate(double delta) { }       // runs every frame for a registered handler
     public void OnPhysicsUpdate(double delta) { }
     public void OnExitTree() { }
     public void OnDestroy() { }
 }
 ```
 
-What the one-liner buys you (Cecil-verified from `LifecycleHelper.ProcessNotification`): on `NotificationEnterTree` it registers the node as a component if it's an `IComponent`, then calls `OnEnterTree`; on Ready it registers the handler with `LifecycleManager.Instance` and calls `OnReady`; process / physics ticks call `OnUpdate` / `OnPhysicsUpdate`; on predelete it unregisters and calls `OnDestroy`. The whole switch is wrapped in a swallowing `try/catch` and short-circuits on `LifecycleHelper.BlockAllNotifications`.
+> **Build `24260516` (Parks & Recreation) refactored the lifecycle.** The per-frame gating is gone: `GetUpdateType()` and the `LifecycleUpdateType` enum (`None`/`Update`/`PhysicUpdate`/`All`) were **removed** — just implement `OnUpdate`/`OnPhysicsUpdate` (they run for every registered handler; leave them empty if you don't need ticks). `LifecycleManager` also moved to a queue-command model: `Register(ILifecycleHandler)` stays, but the public `GetHandlers()`/`Unregister()` are gone, so a host framework can no longer force-sweep a handler you leaked — **freeing your own node on teardown matters more than ever** (see the last bullet).
+
+What the one-liner buys you (Cecil-verified from `LifecycleHelper.ProcessNotification`): on `NotificationEnterTree` it registers the node as a component if it's an `IComponent`, then calls `OnEnterTree`; on Ready it registers the handler via `LifecycleManager.Instance.Register(...)` and calls `OnReady`; process / physics ticks call `OnUpdate` / `OnPhysicsUpdate`; on predelete it calls `OnDestroy` (the handler leaves the registry when the node frees — as of `24260516` there's no public `Unregister` to call). The whole switch is wrapped in a swallowing `try/catch` and short-circuits on `LifecycleHelper.BlockAllNotifications`.
 
 - **`OnStart` is the reason to bother** — there's no plain-Godot equivalent. It fires between Ready and the first tick, so it's the place to read state another node set up in *its* Ready/EnterTree (e.g. spawn an object and set fields in `OnReady`, then have a dependent component read them already-initialized in `OnStart`). Dev-confirmed: Robert / Tim, #mod-dev 2026-06-10.
-- **`GetUpdateType()` gates the per-frame hooks.** `None` gives you the one-shot hooks (`OnEnterTree`/`OnReady`/`OnStart`/`OnDestroy`) with **zero** per-frame cost; opt into `Update` / `PhysicUpdate` / `All` only when you need ticks.
+- **Per-frame gating was removed in `24260516`** (see the note above these bullets). On earlier builds you returned a `LifecycleUpdateType` from `GetUpdateType()` to opt into ticks; now `OnUpdate`/`OnPhysicsUpdate` fire for every registered handler, so leave those bodies empty when you don't need them.
 - **It's direct dispatch, not reflection** (dev-confirmed) — `ProcessNotification` is a plain `switch` on the notification id, so it's cheap.
 - **`partial` + the Godot source generator are still required** (same as the code route above), and the `_Notification` override is mandatory — Godot won't deliver notifications to an interface-inherited handler otherwise.
 - **If you `AddChild` it from code, free it on teardown.** A code-instantiated `ILifecycleHandler` stays registered with `LifecycleManager` until the node is freed — so a leaked one keeps getting `OnUpdate` ticks *after* your mod is disabled, and pins your `AssemblyLoadContext` (blocking unload). `QueueFree` it in `OnUnload` / `ModDestroy`. Nodes shipped in `root.tscn` are freed for you on disable, so this only bites the code (`AddChild`) route.
@@ -828,7 +827,7 @@ public static class ModEntry
 ```
 
 Gotchas:
-- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-72) table.
+- Other loaded-level ids you might care about: `EventIdRequestLevelLoad = 103`, `EventIdUnloadLevel = 120`, `EventIdSetLevelActive = 148`. See the full [`Constants.EventId*`](#constantseventid-78) table.
 - `Network.EventManager` is **the** subscription target — a **static property** that returns the live `NetworkEventManager` instance (use `Network.EventManager`, never `Network.Instance.EventManager`; every `Network.*` manager is a static accessor). The events fire whether you're host, client, or singleplayer.
 - The `NetworkFrameEvent` payload exposes `EventId`, `TargetId`, and `Data` (the raw bytes). For loaded-level you don't need the payload; for other events, call `ev.GetEvent<YourEventType>()` to deserialize.
 
@@ -1210,9 +1209,9 @@ This means:
 
 Audit of `Pratfall.dll` (2026-05-17 — Pratfall `1.1.0.R2943`) — 822 game types analyzed (skipping Epic / NAudio / SixLabors / ImGuiNET / K4os / MemoryPack / System / Steamworks namespaces). All numbers below are Cecil-verified.
 
-**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-22) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) wasn't re-audited in full at R2973 — but it has been since (see the full re-verification stamp below, current as of `23825910`).
+**Spot-check follow-up for `1.1.0.R2973` (2026-05-18 Workshop update):** the modding subsystem was substantially restructured (ModManager got `LoadAllModManifests`, `LoadedMods`, `OnModsLoaded`, `ModsDirectory`, `Setup`, new Workshop-loading methods; `GetModManifest` renamed `GetModManifestFromDirectory` AND privatized; `ModManifest` gained `IsSteamWorkshopMod` / `SteamWorkshopManifest` / `SteamWorkshopItem` properties). The 822-type total isn't materially different; specific ModManager API renames are flagged inline in the [ModManager bullet](#static-helper-classes-22) (Static helper classes section). The non-modding inventory (singletons, events, configs, components, GameplayTags, EventIds) wasn't re-audited in full at R2973 — but it has been since (see the full re-verification stamp below, current as of `24260516`).
 
-**Full catalog re-verification against build `23825910` (2026-06-20):** every catalog below was re-derived from the live DLL and matched name-for-name — 80 singletons / 22 static helpers / 27 configs / 11 events / 42 `GameplayTags` / all 72 `Constants.EventId*` name→value pairs / 204 `IComponent` implementors / 27 entities / 12 interfaces. The only mod-facing catalog change from `23751132` is the crash-reporting rewrite — `SentryHelper` was removed (replaced by the non-mod-facing `CrashReporter` / `SentryAutoInit`), dropping static helpers 23 → 22. (The build's other changes are internal method-body edits — crash-reporting, voice, and Steam network-backend iteration — none of which alter the documented surface; the framework binds 122/122 and rebuilds clean against `23825910`.) Earlier, the `23751132` networking refactor folded the `INetworkLobbyMember` interface **and** the per-backend lobby-member classes (`Steam`/`Eos`/`Offline NetworkLobbyMember`) into one `NetworkLobbyMember` class (`GetUserId()` → `GetLobbyMemberId()`); the multiplayer recipe + interface catalog reflect that, and the recipe surface (`NetworkLobbyManagerBase`, `NetworkLobbyMember`, `Network.LobbyManager`) was re-verified member-by-member. The native-loader IL (`ModManager::LoadPackage`, including the `SkipRootSceneLoad` gate added in `23696867`) and the mod-integrity gates (`SpeedrunManager` → `EnabledModCount`, `LocalizationManager` → `AllowUserLocalization`) were re-checked against the live method bodies, and every recipe code block re-compiles clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; the catalogs above hold as of `23825910`. (Prior full passes: `23751132` 2026-06-16, `23598402` 2026-06-09 — counts then 78 / 22 / 203 / 13.)
+**Full catalog re-verification against build `24260516` ("Parks & Recreation", 2026-07-18):** re-derived from the live DLL — **80** singletons / **22** static helpers / **28** configs / **11** events / **42** `GameplayTags` / **78** `Constants.EventId*` name→value pairs / **214** `IComponent` implementors / **25** entities / **13** interfaces. Deltas from `23825910`: **+1 config** (`FlagCosmeticConfig`); **+6 `EventId`s** (`EventIdTrashcanUsed`=170, `EventIdCrumbleDestroyStart`=171, `EventIdCrumbleDestroyEnd`=172, `EventIdGumballPop`=173, `EventIdFlagUpdate`=174, `EventIdApplyForceFromPickaxe`=175); **+10 `IComponent`** (Parks & Rec content — gumball / score-counter / goal-detector / color-balloon / trashcan / ball-machine / enemy-spawner / flag-pole components, net of removed voxel/mesh-SDF components); **+1 interface** (`IGodotDictSerializable`); **−2 entities** (voxel/SDF refactor). Singletons, static helpers, events, and `GameplayTags` are **unchanged**. **Lifecycle refactor:** `LifecycleManager` moved to a queue-command model — `GetUpdateType()` / `LifecycleUpdateType` and the public `GetHandlers()` / `Unregister()` were removed (`Register(ILifecycleHandler)` stays); the [`ILifecycleHandler` recipe](#a-third-way-to-run-code-ilifecyclehandler-and-onstart) was updated to match. **New typed network-event layer:** a generic `NetworkEvent<T>` family (`NetworkEventBool` / `Byte` / `Float` / `Int` / `String` / `Ulong` / `Vector3` / …, `INetworkEvent`, `NetworkEventManager`) now sits alongside the low-level `Constants.EventId*` ushort channel. The framework rebuilds clean and binds **123/123** (0 unresolved) against `24260516`. (Prior full pass against `23825910` (2026-06-20) matched **80 / 22 / 27 / 11 / 42 / 72 / 204 / 27 / 12**.) The only mod-facing catalog change from `23751132` is the crash-reporting rewrite — `SentryHelper` was removed (replaced by the non-mod-facing `CrashReporter` / `SentryAutoInit`), dropping static helpers 23 → 22. (The build's other changes are internal method-body edits — crash-reporting, voice, and Steam network-backend iteration — none of which alter the documented surface; the framework binds 122/122 and rebuilds clean against `23825910`.) Earlier, the `23751132` networking refactor folded the `INetworkLobbyMember` interface **and** the per-backend lobby-member classes (`Steam`/`Eos`/`Offline NetworkLobbyMember`) into one `NetworkLobbyMember` class (`GetUserId()` → `GetLobbyMemberId()`); the multiplayer recipe + interface catalog reflect that, and the recipe surface (`NetworkLobbyManagerBase`, `NetworkLobbyMember`, `Network.LobbyManager`) was re-verified member-by-member. The native-loader IL (`ModManager::LoadPackage`, including the `SkipRootSceneLoad` gate added in `23696867`) and the mod-integrity gates (`SpeedrunManager` → `EnabledModCount`, `LocalizationManager` → `AllowUserLocalization`) were re-checked against the live method bodies, and every recipe code block re-compiles clean against the live assemblies. Build-number stamps on individual claims record where each was *first* verified; the catalogs above hold as of `24260516`. (Prior full passes: `23751132` 2026-06-16, `23598402` 2026-06-09 — counts then 78 / 22 / 203 / 13.)
 
 This section is a **reference map**, not a tutorial. The goal: when you're mid-mod and you need to know "is there a manager for X?" or "what events fire when a player dies?", you should be able to find the answer here instead of disassembling `Pratfall.dll` yourself.
 
@@ -1225,7 +1224,7 @@ This section is a **reference map**, not a tutorial. The goal: when you're mid-m
 | Find the local player's components | `Player.LocalPlayer.<ComponentName>Component` — every component on `IEntity` is a property (see [Entity hierarchy](#entity-hierarchy--ientity)) |
 | React to a save | `SavegameManager.OnGameWillSave` / `OnGameDidSave` ([recipe](#recipe-persist-mod-data)) |
 | React to a player dying | Subscribe `GameEventBus.OnGameEventReceived` and compare `tag.Equals(GameplayTags.Stats_Gameplay_Player_Death)` ([recipe](#recipe-listen-to-game-events)) |
-| Send a custom network message | `Network.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — `T` must implement `INetworkEvent`; pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-72). `Network.EventManager` is a static property returning the live instance |
+| Send a custom network message | `Network.EventManager.SendEvent(ushort eventId, T evt, NetworkMessageSendOption opt, string name)` — `T` must implement `INetworkEvent`; pick an ID that doesn't collide with [`Constants.EventId*`](#constantseventid-78). `Network.EventManager` is a static property returning the live instance |
 | Add a HUD prompt ("Press [A]") | `ButtonPrompBarController.Instance.AddButtonPrompt(...)` ([recipe](#recipe-show-hud-button-hints)) |
 | Add an in-game language | Drop a JSON in `<userData>/localization/` ([recipe](#recipe-add-a-language)) |
 | Add a possible item drop | Mutate `DebugMappingManager.Instance.DropPools[i].Pool` ([recipe](#recipe-extend-a-drop-pool)) |
@@ -1368,7 +1367,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 - `SteamLeaderboardHelper` — Steam leaderboard wrappers
 - `TimeFormatHelper` — duration formatting
 
-### Configs & Settings (27)
+### Configs & Settings (28)
 
 `*Config` and `*Settings` types — game-tuning data. Most are read via `Manager.Instance.Config` or `Game.Config`. **Don't mutate at runtime** — they're either struct-by-value (changes don't stick) or save-coupled (mutating breaks other players' saves).
 
@@ -1384,7 +1383,7 @@ C# `static class` (no `Instance` — call methods directly via `<Name>.<Member>`
 | `PlayerColorsConfig` | `Player.SetupNetwork` | color list — save-coupled by index, don't mutate |
 | `PotGenerationConfig` | pot spawning | item-pot tuning |
 | `StatsConfig` | stat tracking | which stats are tracked |
-| `AvatarCosmeticConfig` + `CosmeticConfig` | character editor | unlockable cosmetics |
+| `AvatarCosmeticConfig` + `CosmeticConfig` + `FlagCosmeticConfig` | character editor / flag decor | unlockable cosmetics (`FlagCosmeticConfig` added in `24260516` for the Parks & Rec flag poles) |
 | `DlcConfig` | DLC manifest | per-DLC content map |
 | `EosConfig` / `SteamConfig` | platform helpers | platform credentials |
 | `AnalyticsConfig` | analytics | event-pipeline config |
@@ -1437,7 +1436,7 @@ There is **no `OnGameDidLoad`**. The game's `Setup(...)` accepts an `onGameDidLo
 **Harvestables** (ground-resource categories)
 - `Harvestable_Wood`, `Harvestable_Stone`, `Harvestable_Revive`
 
-### `Constants.EventId*` (72)
+### `Constants.EventId*` (78)
 
 `ushort` (System.UInt16) constants holding numeric event IDs (`Constants.EventIdJump = 129`). Used by `Network.EventManager.SendEvent(UInt16 eventId, T evt, NetworkMessageSendOption opt, string eventIdName)` for **low-level network messages** — the `eventIdName` parameter is a separate human-readable debug-name string, NOT the event id itself. Different system from `GameEventBus` / `GameplayTags` — don't mix them.
 
@@ -1481,6 +1480,11 @@ Sorted by numeric ID:
 | 133 | `EventIdChangeMaterialAt` | 169 | `EventIdAnswerVendingMachine` |
 | 134 | `EventIdChangeFloorAt` | 230 | `EventIdGameModeChanged` |
 | 135 | `EventIdSetUnconscious` | 231 | `EventIdSubmitSpeedrunTime` |
+| 170 | `EventIdTrashcanUsed` | 173 | `EventIdGumballPop` |
+| 171 | `EventIdCrumbleDestroyStart` | 174 | `EventIdFlagUpdate` |
+| 172 | `EventIdCrumbleDestroyEnd` | 175 | `EventIdApplyForceFromPickaxe` |
+
+**Added in `24260516`:** IDs 170–175 — `EventIdTrashcanUsed`, `EventIdCrumbleDestroyStart`, `EventIdCrumbleDestroyEnd`, `EventIdGumballPop`, `EventIdFlagUpdate`, `EventIdApplyForceFromPickaxe` (Parks & Recreation content).
 
 Used range: 100–169 contiguous, plus 230–231 for stats events. If you ship a custom network event, pick an ID outside those ranges to avoid collisions with future Pratfall releases.
 
@@ -1505,7 +1509,7 @@ Concrete entities (27 total, Cecil-counted):
 - Managers that are also entities: `CollisionSoundManager`, `CustomGameManager`, `DebugMappingManager`, `DynamicParticleManager`, `ExplosionManager`, `FreeFlyCamera`, `GameModeManager`, `GoldManager`, `HangDebuggerNode`, `HubItemManager`, `InstanceDrawManager`, `LevelManager`, `NetworkGroupManager`, `ScenePoolManager`, `SpeedrunManager`, `StoryPanelManager`, `WorldTextManager`
 - Cameras: `CharacterEditorCamera`, `SpectatorCamera`
 
-**`IEntity` exposes 205 properties** — 204 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
+**`IEntity` exposes 215 properties** — 214 component-accessors (one per `IComponent` subclass) plus `Components: Dictionary<int, IComponent>` for dynamic access. This is the killer feature for mods:
 
 ```csharp
 // Instead of GetComponent<PlayerHealthComponent>() everywhere, you just write:
@@ -1544,9 +1548,9 @@ EcsHelper.GetComponentRef(ref hp, playerNode, ComponentType.PlayerHealthComponen
 // have to know the type ids by hand. Use `player.PlayerHealthComponent` instead.
 ```
 
-**Use existing components — don't register your own into the component system.** The accessors and `ComponentType` enum are *generated code*: every entity class gets all 203 cached accessors stamped in at build time (e.g. `get_NetworkComponent` reads a `__internalNetworkComponent` backing field and calls `GetComponentRef` with the literal id `22084`), and the ids are auto-generated and sparse/hash-like (`EmissiveLightComponent = 135`, `PuppyColorComponent = 1083`, `NetworkComponent = 22084`). Mods can't run that generator, and minting your own `ComponentType` value risks colliding with a current or *future* game id. Dev-confirmed (Robert, #mod-dev 2026-06-10): it's easier not to use their component system for **adding** components — "obviously you can use the `RigidBody3DEntity` for example and existing components". For custom behavior, attach plain Godot nodes (`AddChild` from `ModInit`, or ship them in your scene — see [Two ways to run a node](#two-ways-to-run-a-node-scene-roottscn-vs-code-new--addchild), or [hook the game's lifecycle](#a-third-way-to-run-code-ilifecyclehandler-and-onstart) for `OnStart`/ordered ticks) and read game state through the existing accessors.
+**Use existing components — don't register your own into the component system.** The accessors and `ComponentType` enum are *generated code*: every entity class gets all 214 cached accessors stamped in at build time (e.g. `get_NetworkComponent` reads a `__internalNetworkComponent` backing field and calls `GetComponentRef` with the literal id `22084`), and the ids are auto-generated and sparse/hash-like (`EmissiveLightComponent = 135`, `PuppyColorComponent = 1083`, `NetworkComponent = 22084`). Mods can't run that generator, and minting your own `ComponentType` value risks colliding with a current or *future* game id. Dev-confirmed (Robert, #mod-dev 2026-06-10): it's easier not to use their component system for **adding** components — "obviously you can use the `RigidBody3DEntity` for example and existing components". For custom behavior, attach plain Godot nodes (`AddChild` from `ModInit`, or ship them in your scene — see [Two ways to run a node](#two-ways-to-run-a-node-scene-roottscn-vs-code-new--addchild), or [hook the game's lifecycle](#a-third-way-to-run-code-ilifecyclehandler-and-onstart) for `OnStart`/ordered ticks) and read game state through the existing accessors.
 
-### `IComponent` implementors (204)
+### `IComponent` implementors (214)
 
 The components you might want to read/mutate on a `Player` or other entity. Categorized by name prefix:
 
@@ -1576,7 +1580,7 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 
 **Explosion / projectile (5)**: `ExplosionComponent`, `ExplosionInstanceComponent`, `ExplosionReceiverComponent`, `ProjectileRagdollComponent`, `SpawnGrenadesOnExplosionComponent`.
 
-**Voxel / chunk (5)**: `ChunkEntityComponent`, `ChunkLoaderComponent`, `ChunkPhysicsObjectComponent`, `VoxelFieldComponent`, `VoxelFieldInstance`.
+**Voxel / chunk (3)**: `ChunkEntityComponent`, `ChunkLoaderComponent`, `ChunkPhysicsObjectComponent`. (`VoxelFieldComponent` / `VoxelFieldInstance` were **removed** in `24260516`, along with the internal mesh-SDF types.)
 
 **Procedural / world (11)**: `BiomeFlagPoleComponent`, `ChangeLightOverTimeComponent`, `ChangeMaterialContinuouslyComponent`, `CloudRotationComponent`, `DistanceLightComponent`, `EmissiveLightComponent`, `FlickerLightSizeComponent`, `LightBlinkComponent`, `ProceduralCaveComponent`, `WorldEnvironmentBlendComponent`, `WorldEnvironmentSettingsComponent`.
 
@@ -1586,16 +1590,19 @@ The components you might want to read/mutate on a `Player` or other entity. Cate
 
 **Compatibility renderer (4)** — drive visual tweaks off the compatibility-renderer fallback path: `DisableVisibilityOnCompatibilityRendererComponent`, `IncreaseLightIntensityOnCompatibilityRendererComponent`, `IncreaseParticlesOnCompatibilityRendererComponent`, `SetShaderParamOnCompatibilityRendererComponent`.
 
+**Parks & Recreation content (added in `24260516`)** — new interactables + systems: `InteractableGumballComponent`, `PlayerGumballComponent`, `InteractableColorBalloonComponent`, `InteractableScoreCounterComponent`, `InteractableScoreCounterRadialComponent`, `DepthScoreComponent`, `GoalDetectorComponent`, `InteractableTrashcanComponent`, `TrashableComponent`, `BallMachineComponent`, `BallMachineSpawnedComponent`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `DespawnWhenTooFarAwayComponent`, `DestroyWhenOutOfBoundsComponent`. Net **+10** vs `23825910` (204 → 214) after the removed voxel / mesh-SDF components.
+
 **Lifecycle / spawn (11)**: `BossHealthComponent`, `BuriedMineComponent`, `CheckpointStatueComponent`, `DespawnWhenTooFarAwayComponent`, `EnableInteractableOnDugOut`, `EnemySpawnerComponent`, `FlagPoleItemSpawnComponent`, `PickupItemOnDeathComponent`, `SpawnEntityOnDeathComponent`, `SpawnGoldOnDeathComponent`, `SpawnMeshOnBounceComponent`.
 
 **Misc / debug (44)** — everything that didn't fit a tighter category: `CoreDamageCrackComponent`, `CoreDeathComponent`, `CrownFloatComponent`, `DepthScoreComponent`, `DiggingMineComponent`, `DogBarkComponent`, `EmoteComponent`, `GamemodeSignComponent`, `GameOverOnAllPlayersDeadComponent`, `GameplayTagComponent`, `GenerateBlobOnContactComponent`, `GenerateBridgeTrajectoryComponent`, `GenerateSpikeOnBounceComponent`, `GoldCoinComponent`, `HealOnKillComponent`, `HitPointsComponent`, `HudMarkerComponent`, `IconComponent`, `ImposterReplaceComponent`, `InteractionComponent`, `InventoryComponent`, `InverseExplosionSnakeComponent`, `LineComponent`, `LoadLevelVolumeComponent`, `LootEffectComponent`, `NoFallDamageAreaComponent`, `ParticleComponent`, `PickaxeHittableComponent`, `PuppyColorComponent`, `RandomBarkComponent`, `RandomScaleSeedPositionComponent`, `ReviveOnKillComponent`, `ScreenshotComponent`, `ShakeComponent`, `StickyComponent`, `StunAreaComponent`, `TestComponent`, **`ThrowFlareComponent`**, `TrackerHatNumberComponent`, `TreasureComponent`, `WaterBubbleComponent`, `WinGameOnDeathComponent`, `ZiplineComponent`, `ZiplineUserComponent`.
 
-### Public interfaces (12)
+### Public interfaces (13)
 
-- `IComponent` — every component implements this. 204 implementors (see above).
-- `IEntity` — every entity implements this. 27 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 204 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IComponent` — every component implements this. 214 implementors (see above).
+- `IEntity` — every entity implements this. 25 implementors (see [Entity hierarchy](#entity-hierarchy--ientity)). Exposes 214 component-accessor properties (one per `IComponent` subclass) plus a `Components` dictionary.
+- `IGodotDictSerializable` — added in build `24260516`; marks types the game serializes to/from a Godot `Dictionary` (save/network payloads). Not something most mods implement directly.
 - `IGameEvent` — the payload type for `GameEventBus.SendEvent<T>(GameplayTag, T)`. Concrete event data lives in `GameEvent<T1>` … `GameEvent<T1,T2,T3,T4,T5,T6>` generic carrier types (just `(Value1, Value2, ...)` tuples) — Pratfall doesn't ship named per-event POCOs.
-- `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`).
+- `INetworkEvent` — payload type for `Network.EventManager.SendEvent`. Implementors are the per-event records (e.g. `CustomGameManager.CustomGameSettingsNetworkEvent`). Build `24260516` added a generic `NetworkEvent<T>` family (`NetworkEventBool` / `Byte` / `Float` / `Int` / `String` / `Ulong` / `Vector3` / …) implementing it for typed single-value messages, alongside your own custom structs.
 - `INetworkMessage` — payload base for the low-level **message** layer (`NetworkMessageManager`). A sibling of `INetworkEvent`, **not** its base: both extend `ISerializationCallbackReceiver`.
 - `INetworkLobby` — multiplayer-lobby abstraction (Steam vs EOS hide behind it). *(The `INetworkLobbyMember` interface was removed in build `23751132`; members are now the `NetworkLobbyMember` class.)*
 - `INetworkVoicePlayer` — voice-chat abstraction.

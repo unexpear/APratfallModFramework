@@ -266,21 +266,28 @@ public class ModAssemblyLoader
         {
             var mgr = LifecycleManager.Instance;
             if (mgr == null) return;
-            var live = mgr.GetHandlers();
-            if (live == null) return;
+
+            // Build 24260516 ("Gumballs & Glory") refactored LifecycleManager to a queue-command
+            // model and dropped GetHandlers()/Unregister(). Reflect for them so the framework still
+            // compiles + loads: on builds that expose them we do the full leaked-handler sweep; on
+            // newer builds this degrades to a no-op (hardening skipped, but mod unload still proceeds).
+            var mt = mgr.GetType();
+            if (mt.GetMethod("GetHandlers", System.Type.EmptyTypes)?.Invoke(mgr, null)
+                is not System.Collections.IEnumerable live) return;
+            var unregister = mt.GetMethod("Unregister", new[] { typeof(ILifecycleHandler) });
 
             // Snapshot first — Unregister mutates the manager's live list.
             var doomed = new List<ILifecycleHandler>();
-            foreach (var h in live)
+            foreach (var o in live)
             {
-                if (h == null) continue;
+                if (o is not ILifecycleHandler h) continue;
                 if (AssemblyLoadContext.GetLoadContext(h.GetType().Assembly) == ctx)
                     doomed.Add(h);
             }
 
             foreach (var h in doomed)
             {
-                try { mgr.Unregister(h); } catch { /* best-effort */ }
+                try { unregister?.Invoke(mgr, new object[] { h }); } catch { /* best-effort */ }
                 if (h is Node node && GodotObject.IsInstanceValid(node))
                     node.QueueFree();
             }
